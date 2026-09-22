@@ -1,0 +1,32 @@
+{
+  "name": "teapilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small JevRouter-controlled personal agent host",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "doctor": "tsx src/cli.ts doctor",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.87.0",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "dotenv": "17.3.1",
+    "jevrouter": "git+https://github.com/BillionsBobby/JevRouter.git#f944acb6530621bced023352e2358a63218bf4d9",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

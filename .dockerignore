@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+.env
+.env.*
+.teapilot
+.jevrouter
+config/models.json
+config/policy.json

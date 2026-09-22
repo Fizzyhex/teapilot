@@ -1,0 +1,41 @@
+{
+  "local": {
+    "enabled": true,
+    "id": "local-model",
+    "provider": "local",
+    "baseUrl": "http://127.0.0.1:8080/v1",
+    "apiKeyEnv": "LOCAL_API_KEY",
+    "contextTokens": 32768,
+    "maxOutputTokens": 2048,
+    "inputUsdPerMillion": 0,
+    "outputUsdPerMillion": 0,
+    "vision": false,
+    "toolCalling": true
+  },
+  "economy": {
+    "enabled": false,
+    "id": "replace-with-your-economy-model",
+    "provider": "openrouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "contextTokens": 32768,
+    "maxOutputTokens": 2048,
+    "inputUsdPerMillion": 0,
+    "outputUsdPerMillion": 0,
+    "vision": false,
+    "toolCalling": true
+  },
+  "strong": {
+    "enabled": false,
+    "id": "replace-with-your-strong-model",
+    "provider": "openrouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "contextTokens": 65536,
+    "maxOutputTokens": 4096,
+    "inputUsdPerMillion": 0,
+    "outputUsdPerMillion": 0,
+    "vision": false,
+    "toolCalling": true
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.teapilot/
+.jevrouter/
+config/models.json
+config/policy.json
+coverage/
+*.log
