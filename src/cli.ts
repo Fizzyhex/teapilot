@@ -7,6 +7,7 @@ import { doctor } from './diagnostics.js';
 import { setup } from './setup/index.js';
 import { terminalUI } from './setup/terminal.js';
 import type { Approve } from './execution/policy.js';
+import { serve } from './integration/service.js';
 
 const help = `teapilot — local and hosted personal agent
 
@@ -14,6 +15,7 @@ teapilot setup
 teapilot ask "Explain dependency injection"
 teapilot code --cwd <repository> "Fix the failing tests"
 teapilot doctor [--live]
+teapilot serve --stdio
 
 Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json
          --correction TEXT  --help
@@ -32,11 +34,14 @@ async function main(): Promise<void> {
     cwd: { type: 'string', default: process.cwd() }, 'config-dir': { type: 'string' },
     prompt: { type: 'string' }, correction: { type: 'string' }, web: { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
     live: { type: 'boolean' }, 'non-interactive': { type: 'boolean' }, endpoint: { type: 'string' }, model: { type: 'string' }, 'context-tokens': { type: 'string' },
+    stdio: { type: 'boolean' },
   } });
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
-  const command = ['setup', 'doctor', 'ask', 'code'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  const command = ['setup', 'doctor', 'ask', 'code', 'serve'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  if (command === 'serve') { if (!values.stdio) throw new Error('serve requires --stdio'); await serve(); return; }
+  if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
   if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);

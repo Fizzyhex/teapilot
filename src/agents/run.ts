@@ -1,7 +1,9 @@
 import { Agent } from '@earendil-works/pi-agent-core';
-import { Type } from '@earendil-works/pi-ai';
+import { Type, type Message } from '@earendil-works/pi-ai';
+import { emptyUsage } from '../integration/inference.js';
 import type { Config, Tier, Workload } from '../config.js';
-import { ExecutionPolicy, type Approve } from '../execution/policy.js';
+import { ExecutionPolicy, type Approve, type BeforeMutation } from '../execution/policy.js';
+import { StreamRedactor, type EventSink, type ConversationTurn } from '../integration/events.js';
 import type { SpendGovernor } from '../inference/budget.js';
 import { guardedStream, piModel, type InferenceState } from '../inference/providers.js';
 import { Evidence, type EscalationReason } from '../routing/escalation.js';
@@ -12,6 +14,7 @@ import { coder } from './coder.js';
 export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
   budget: SpendGovernor; telemetry: Telemetry; approve: Approve; signal?: AbortSignal;
+  history?: ConversationTurn[]; onEvent?: EventSink; beforeMutation?: BeforeMutation;
 }
 export interface AttemptResult {
   success: boolean; text: string; reason?: EscalationReason;
@@ -22,7 +25,7 @@ export interface AttemptResult {
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const { config, tier, telemetry } = input;
   const evidence = new Evidence(config.policy.escalation);
-  const policy = new ExecutionPolicy(input.cwd, config, input.approve);
+  const policy = new ExecutionPolicy(input.cwd, config, input.approve, input.beforeMutation);
   const setup = input.workload === 'coder' ? coder(config, policy) : ask(config, input.web);
   if (input.workload === 'coder' && input.web) {
     setup.tools.push(...ask(config, true).tools);
@@ -40,8 +43,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
   });
   if (!config.models[tier].toolCalling && setup.tools.length) throw new Error('Selected model cannot use the required tools');
+  const history: Message[] = (input.history ?? []).flatMap(turn => [
+    { role: 'user' as const, content: turn.user, timestamp: Date.now() },
+    { role: 'assistant' as const, content: [{ type: 'text' as const, text: turn.assistant }], api: 'openai-completions' as const, provider: config.models[tier].provider, model: config.models[tier].id, timestamp: Date.now(), usage: emptyUsage(), stopReason: 'stop' as const },
+  ]);
   const agent = new Agent({
-    initialState: { model: piModel(config.models[tier]), systemPrompt: setup.systemPrompt, tools: setup.tools, thinkingLevel: 'off' },
+    initialState: { model: piModel(config.models[tier]), systemPrompt: setup.systemPrompt, tools: setup.tools, thinkingLevel: 'off', messages: history },
     streamFn: guardedStream(config, tier, input.budget, telemetry, inference),
     toolExecution: 'sequential',
     beforeToolCall: async () => {
@@ -55,6 +62,18 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       return undefined;
     },
     finishTurn: () => policy.denied || evidence.reason || toolLimit || timeout || input.signal?.aborted ? { action: 'end' } : undefined,
+  });
+  const redactor = new StreamRedactor([input.config.router.apiKey ?? '', ...Object.values(input.config.secrets).map(value => value ?? '')]);
+  agent.subscribe(event => {
+    if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
+      const text = redactor.push(event.assistantMessageEvent.delta);
+      if (text) input.onEvent?.({ type: 'text', text });
+    } else if (event.type === 'message_end' && event.message.role === 'assistant') {
+      const text = redactor.push('', true); if (text) input.onEvent?.({ type: 'text', text });
+      input.onEvent?.({ type: 'message_end' });
+    } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+      input.onEvent?.({ type: event.type, tool: event.toolName, ...('isError' in event ? { isError: event.isError } : {}) });
+    }
   });
   const timer = setTimeout(() => { timeout = true; agent.abort(); }, config.policy.limits.attemptTimeoutMs);
   const cancel = () => agent.abort();

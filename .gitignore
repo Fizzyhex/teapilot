@@ -13,3 +13,6 @@ config/policy.json
 *.tgz
 coverage/
 *.log
+*.vsix
+extensions/vscode/runtime/
+extensions/vscode/.vscode-test/

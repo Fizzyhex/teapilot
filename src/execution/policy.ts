@@ -5,6 +5,7 @@ import type { Config } from '../config.js';
 
 export interface Approval { kind: 'route' | 'shell' | 'overwrite'; summary: string; details?: string; signal?: AbortSignal }
 export type Approve = (approval: Approval) => Promise<boolean>;
+export type BeforeMutation = (action: { tool: string; path?: string }, signal?: AbortSignal) => Promise<void>;
 export class PolicyDenied extends Error {}
 
 export function cleanChildEnvironment(env = process.env): NodeJS.ProcessEnv {
@@ -26,7 +27,7 @@ export function automaticCommand(command: string, trusted: string[]): boolean {
 
 export class ExecutionPolicy {
   denied = false;
-  constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve) {}
+  constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation) {}
   async path(path: string, mutation: boolean): Promise<string> {
     if (!path || path.includes('\0') || path.startsWith('~')) throw new PolicyDenied('Use repository-relative paths');
     const target = resolve(this.root, path);
@@ -64,6 +65,7 @@ export class ExecutionPolicy {
         const mutation = tool.name === 'write' || tool.name === 'edit';
         const permission = shell ? 'repository.shell' : mutation ? 'repository.write' : 'repository.read';
         if (!this.config.policy.permissions.includes(permission)) throw new PolicyDenied(`Missing ${permission} permission`);
+        if (shell) await this.beforeMutation?.({ tool: tool.name }, signal);
         if (shell) {
           const command = String(args.command);
           if (!automaticCommand(command, this.config.policy.execution.trustedCommands)) {
@@ -77,6 +79,7 @@ export class ExecutionPolicy {
           args.timeout = Math.min(typeof args.timeout === 'number' ? args.timeout : Infinity, this.config.policy.limits.commandTimeoutSeconds);
         } else {
           const target = await this.path(String(args.path), mutation);
+          if (mutation) await this.beforeMutation?.({ tool: tool.name, path: target }, signal);
           if (mutation) {
             const old = await readFile(target, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
             const removed = tool.name === 'write' ? old : String(args.oldText ?? '');

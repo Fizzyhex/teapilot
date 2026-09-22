@@ -1,9 +1,10 @@
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RouteResult } from 'jevrouter';
+import type { EventSink } from '../integration/events.js';
 
 export class Telemetry {
-  constructor(readonly directory: string, readonly requestId: string, private readonly secrets: string[] = []) {}
+  constructor(readonly directory: string, readonly requestId: string, private readonly secrets: string[] = [], private readonly sink?: EventSink) {}
   redact(value: string): string {
     for (const secret of this.secrets.filter(Boolean).sort((a, b) => b.length - a.length)) value = value.split(secret).join('[REDACTED]');
     return value.replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]');
@@ -11,6 +12,7 @@ export class Telemetry {
   async event(type: string, fields: Record<string, unknown>): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     await appendFile(join(this.directory, 'outcomes.jsonl'), this.redact(JSON.stringify({ at: new Date().toISOString(), requestId: this.requestId, type, ...fields })) + '\n', { mode: 0o600 });
+    this.sink?.(JSON.parse(this.redact(JSON.stringify({ type, requestId: this.requestId, ...fields }))));
   }
   async receipt(result: RouteResult): Promise<string> {
     // The SDK returns the receipt but only its CLI saves it. Persist that exact

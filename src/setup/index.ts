@@ -8,6 +8,10 @@ import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js
 import type { SetupUI } from './terminal.js';
 
 export interface SetupOptions { directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number }
+export interface CredentialStorage {
+  load(): Promise<Record<string, string>>;
+  save(credentials: Record<string, string>): Promise<void>;
+}
 
 async function privateWrite(path: string, contents: string, signal: AbortSignal): Promise<void> {
   const handle = await open(path, 'wx', 0o600);
@@ -55,7 +59,7 @@ async function numberInput(ui: SetupUI, label: string, fallback: number | undefi
   }
 }
 
-export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSignal): Promise<boolean> {
+export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSignal, credentials?: CredentialStorage): Promise<boolean> {
   if (options.nonInteractive && (!options.endpoint || !options.model || !Number.isInteger(options.contextTokens))) throw new Error('Unattended setup requires --endpoint, --model, and integer --context-tokens.');
   const directory = resolve(options.directory ?? userConfigDir());
   const hasConfiguration = await exists(resolve(directory, '.env'));
@@ -63,13 +67,14 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     if (options.nonInteractive) throw new Error('Configuration already exists. Rerun teapilot setup interactively to retain or replace it.');
     if (await ui.choose(`Configuration exists at ${directory}.`, ['Keep settings and verify', 'Reconfigure (confirm before saving)']) === 0) {
       const { doctor } = await import('../diagnostics.js');
-      return doctor(await loadConfig(directory, { ...process.env }), process.cwd(), { live: true, signal, consent: ui.confirm, log: ui.log });
+      return doctor(await loadConfig(directory, { ...process.env, ...await credentials?.load() }), process.cwd(), { live: true, signal, consent: ui.confirm, log: ui.log });
     }
   }
   // Start from existing policy/settings when available. Environment is cloned so
   // setup never mutates the running process or leaks secrets to installer children.
   let savedEnv: Record<string, string> = {};
   if (hasConfiguration) savedEnv = parse(await readFile(resolve(directory, '.env')));
+  Object.assign(savedEnv, await credentials?.load());
   const config = await loadConfig(directory, { ...savedEnv });
   if (process.env.TEAPILOT_STATE_DIR) config.stateDir = resolve(process.env.TEAPILOT_STATE_DIR);
   const choice = options.nonInteractive ? 1 : await ui.choose('Choose execution setup:', ['Local Ollama (no API key or inference charges)', 'Existing OpenAI-compatible local endpoint', 'Cloud model (paid API key)']);
@@ -125,6 +130,11 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
   ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
   if (hasConfiguration && !await ui.confirm('Replace the active settings? Previous configuration files will be retained.')) return false;
+  if (credentials) {
+    const keys = new Set([...Object.values(config.models).map(model => model.apiKeyEnv), 'JEV_API_KEY', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY']);
+    await credentials.save(Object.fromEntries(Object.entries(env).filter(([key]) => keys.has(key))));
+    env = Object.fromEntries(Object.entries(env).filter(([key]) => !keys.has(key)));
+  }
   await saveConfiguration(directory, config, env, signal);
   ui.log(`Configuration saved in ${directory}. Environment variables still override saved settings.`);
   ui.log('Next: teapilot ask "Explain dependency injection"');

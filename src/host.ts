@@ -4,23 +4,26 @@ import { join } from 'node:path';
 import { defaultPolicy, JevRouter, type JevProvider } from 'jevrouter';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type Workload } from './config.js';
-import type { Approve } from './execution/policy.js';
+import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
+import { prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
 import { lockState, SpendGovernor } from './inference/budget.js';
 import { budgetedJev, localAvailable } from './inference/providers.js';
 import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[] }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
+  check?: 'passed' | 'failed'; models?: string[];
 }
 export interface HostDependencies {
   approve: Approve;
   provider?: JevProvider;
   localProbe?: () => Promise<boolean>;
   onProgress?: (message: string) => void;
+  onEvent?: EventSink; beforeMutation?: BeforeMutation;
 }
 
 export async function runHost(config: Config, request: HostRequest, dependencies: HostDependencies): Promise<HostResult> {
@@ -29,16 +32,22 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   if (!prompt || prompt.length + (request.correction?.length ?? 0) > config.policy.limits.maxPromptChars) throw new Error(`Prompt must contain 1–${config.policy.limits.maxPromptChars} characters`);
   const cwd = await realpath(request.cwd);
   if (!(await stat(cwd)).isDirectory()) throw new Error('Working directory is not a directory');
+  const contextPolicy = new ExecutionPolicy(cwd, config, dependencies.approve);
+  for (const context of request.context ?? []) if (context.path) await contextPolicy.path(context.path, false);
+  const conversation = prepareConversation(prompt + (request.correction ? `\nUser correction:\n${request.correction}` : ''), request.context ?? [], request.history ?? [], config.policy.limits.maxPromptChars);
+  if (conversation.omitted) dependencies.onEvent?.({ type: 'history_omitted', turns: conversation.omitted });
   if (request.web && (!config.searchUrl || !config.policy.permissions.includes('web.search'))) throw new Error('--web requires SEARCH_BASE_URL and web.search permission');
   const unlock = await lockState(config.stateDir);
   const requestId = randomUUID();
-  const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value)));
+  const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value)), dependencies.onEvent);
   const budget = new SpendGovernor(join(config.stateDir, 'spend.jsonl'), requestId, config.policy.budget);
   const receipts: string[] = [];
   let attempts = 0;
   let selected: string | undefined;
+  let check: 'passed' | 'failed' | undefined;
+  const models: string[] = [];
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
-    const result = { requestId, success, status, text: telemetry.redact(text), capability: selected, spentUsd: budget.spent().request, receipts, attempts };
+    const result = { requestId, success, status, text: telemetry.redact(text), capability: selected, spentUsd: budget.spent().request, receipts, attempts, check, models };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
   };
@@ -50,7 +59,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     const localOnline = await (dependencies.localProbe ?? (() => localAvailable(config)))();
     let scope: { workload: Workload; tier: Tier } | undefined;
     let previous: AttemptResult | undefined;
-    const basePrompt = prompt + (request.correction ? `\nUser correction to previous work:\n${request.correction}` : '');
+    const basePrompt = conversation.current;
     for (let index = 0; index <= config.policy.escalation.maxEscalations; index++) {
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
       const candidates = capabilities(config, budget, localOnline, scope);
@@ -87,8 +96,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const [workload, tier] = selected.split('.') as [Workload, Tier];
       dependencies.onProgress?.(`Executing ${selected} using ${config.models[tier].id}.`);
       attempts++;
+      models.push(config.models[tier].id);
+      dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: config.models[tier].id, tier });
       previous = await runAttempt({
         config, workload, tier, cwd, web: Boolean(request.web), budget, telemetry,
+        history: conversation.history, onEvent: dependencies.onEvent, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
           const approved = await dependencies.approve(approval);
           await telemetry.event('approval', { kind: approval.kind, approved });
@@ -97,6 +109,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         signal: request.signal,
         prompt: basePrompt + (previous ? `\nPrevious cheaper attempt stopped: ${previous.reason}. Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
       });
+      check = previous.check;
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check });
       if (previous.success) return await finish(true, 'completed', previous.text);
       if (!previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {

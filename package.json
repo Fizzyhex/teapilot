@@ -1,8 +1,9 @@
 {
   "name": "teapilot",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "bin": { "teapilot": "dist/cli.js" },
-  "files": ["dist", "config/*.example.json", "README.md", "THIRD_PARTY_NOTICES.md"],
+  "files": ["dist", "config/*.example.json", "README.md", "usage/*.md", "THIRD_PARTY_NOTICES.md", "LICENSE"],
   "bundleDependencies": ["jevrouter"],
   "repository": { "type": "git", "url": "git+https://github.com/fizzyhex/teapilot.git" },
   "description": "A small JevRouter-controlled personal agent host",

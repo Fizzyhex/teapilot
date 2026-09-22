@@ -89,6 +89,7 @@ function observeBilling(response: Response, observed: { cost?: number; model?: s
 
 export function guardedStream(
   config: Config, tier: Tier, governor: SpendGovernor, telemetry: Telemetry, state: InferenceState,
+  controls?: { toolChoice?: 'auto' | 'required' | 'none'; maxOutputTokens?: number },
 ): StreamFn {
   const spec = config.models[tier];
   const model = piModel(spec);
@@ -105,7 +106,8 @@ export function guardedStream(
       try {
         const stream = openAIStream(model, context, {
           apiKey: config.secrets[tier] || 'local-no-key',
-          signal, maxTokens: spec.maxOutputTokens, maxRetries: 0,
+          signal, maxTokens: Math.min(controls?.maxOutputTokens ?? spec.maxOutputTokens, spec.maxOutputTokens), maxRetries: 0,
+          toolChoice: controls?.toolChoice,
           temperature: spec.temperature,
           timeoutMs: config.policy.limits.requestTimeoutMs,
           onPayload: payload => spec.provider === 'openrouter' ? {
