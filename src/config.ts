@@ -1,6 +1,7 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { config as dotenv } from 'dotenv';
 import { z } from 'zod';
 
@@ -64,6 +65,7 @@ export const policySchema = z.object({
 }).strict();
 export type Policy = z.infer<typeof policySchema>;
 export interface Config {
+  routingMode?: 'hosted' | 'direct';
   models: z.infer<typeof modelsSchema>;
   policy: Policy;
   stateDir: string;
@@ -76,10 +78,34 @@ async function readConfig(path: string): Promise<unknown> {
   return JSON.parse((await readFile(path, 'utf8')).replace(/^\uFEFF/, ''));
 }
 
-export async function loadConfig(root = process.cwd(), env = process.env): Promise<Config> {
+export const templateDir = fileURLToPath(new URL('../config/', import.meta.url));
+export const userConfigDir = (): string => resolve(homedir(), '.teapilot/config');
+export async function exists(path: string): Promise<boolean> {
+  try { await access(path); return true; } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+export async function configDirectory(explicit?: string, cwd = process.cwd(), personal = userConfigDir()): Promise<string> {
+  if (explicit) return resolve(explicit);
+  for (const marker of ['.env', 'config/models.json', 'config/models.example.json']) {
+    if (await exists(resolve(cwd, marker))) return cwd;
+  }
+  return personal;
+}
+
+export async function loadConfig(root?: string, env = process.env): Promise<Config> {
+  root = await configDirectory(root);
   dotenv({ path: resolve(root, '.env'), processEnv: env, quiet: true });
-  const models = modelsSchema.parse(await readConfig(resolve(root, env.TEAPILOT_MODELS_FILE || 'config/models.example.json')));
-  const policy = policySchema.parse(await readConfig(resolve(root, env.TEAPILOT_POLICY_FILE || 'config/policy.example.json')));
+  const select = async (override: string | undefined, name: string): Promise<string> => {
+    if (override) return resolve(root, override);
+    for (const path of [`${name}.json`, `config/${name}.json`, `config/${name}.example.json`]) {
+      if (await exists(resolve(root, path))) return resolve(root, path);
+    }
+    return resolve(templateDir, `${name}.example.json`);
+  };
+  const models = modelsSchema.parse(await readConfig(await select(env.TEAPILOT_MODELS_FILE, 'models')));
+  const policy = policySchema.parse(await readConfig(await select(env.TEAPILOT_POLICY_FILE, 'policy')));
   for (const tier of tiers) {
     const prefix = tier.toUpperCase();
     const model = models[tier];
@@ -98,6 +124,7 @@ export async function loadConfig(root = process.cwd(), env = process.env): Promi
   if (env.DAILY_BUDGET_USD) policy.budget.dailyUsd = money.parse(Number(env.DAILY_BUDGET_USD));
   const provider = z.enum(['typesafe', 'openrouter']).parse(env.JEV_PROVIDER || 'typesafe');
   return {
+    routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'),
     models, policy,
     stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')),
     router: {

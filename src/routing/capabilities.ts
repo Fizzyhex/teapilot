@@ -12,7 +12,7 @@ export function capabilities(config: Config, budget: SpendGovernor, localOnline:
     else if (tier === 'local' && !localOnline) reason = 'Local endpoint unavailable';
     else if (tier !== 'local' && !config.secrets[tier]) reason = 'Missing inference credential';
     else if (workload === 'coder' && !model.toolCalling) reason = 'Model does not support coding tools';
-    else if (!budget.permits(ceiling + config.router.maxCallUsd)) reason = 'Insufficient request or daily budget';
+    else if (!budget.permits(ceiling + (config.routingMode === 'direct' ? 0 : config.router.maxCallUsd))) reason = 'Insufficient request or daily budget';
     else if (scope && (scope.workload !== workload || scope.tier !== tier)) reason = 'Outside escalation scope';
     else if (!scope && tier === 'strong' && config.policy.budget.automaticEconomy) reason = 'Strong model reserved for evidence-based escalation';
     return validateManifest({
