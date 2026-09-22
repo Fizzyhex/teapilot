@@ -1,7 +1,10 @@
 {
   "name": "teapilot",
   "version": "0.1.0",
-  "private": true,
+  "bin": { "teapilot": "dist/cli.js" },
+  "files": ["dist", "config/*.example.json", "README.md", "THIRD_PARTY_NOTICES.md"],
+  "bundleDependencies": ["jevrouter"],
+  "repository": { "type": "git", "url": "git+https://github.com/fizzyhex/teapilot.git" },
   "description": "A small JevRouter-controlled personal agent host",
   "type": "module",
   "engines": {
@@ -10,10 +13,14 @@
   "scripts": {
     "start": "tsx src/cli.ts",
     "doctor": "tsx src/cli.ts doctor",
+    "setup": "tsx src/cli.ts setup",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepack": "npm run build",
+    "test:package": "node scripts/package-smoke.mjs",
+    "test:ollama": "node scripts/ollama-smoke.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.87.0",

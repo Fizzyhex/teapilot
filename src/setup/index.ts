@@ -24,6 +24,10 @@ async function privateWrite(path: string, contents: string, signal: AbortSignal)
 
 export async function saveConfiguration(directory: string, config: Config, env: Record<string, string>, signal: AbortSignal): Promise<void> {
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
+  env = { ...env };
+  for (const key of ['TEAPILOT_MODELS_FILE', 'TEAPILOT_POLICY_FILE', 'TEAPILOT_STATE_DIR']) {
+    if (env[key]) env[key] = env[key].replace(/\\/g, '/');
+  }
   for (const [key, value] of Object.entries(env)) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\r\n\0"\\]/.test(value)) throw new Error('Configuration values must be single-line strings without double quotes or backslashes.');
   }
@@ -43,15 +47,16 @@ export async function saveConfiguration(directory: string, config: Config, env: 
   } finally { await rm(pending, { force: true }); }
 }
 
-async function numberInput(ui: SetupUI, label: string, fallback: number, minimum: number): Promise<number> {
+async function numberInput(ui: SetupUI, label: string, fallback: number | undefined, minimum: number): Promise<number> {
   for (;;) {
-    const value = Number(await ui.input(label, String(fallback)));
+    const value = Number(await ui.input(label, fallback === undefined ? undefined : String(fallback)));
     if (Number.isFinite(value) && value >= minimum) return value;
     ui.log(`Enter a number of at least ${minimum}.`);
   }
 }
 
 export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSignal): Promise<boolean> {
+  if (options.nonInteractive && (!options.endpoint || !options.model || !Number.isInteger(options.contextTokens))) throw new Error('Unattended setup requires --endpoint, --model, and integer --context-tokens.');
   const directory = resolve(options.directory ?? userConfigDir());
   const hasConfiguration = await exists(resolve(directory, '.env'));
   if (hasConfiguration) {
@@ -66,6 +71,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   let savedEnv: Record<string, string> = {};
   if (hasConfiguration) savedEnv = parse(await readFile(resolve(directory, '.env')));
   const config = await loadConfig(directory, { ...savedEnv });
+  if (process.env.TEAPILOT_STATE_DIR) config.stateDir = resolve(process.env.TEAPILOT_STATE_DIR);
   const choice = options.nonInteractive ? 1 : await ui.choose('Choose execution setup:', ['Local Ollama (no API key or inference charges)', 'Existing OpenAI-compatible local endpoint', 'Cloud model (paid API key)']);
   const tier = choice === 2 ? 'economy' : 'local';
   // A new profile enables precisely one execution tier, never a silent paid fallback.
@@ -73,6 +79,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   config.models[tier].enabled = true;
   config.routingMode = 'direct';
   let env: Record<string, string> = { ...savedEnv };
+  if (process.env.TEAPILOT_STATE_DIR) env.TEAPILOT_STATE_DIR = config.stateDir.replace(/\\/g, '/');
   // Remove old overrides for settings the wizard owns; otherwise saved .env
   // values would silently undo the newly written JSON configuration.
   for (const key of Object.keys(env)) {
@@ -81,7 +88,9 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (choice === 0) {
     await ensureOllama(ui, signal);
     const model = await selectOllamaModel(ui, signal);
-    Object.assign(config.models.local, { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true });
+    Object.assign(config.models.local, { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2 });
+    delete env.LOCAL_API_KEY;
+    config.policy.limits.requestTimeoutMs = 120000;
   } else {
     const model = config.models[tier];
     model.baseUrl = options.endpoint ?? await ui.input('API base URL including /v1', choice === 2 ? 'https://openrouter.ai/api/v1' : 'http://127.0.0.1:8080/v1');
@@ -94,8 +103,8 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     if (key) env[model.apiKeyEnv] = key;
     if (choice === 2) {
       if (!key) throw new Error('A cloud API key is required.');
-      model.inputUsdPerMillion = await numberInput(ui, 'Conservative maximum input USD per million tokens', 1, 0.000001);
-      model.outputUsdPerMillion = await numberInput(ui, 'Conservative maximum output USD per million tokens', 3, 0.000001);
+      model.inputUsdPerMillion = await numberInput(ui, 'Conservative maximum input USD per million tokens (from your rate card)', model.inputUsdPerMillion || undefined, 0.000001);
+      model.outputUsdPerMillion = await numberInput(ui, 'Conservative maximum output USD per million tokens (from your rate card)', model.outputUsdPerMillion || undefined, 0.000001);
       config.policy.budget.requestUsd = await numberInput(ui, 'Maximum USD per request', 1, 0);
       config.policy.budget.dailyUsd = await numberInput(ui, 'Maximum USD per UTC day', 5, 0);
       ui.log('Check these upper prices against your provider rate card before enabling cloud execution.');

@@ -106,10 +106,13 @@ export function guardedStream(
         const stream = openAIStream(model, context, {
           apiKey: config.secrets[tier] || 'local-no-key',
           signal, maxTokens: spec.maxOutputTokens, maxRetries: 0,
+          temperature: spec.temperature,
           timeoutMs: config.policy.limits.requestTimeoutMs,
           onPayload: payload => spec.provider === 'openrouter' ? {
             ...(payload as Record<string, unknown>),
             provider: { require_parameters: true, max_price: { prompt: spec.inputUsdPerMillion, completion: spec.outputUsdPerMillion, request: 0 } },
+          } : spec.provider === 'ollama' ? {
+            ...(payload as Record<string, unknown>), reasoning_effort: 'none',
           } : undefined,
           fetch: async (input, init) => {
             // A UTF-8 byte bound plus 2048 framing tokens is deliberately more

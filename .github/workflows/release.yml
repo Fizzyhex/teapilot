@@ -1,0 +1,39 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+  local-models:
+    uses: ./.github/workflows/ollama.yml
+  package:
+    needs: [checks, local-models]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Verify version tag
+        run: node --input-type=module -e "import p from './package.json' with {type:'json'}; if (process.env.GITHUB_REF_NAME !== 'v' + p.version) throw Error('Tag must match package.json version')"
+      - run: npm ci
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: teapilot-*.tgz
+          if-no-files-found: error
+      - name: Enable npm OIDC support
+        if: vars.NPM_PUBLISH_ENABLED == 'true'
+        run: npm install --global npm@11.5.1
+      - name: Publish verified package
+        if: vars.NPM_PUBLISH_ENABLED == 'true'
+        run: npm publish teapilot-*.tgz --access public --provenance

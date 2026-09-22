@@ -1,13 +1,12 @@
 import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
 import { Type } from '@earendil-works/pi-ai';
-import { createReadTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import { randomUUID } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Config, Tier } from './config.js';
 import { tiers } from './config.js';
-import { ExecutionPolicy } from './execution/policy.js';
+import { runAttempt } from './agents/run.js';
 import { SpendGovernor, lockState } from './inference/budget.js';
 import { guardedStream, piModel } from './inference/providers.js';
 import { Telemetry } from './telemetry/outcome.js';
@@ -33,8 +32,9 @@ export async function modelStatus(config: Config, tier: Tier, signal?: AbortSign
 export interface LiveReport { ask: boolean; tools: boolean; coding: boolean; spentUsd: number }
 
 // Uses the production metered streaming adapter and real pi file tools. The probe
-// never executes generated code and can only read/write its disposable fixture.
+// never executes generated code; coding file tools are confined to its disposable directory.
 export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal, progress: (text: string) => void = () => {}): Promise<LiveReport> {
+  if (!config.policy.permissions.includes('inference')) throw new Error('Live inference is disabled by the configured permission policy.');
   const unlock = await lockState(config.stateDir);
   let scratch: string | undefined;
   const report: LiveReport = { ask: false, tools: false, coding: false, spentUsd: 0 };
@@ -45,6 +45,7 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     await budget.load();
     const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((v): v is string => Boolean(v)));
     const probeConfig = structuredClone(config);
+    probeConfig.models[tier].temperature = 0;
     probeConfig.policy.limits.maxTurns = Math.min(6, config.policy.limits.maxTurns);
     async function run(prompt: string, tools: AgentTool[] = []): Promise<{ text: string; ok: boolean }> {
       const state = { turns: 0 };
@@ -74,23 +75,20 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
       };
       const result = await run('Call teapilot_probe, then reply with the exact token returned by the tool.', [tool]);
       report.tools = called && result.ok && result.text.includes(token);
+      if (!report.tools) progress(`Tool check failed: executed=${called}, completed=${result.ok}, returned token=${result.text.includes(token)}. Try another model or update Ollama.`);
       if (report.tools) {
         progress('Checking a disposable coding task...');
         const nonce = randomUUID();
         const before = `// ${nonce}\nexport const add = (a, b) => a - b;\n`;
         const expected = before.replace('a - b', 'a + b');
         await writeFile(join(scratch, 'fixture.js'), before);
-        const policy = new ExecutionPolicy(scratch, probeConfig, async () => false);
-        const seen = new Set<string>();
-        const tools = [createReadTool(scratch, { operations: { readFile, access, detectImageMimeType: async () => null } }), createWriteTool(scratch)].map(raw => {
-          const wrapped = policy.wrap(raw);
-          return { ...wrapped, execute: async (...args: Parameters<AgentTool['execute']>) => {
-            if ((args[1] as { path?: string }).path !== 'fixture.js') throw new Error('Diagnostic only allows fixture.js');
-            const value = await wrapped.execute(...args); seen.add(raw.name); return value;
-          } };
-        });
-        const result = await run('Read fixture.js. Change only the subtraction operator to addition, preserving every other character including the comment and final newline. Write fixture.js, then reply DONE. Do not call any shell.', tools);
-        report.coding = result.ok && seen.has('read') && seen.has('write') && await readFile(join(scratch, 'fixture.js'), 'utf8') === expected;
+        probeConfig.policy.permissions = probeConfig.policy.permissions.filter(permission => ['inference', 'repository.read', 'repository.write'].includes(permission));
+        const result = await runAttempt({ config: probeConfig, tier, workload: 'coder', cwd: scratch,
+          prompt: 'Read fixture.js. Change only the subtraction operator to addition, preserving every other character including the comment and final newline. Write fixture.js, then reply DONE. Do not call any shell. /no_think',
+          web: false, budget, telemetry, approve: async () => false, signal });
+        signal?.throwIfAborted();
+        report.coding = result.success && result.toolCalls >= 2 && await readFile(join(scratch, 'fixture.js'), 'utf8') === expected;
+        if (!report.coding) progress(`Coding check failed: ${result.stopped ?? result.reason ?? 'file edit did not match the fixture'}; ${result.toolCalls} tool calls. Check context capacity or choose another model.`);
       }
     }
     report.spentUsd = budget.spent().request;
@@ -123,6 +121,7 @@ export async function doctor(config: Config, cwd: string, options: { live?: bool
     if (!model.enabled) continue;
     const error = tier !== 'local' && !config.secrets[tier] ? 'Missing credential; run teapilot setup.' : await modelStatus(config, tier, options.signal);
     log(`${tier}: ${model.id}: ${error ?? 'model found (inference not yet tested)'}`);
+    if (config.policy.disabledCapabilities.includes(`coder.${tier}`)) log(`${tier}: coding is disabled by configuration; rerun setup to reconfigure and validate it.`);
     if (error) { healthy = false; continue; }
     available = true;
     if (options.live) {

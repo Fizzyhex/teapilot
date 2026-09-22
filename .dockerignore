@@ -3,6 +3,10 @@ dist
 .git
 .env
 .env.*
+.env-*
+models-*.json
+policy-*.json
+*.tgz
 .teapilot
 .jevrouter
 config/models.json

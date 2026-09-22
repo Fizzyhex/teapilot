@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, open, readFile, rm, statfs } from 'node:fs/promises';
+import { mkdtemp, open, rm, statfs } from 'node:fs/promises';
 import { homedir, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,8 +9,8 @@ import type { SetupUI } from './terminal.js';
 
 export const ollamaURL = 'http://127.0.0.1:11434';
 export const presets = [
-  { id: 'qwen3:4b', bytes: 2_500_000_000, memoryGiB: 8, context: 16384 },
-  { id: 'qwen3:8b', bytes: 5_200_000_000, memoryGiB: 16, context: 16384 },
+  { id: 'qwen3.5:4b', bytes: 3_400_000_000, memoryGiB: 8, context: 16384 },
+  { id: 'qwen3.5:2b', bytes: 2_700_000_000, memoryGiB: 6, context: 16384 },
 ];
 export interface OllamaModel { name: string; size: number; remote_model?: string }
 
@@ -93,6 +93,10 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
   let executable = await binary(signal);
   if (!executable) {
     if (!['win32', 'linux'].includes(process.platform)) throw new Error('Managed installation supports Windows and Linux. Install Ollama yourself or use an existing endpoint.');
+    for (const location of [tmpdir(), homedir()]) {
+      const space = await statfs(location);
+      checkDisk(space.bavail * space.bsize, process.platform === 'win32' ? 6_000_000_000 : 8_000_000_000);
+    }
     if (!await ui.confirm('Install Ollama from ollama.com? Its installer may request system permission.')) throw new Error('Installation declined. Rerun setup or choose an existing endpoint.');
     const directory = await mkdtemp(join(tmpdir(), 'teapilot-ollama-'));
     try {

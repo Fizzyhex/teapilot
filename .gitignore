@@ -2,10 +2,14 @@ node_modules/
 dist/
 .env
 .env.*
+.env-*
 !.env.example
 .teapilot/
 .jevrouter/
 config/models.json
 config/policy.json
+/models-*.json
+/policy-*.json
+*.tgz
 coverage/
 *.log

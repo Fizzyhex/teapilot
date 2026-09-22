@@ -30,7 +30,7 @@ it('doctor and an ask request work from a clean machine config with mock endpoin
   const f = await fixture(); cleanup.push(f.cleanup);
   const server = await mockServer((_body, request, response) => {
     if (request.url === '/jev') jev(response, 'ask.local');
-    else if (request.url?.endsWith('/models')) response.end('{}');
+    else if (request.url?.endsWith('/models')) response.end(JSON.stringify({ data: [{ id: 'mock' }] }));
     else completion(response, { text: 'CLI mock response.' });
   }); cleanup.push(server.close);
   await writeFile(join(f.cwd, 'models.json'), JSON.stringify(f.config.models));

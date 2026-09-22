@@ -3,6 +3,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -24,3 +25,5 @@ jobs:
       - run: npm run check
       - name: Native startup
         run: node dist/cli.js --help
+      - name: Install and exercise the packed package outside the repository
+        run: npm run test:package

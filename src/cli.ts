@@ -1,82 +1,91 @@
+#!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { createInterface } from 'node:readline/promises';
-import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { loadConfig, tiers, type Config } from './config.js';
+import { loadConfig, type Workload } from './config.js';
 import { runHost } from './host.js';
-import { callCeiling } from './inference/budget.js';
-import { localAvailable } from './inference/providers.js';
+import { doctor } from './diagnostics.js';
+import { setup } from './setup/index.js';
+import { terminalUI } from './setup/terminal.js';
 import type { Approve } from './execution/policy.js';
 
-const help = `teapilot — JevRouter + pi agent host
+const help = `teapilot — local and hosted personal agent
 
-npm start -- --cwd <repository> "Your request"
-npm start -- --web "Research a topic with sources"
-npm start -- --correction "The previous change missed X" "Fix X"
-npm run doctor
+teapilot setup
+teapilot ask "Explain dependency injection"
+teapilot code --cwd <repository> "Fix the failing tests"
+teapilot doctor [--live]
 
 Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json
          --correction TEXT  --help
-No prompt opens a single-request prompt. Approvals require an interactive terminal.
-Exit codes: 0 completed/doctor healthy; 1 configuration/runtime error; 2 incomplete/blocked.
-`;
+Hosted routing also accepts a bare prompt. Direct routing uses ask/code.
+Approvals require an interactive terminal. Local setup needs no API key.
 
-async function doctor(config: Config, cwd: string): Promise<boolean> {
-  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
-  const runtime = major > 22 || (major === 22 && minor >= 19);
-  const local = await localAvailable(config);
-  const credentials = Boolean(config.router.apiKey);
-  console.log(`Node ${process.versions.node}: ${runtime ? 'OK' : 'requires >=22.19.0'}`);
-  console.log(`Working directory: ${await realpath(cwd)}`);
-  console.log(`JevRouter ${config.router.provider}: ${credentials ? 'credential configured (not live-tested)' : 'MISSING credential'}`);
-  for (const tier of tiers) {
-    const model = config.models[tier];
-    const status = !model.enabled ? 'disabled' : tier === 'local' ? local ? 'reachable' : 'UNREACHABLE /models' : config.secrets[tier] ? 'configured (not live-tested)' : 'MISSING credential';
-    console.log(`${tier}: ${status}; ${model.id}; maximum $${callCeiling(model).toFixed(6)}/turn`);
-  }
-  console.log(`Budgets: $${config.policy.budget.requestUsd}/request; $${config.policy.budget.dailyUsd}/UTC day; state: ${config.stateDir}`);
-  console.log(`Shell: ${process.platform === 'win32' ? 'PowerShell' : 'bash'}; arbitrary commands require approval; trusted commands: ${config.policy.execution.trustedCommands.length}`);
-  console.log(`Search: ${config.searchUrl ? 'configured; opt in with --web' : 'disabled'}`);
-  return runtime && credentials && (local || tiers.some(tier => tier !== 'local' && config.models[tier].enabled && config.secrets[tier]));
-}
+Unattended setup (existing local endpoint, new config only):
+teapilot setup --non-interactive --endpoint URL --model ID --context-tokens N
+Credentials are accepted through LOCAL_API_KEY, never a command-line flag.
+
+Exit codes: 0 completed/healthy; 1 configuration/runtime error; 2 incomplete/blocked.
+`;
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    cwd: { type: 'string', default: process.cwd() }, 'config-dir': { type: 'string', default: process.cwd() },
+    cwd: { type: 'string', default: process.cwd() }, 'config-dir': { type: 'string' },
     prompt: { type: 'string' }, correction: { type: 'string' }, web: { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+    live: { type: 'boolean' }, 'non-interactive': { type: 'boolean' }, endpoint: { type: 'string' }, model: { type: 'string' }, 'context-tokens': { type: 'string' },
   } });
   if (values.help) { console.log(help); return; }
-  const config = await loadConfig(resolve(values['config-dir']));
-  if (positionals[0] === 'doctor') { process.exitCode = await doctor(config, values.cwd) ? 0 : 1; return; }
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
+  if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
+  const command = ['setup', 'doctor', 'ask', 'code'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
+  if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
-  const terminal = interactive ? createInterface({ input: process.stdin, output: process.stderr }) : undefined;
   const controller = new AbortController();
-  const onInterrupt = () => { controller.abort(); terminal?.close(); };
+  const ui = interactive ? terminalUI(controller.signal) : undefined;
+  const onInterrupt = () => { controller.abort(); ui?.close(); };
   process.once('SIGINT', onInterrupt);
-  terminal?.on('SIGINT', onInterrupt);
-  const approve: Approve = async approval => {
-    if (!terminal || controller.signal.aborted) return false;
-    const secrets = [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value));
-    let description = `\n${approval.summary}\n${approval.details ?? ''}`;
-    for (const secret of secrets) description = description.split(secret).join('[REDACTED]');
-    console.error(description);
-    const signal = approval.signal ? AbortSignal.any([approval.signal, controller.signal]) : controller.signal;
-    try { return (await terminal.question('Type yes to approve this action: ', { signal })).trim().toLowerCase() === 'yes'; }
-    catch { return false; }
-  };
   try {
-    const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : terminal ? await terminal.question('teapilot> ', { signal: controller.signal }) : '');
-    if (!prompt.trim()) throw new Error('Supply a prompt; use --help for examples');
-    const result = await runHost(config, { prompt, cwd: values.cwd, web: values.web, correction: values.correction, signal: controller.signal }, { approve, onProgress: message => console.error(message) });
+    if (command === 'setup') {
+      if (!interactive && !values['non-interactive']) throw new Error('Setup needs an interactive terminal, or --non-interactive with an existing endpoint.');
+      const headless = {
+        log: (text: string) => console.error(text),
+        input: async (): Promise<string> => { throw new Error('Unattended setup requires --endpoint, --model, and --context-tokens.'); },
+        choose: async (): Promise<number> => { throw new Error('This setup choice requires an interactive terminal.'); },
+        confirm: async () => false,
+      };
+      const ready = await setup({ directory: values['config-dir'], nonInteractive: values['non-interactive'], endpoint: values.endpoint, model: values.model, contextTokens: values['context-tokens'] === undefined ? undefined : Number(values['context-tokens']) }, ui ?? headless, controller.signal);
+      process.exitCode = ready ? 0 : 2;
+      return;
+    }
+    const config = await loadConfig(values['config-dir'], { ...process.env });
+    const secrets = [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value));
+    const redact = (message: string) => secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), message);
+    const approve: Approve = async approval => {
+      if (!ui || controller.signal.aborted || approval.signal?.aborted) return false;
+      console.error(redact(`${approval.summary}\n${approval.details ?? ''}`));
+      return ui.confirm('Approve this action?', approval.signal);
+    };
+    if (command === 'doctor') {
+      process.exitCode = await doctor(config, values.cwd, { live: values.live, signal: controller.signal, consent: async message => ui ? ui.confirm(redact(message)) : false, log: text => console.log(redact(text)) }) ? 0 : 1;
+      return;
+    }
+    let workload: Workload | undefined = command === 'code' ? 'coder' : command === 'ask' ? 'ask' : undefined;
+    if (config.routingMode === 'direct' && !workload) {
+      if (!ui) throw new Error('Direct routing requires teapilot ask or teapilot code.');
+      workload = await ui.choose('What would you like to do?', ['Ask a question (no repository tools)', 'Work on code in the selected repository']) === 0 ? 'ask' : 'coder';
+    }
+    const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui ? await ui.input('teapilot') : '');
+    if (!prompt.trim()) throw new Error('Supply a prompt; use teapilot setup for first use or --help for examples.');
+    const result = await runHost(config, { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, signal: controller.signal }, { approve, onProgress: message => console.error(redact(message)) });
     console.log(values.json ? JSON.stringify(result, null, 2) : result.text);
-    if (!values.json) console.error(`\n${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}\nReceipts: ${result.receipts.join(', ')}`);
+    if (!values.json) console.error(`\n${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
     process.exitCode = result.success ? 0 : 2;
-  } finally { terminal?.close(); process.removeListener('SIGINT', onInterrupt); }
+  } finally { ui?.close(); process.removeListener('SIGINT', onInterrupt); }
 }
 
 main().catch(error => {
-  // Zod errors contain configuration values; only expose the safe validation path.
-  if (error && typeof error === 'object' && 'issues' in error) console.error('Invalid configuration. Check model rates, endpoint URLs, and policy field types.');
+  if (error && typeof error === 'object' && 'issues' in error) console.error('Invalid configuration. Check model rates, endpoint URLs, context sizes, and policy field types. Run teapilot setup.');
+  else if (error?.name === 'AbortError') console.error('Cancelled. Rerun setup to reuse completed downloads and saved settings.');
   else console.error(error instanceof Error ? error.message : 'teapilot failed');
   process.exitCode = 1;
 });

@@ -24,6 +24,7 @@ const modelSchema = z.object({
   toolCalling: z.boolean().default(true),
   supportsDeveloperRole: z.boolean().default(false),
   supportsUsage: z.boolean().default(true),
+  temperature: z.number().min(0).max(2).optional(),
 }).strict().refine(m => m.maxOutputTokens + 2048 < m.contextTokens, 'Context must leave room for input');
 
 export const tiers = ['local', 'economy', 'strong'] as const;
@@ -88,9 +89,12 @@ export async function exists(path: string): Promise<boolean> {
 }
 export async function configDirectory(explicit?: string, cwd = process.cwd(), personal = userConfigDir()): Promise<string> {
   if (explicit) return resolve(explicit);
-  for (const marker of ['.env', 'config/models.json', 'config/models.example.json']) {
+  for (const marker of ['config/models.json', 'config/models.example.json']) {
     if (await exists(resolve(cwd, marker))) return cwd;
   }
+  // Ordinary application repositories often have an unrelated .env. Do not let
+  // those hide the user's TeaPilot profile or expose application credentials.
+  if (await exists(resolve(cwd, '.env')) && /^(?:TEAPILOT_|JEV_|TYPESAFE_API_KEY\s*=|LOCAL_MODEL\s*=|ECONOMY_MODEL\s*=)/m.test(await readFile(resolve(cwd, '.env'), 'utf8'))) return cwd;
   return personal;
 }
 
