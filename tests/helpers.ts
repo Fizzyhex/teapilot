@@ -7,7 +7,7 @@ import { loadConfig, type Config } from '../src/config.js';
 
 export async function fixture(): Promise<{ config: Config; cwd: string; cleanup: () => Promise<void> }> {
   const cwd = await mkdtemp(join(tmpdir(), 'teapilot-test-'));
-  const config = await loadConfig(resolve('.'), {});
+  const config = await loadConfig(cwd, {});
   config.stateDir = join(cwd, '.state');
   config.router.apiKey = 'fixture-jev-secret';
   config.secrets = { local: undefined, economy: 'fixture-cloud-secret', strong: 'fixture-cloud-secret' };

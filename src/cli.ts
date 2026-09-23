@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
-import { loadConfig, type Workload } from './config.js';
+import { configDirectory, loadConfig, type Workload } from './config.js';
 import { runHost } from './host.js';
 import { doctor } from './diagnostics.js';
 import { setup } from './setup/index.js';
@@ -62,7 +62,13 @@ async function main(): Promise<void> {
       process.exitCode = ready ? 0 : 2;
       return;
     }
-    const config = await loadConfig(values['config-dir'], { ...process.env });
+    const directory = await configDirectory(values['config-dir']);
+    let config;
+    try { config = await loadConfig(values['config-dir'], { ...process.env }); }
+    catch (error) {
+      console.error(`Configuration: ${directory} (${values['config-dir'] ? 'explicit --config-dir' : directory === process.cwd() ? 'launch directory' : 'personal profile'}). Repair: teapilot setup --config-dir "${directory}"`);
+      throw error;
+    }
     const secrets = [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value));
     const redact = (message: string) => secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), message);
     const approve: Approve = async approval => {

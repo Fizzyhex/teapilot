@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
-import { exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config } from '../config.js';
-import { liveCheck, modelStatus, type LiveReport } from '../diagnostics.js';
+import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config } from '../config.js';
+import { liveCheck, modelStatus, routingCheck, endpointHint, type LiveReport } from '../diagnostics.js';
 import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js';
 import type { SetupUI } from './terminal.js';
 
@@ -62,12 +62,20 @@ async function numberInput(ui: SetupUI, label: string, fallback: number | undefi
 export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSignal, credentials?: CredentialStorage): Promise<boolean> {
   if (options.nonInteractive && (!options.endpoint || !options.model || !Number.isInteger(options.contextTokens))) throw new Error('Unattended setup requires --endpoint, --model, and integer --context-tokens.');
   const directory = resolve(options.directory ?? userConfigDir());
+  ui.log(`Configuration: ${directory} (${options.directory ? 'explicit --config-dir' : 'personal profile'}). Repository selection is separate: use --cwd for coding.`);
+  const launchDirectory = await configDirectory();
+  const nextCommand = `teapilot ask --config-dir "${directory}" "Explain dependency injection"`;
+  if (launchDirectory !== directory) ui.log(`Commands launched here select ${launchDirectory}, which shadows this setup. Use: ${nextCommand}`);
   const hasConfiguration = await exists(resolve(directory, '.env'));
+  const files = await readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  if (!hasConfiguration && files.some(file => /^(models-|policy-|\.env-)/.test(file))) ui.log('Setup was interrupted before activation. Recovery will create a complete profile and reuse installed models.');
   if (hasConfiguration) {
     if (options.nonInteractive) throw new Error('Configuration already exists. Rerun teapilot setup interactively to retain or replace it.');
     if (await ui.choose(`Configuration exists at ${directory}.`, ['Keep settings and verify', 'Reconfigure (confirm before saving)']) === 0) {
       const { doctor } = await import('../diagnostics.js');
-      return doctor(await loadConfig(directory, { ...process.env, ...await credentials?.load() }), process.cwd(), { live: true, signal, consent: ui.confirm, log: ui.log });
+      const ready = await doctor(await loadConfig(directory, { ...process.env, ...await credentials?.load() }), process.cwd(), { live: true, signal, consent: ui.confirm, log: ui.log });
+      ui.log(`Next: ${nextCommand}`);
+      return ready;
     }
   }
   // Start from existing policy/settings when available. Environment is cloned so
@@ -82,13 +90,26 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   // A new profile enables precisely one execution tier, never a silent paid fallback.
   for (const model of Object.values(config.models)) model.enabled = false;
   config.models[tier].enabled = true;
-  config.routingMode = 'direct';
+  if (!hasConfiguration) config.routingMode = 'direct';
   let env: Record<string, string> = { ...savedEnv };
   if (process.env.TEAPILOT_STATE_DIR) env.TEAPILOT_STATE_DIR = config.stateDir.replace(/\\/g, '/');
   // Remove old overrides for settings the wizard owns; otherwise saved .env
   // values would silently undo the newly written JSON configuration.
   for (const key of Object.keys(env)) {
     if (/^(LOCAL|ECONOMY|STRONG)_(ENABLED|MODEL|BASE_URL|INPUT_USD_PER_MILLION|OUTPUT_USD_PER_MILLION)$/.test(key) || ['REQUEST_BUDGET_USD', 'DAILY_BUDGET_USD'].includes(key)) delete env[key];
+  }
+  ui.log('The router chooses a model; the execution model does the work. Direct routing needs no routing key.');
+  if (!options.nonInteractive && await ui.confirm(`Change routing? Current: ${config.routingMode}.`)) {
+    config.routingMode = await ui.choose('Routing:', ['Direct (no hosted routing charges)', 'Hosted Jev (optional paid routing)']) === 0 ? 'direct' : 'hosted';
+    if (config.routingMode === 'hosted') {
+      const provider = await ui.choose('Jev provider:', ['TypeSafe', 'OpenRouter']) === 0 ? 'typesafe' : 'openrouter';
+      const keyName = provider === 'typesafe' ? 'TYPESAFE_API_KEY' : 'OPENROUTER_API_KEY';
+      env.JEV_PROVIDER = provider;
+      env[keyName] = await ui.input('Routing API key (hidden; blank keeps existing)', env[keyName] ?? '', true);
+      config.router.provider = provider;
+      config.router.apiKey = env[keyName] || undefined;
+      if (!config.router.apiKey) throw new Error('Hosted routing needs a routing key. Rerun setup and choose direct or provide a key.');
+    }
   }
   if (choice === 0) {
     await ensureOllama(ui, signal);
@@ -120,7 +141,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
   const status = await modelStatus(config, tier, signal);
   let report: LiveReport | undefined;
-  if (status) ui.log(status);
+  if (status) { ui.log(`Endpoint ${config.models[tier].baseUrl}: ${status}`); await endpointHint(config, tier, ui.log, signal); }
   else if (tier === 'local' || await ui.confirm(`Run paid live checks, bounded by $${config.policy.budget.requestUsd}/request and $${config.policy.budget.dailyUsd}/day?`)) {
     report = await liveCheck(config, tier, signal, ui.log);
   }
@@ -129,6 +150,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
   if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
   ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
+  const routingReady = config.routingMode === 'direct' || await routingCheck(config, ui.confirm, ui.log, signal);
   if (hasConfiguration && !await ui.confirm('Replace the active settings? Previous configuration files will be retained.')) return false;
   if (credentials) {
     const keys = new Set([...Object.values(config.models).map(model => model.apiKeyEnv), 'JEV_API_KEY', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY']);
@@ -137,7 +159,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   }
   await saveConfiguration(directory, config, env, signal);
   ui.log(`Configuration saved in ${directory}. Environment variables still override saved settings.`);
-  ui.log('Next: teapilot ask "Explain dependency injection"');
-  if (report?.coding) ui.log('Then: teapilot code --cwd /path/to/project "Describe this project"');
-  return Boolean(report?.ask && report.coding);
+  ui.log(`Next: ${nextCommand}`);
+  if (report?.coding) ui.log(`Then: teapilot code --config-dir "${directory}" --cwd "${process.cwd()}" "Describe this project"`);
+  return Boolean(report?.ask && report.coding && routingReady);
 }

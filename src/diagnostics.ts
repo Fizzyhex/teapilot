@@ -8,8 +8,44 @@ import type { Config, Tier } from './config.js';
 import { tiers } from './config.js';
 import { runAttempt } from './agents/run.js';
 import { SpendGovernor, lockState } from './inference/budget.js';
-import { guardedStream, piModel } from './inference/providers.js';
+import { budgetedJev, guardedStream, piModel } from './inference/providers.js';
 import { Telemetry } from './telemetry/outcome.js';
+import { defaultPolicy, JevRouter } from 'jevrouter';
+import { capabilities } from './routing/capabilities.js';
+
+export async function endpointHint(config: Config, tier: Tier, log: (text: string) => void, signal?: AbortSignal): Promise<void> {
+  if (tier !== 'local') return;
+  try {
+    const response = await fetch('http://127.0.0.1:11434/api/version', { redirect: 'error', signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(1500)]) });
+    if (response.ok) log(`Ollama detected at http://127.0.0.1:11434; configured endpoint: ${config.models.local.baseUrl}. To choose installed models, run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and select Reconfigure, then Local Ollama. No endpoint was changed.`);
+  } catch { signal?.throwIfAborted(); }
+}
+
+export async function routingCheck(config: Config, consent: (message: string) => Promise<boolean>, log: (text: string) => void, signal?: AbortSignal): Promise<boolean> {
+  if (!config.router.apiKey) { log('Hosted routing: FAIL (missing key). Run teapilot setup to configure routing.'); return false; }
+  if (!await consent(`Verify hosted routing with one paid routing call (maximum $${config.router.maxCallUsd}, within request/day budgets)? No execution model will be called.`)) {
+    log('Hosted routing: NOT TESTED (paid check declined).'); return false;
+  }
+  signal?.throwIfAborted();
+  const unlock = await lockState(config.stateDir);
+  try {
+    const id = randomUUID();
+    const budget = new SpendGovernor(join(config.stateDir, 'spend.jsonl'), id, config.policy.budget);
+    await budget.load();
+    const telemetry = new Telemetry(config.stateDir, id, [config.router.apiKey]);
+    const router = new JevRouter(budgetedJev(config, budget, telemetry), { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32 });
+    const decision = await router.route({ request: 'Explain dependency injection. Diagnostic routing only; do not execute.', actor_permissions: config.policy.permissions }, capabilities(config, budget, true));
+    await telemetry.receipt(decision);
+    signal?.throwIfAborted();
+    const passed = Boolean(decision.decision.selected && decision.status !== 'no_decision');
+    log(`Hosted routing: ${passed ? 'PASS' : 'FAIL (no authorized route)'}; accounted $${budget.spent().request.toFixed(6)}. Execution readiness is checked separately.`);
+    return passed;
+  } catch {
+    signal?.throwIfAborted();
+    log('Hosted routing: FAIL. Check routing credentials, provider settings, and remaining budget; rerun teapilot doctor --live.');
+    return false;
+  } finally { await unlock(); }
+}
 
 export async function modelStatus(config: Config, tier: Tier, signal?: AbortSignal): Promise<string | undefined> {
   const model = config.models[tier];
@@ -103,10 +139,17 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
 export async function doctor(config: Config, cwd: string, options: { live?: boolean; signal?: AbortSignal; consent: (message: string) => Promise<boolean>; log: (text: string) => void }): Promise<boolean> {
   const { log } = options;
   let healthy = true;
+  if (config.source) {
+    log(`Configuration: ${config.source.directory} (${config.source.reason})`);
+    if (config.source.overrides.length) log(`Environment overrides (names only): ${config.source.overrides.join(', ')}`);
+  }
+  log(`Repository: ${cwd} (--cwd; independent of configuration)`);
+  if (!options.live) log('Basic check: endpoint metadata only. Answers, tool use, and coding: NOT TESTED in this check.');
   log(`Routing: ${config.routingMode ?? 'hosted'}`);
   if (config.routingMode !== 'direct') {
     log(`Hosted routing credential: ${config.router.apiKey ? 'configured (not live-tested)' : 'MISSING; run teapilot setup'}`);
     healthy &&= Boolean(config.router.apiKey);
+    if (options.live) healthy = await routingCheck(config, options.consent, log, options.signal) && healthy;
   }
   try {
     await access(cwd);
@@ -120,9 +163,9 @@ export async function doctor(config: Config, cwd: string, options: { live?: bool
     const model = config.models[tier];
     if (!model.enabled) continue;
     const error = tier !== 'local' && !config.secrets[tier] ? 'Missing credential; run teapilot setup.' : await modelStatus(config, tier, options.signal);
-    log(`${tier}: ${model.id}: ${error ?? 'model found (inference not yet tested)'}`);
+    log(`${tier}: ${model.id}; endpoint ${model.baseUrl}: ${error ? `FAIL: ${error}` : 'PASS (model found; live inference checked separately)'}`);
     if (config.policy.disabledCapabilities.includes(`coder.${tier}`)) log(`${tier}: coding is disabled by configuration; rerun setup to reconfigure and validate it.`);
-    if (error) { healthy = false; continue; }
+    if (error) { healthy = false; await endpointHint(config, tier, log, options.signal); continue; }
     available = true;
     if (options.live) {
       if (tier !== 'local' && !await options.consent(`Run paid ${tier} diagnostic calls within $${config.policy.budget.requestUsd}/request and $${config.policy.budget.dailyUsd}/day limits?`)) {

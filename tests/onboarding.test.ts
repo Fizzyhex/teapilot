@@ -143,6 +143,23 @@ it('setup saves private config, reruns preserve it, and environment overrides re
   expect(await setup({ directory }, ui, new AbortController().signal)).toBe(true);
   expect(await readFile(join(directory, '.env'), 'utf8')).toBe(content);
   expect((await loadConfig(directory, { LOCAL_MODEL: 'override' })).models.local.id).toBe('override');
+  expect((await loadConfig(directory, { LOCAL_MODEL: 'override' })).source).toMatchObject({ directory, overrides: ['LOCAL_MODEL'] });
+  expect(messages.join('\n')).toContain(`--config-dir "${directory}"`);
+});
+
+it('recognizes interrupted first setup without mislabeling retained generations', async () => {
+  const f = await local();
+  vi.stubEnv('TEAPILOT_STATE_DIR', f.config.stateDir);
+  const directory = join(f.cwd, 'interrupted');
+  await mkdir(directory);
+  await writeFile(join(directory, 'models-incomplete.json'), '{}');
+  const messages: string[] = [];
+  const ui: SetupUI = { log: text => messages.push(text), input: async () => '', choose: async () => 0, confirm: async () => false };
+  expect(await setup({ directory, nonInteractive: true, endpoint: `${f.server.url}/v1`, model: 'local-test', contextTokens: 16384 }, ui, new AbortController().signal)).toBe(true);
+  expect(messages.join('\n')).toContain('interrupted before activation');
+  messages.length = 0;
+  await setup({ directory }, ui, new AbortController().signal);
+  expect(messages.join('\n')).not.toContain('interrupted before activation');
 });
 
 it('config lookup chooses explicit, then repository, then personal settings', async () => {

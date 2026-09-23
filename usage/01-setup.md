@@ -17,9 +17,13 @@ The wizard offers local Ollama, an existing local endpoint, or a cloud model. Fo
 
 Generated configuration lives in `~/.teapilot/config`, with private file permissions (Windows user ACLs / POSIX mode 600). Repeating setup offers to retain and verify settings or reconfigure them. Downloads can be resumed after failure. Previous JSON generations are retained; the active `.env` pointer is replaced only after a complete save. A partial result disables unverified coding; rerun setup and choose reconfigure to validate it again. Configuration never silently enables cloud fallback.
 
+Setup prints an explicit `--config-dir` command so the next request uses the profile it checked, even from a checkout with its own settings. `--cwd` selects the working repository independently. Doctor shows the chosen configuration and environment override names, never their values. Interrupted first saves are identified separately from retained generations of an active profile.
+
+The router chooses a model; the execution model does the work. Direct routing requires no routing key. Setup preserves existing routing and offers an optional change to direct or hosted Jev routing. Hosted routing verification is a separate, consented paid call within the usual spending limits; it does not execute a task.
+
 ## Check readiness
 
-`teapilot doctor` verifies the selected model appears in the endpoint's model list and checks state access. `teapilot doctor --live` also runs real inference and tool checks. Paid live checks require interactive consent and use the normal spending ledger; routing credentials are reported as present, not live-tested. A healthy basic doctor does not prove coding readiness.
+`teapilot doctor` verifies the selected model appears in the endpoint's model list and checks state access. `teapilot doctor --live` also runs real inference and tool checks and offers separate hosted routing verification. Paid live checks require interactive consent and use the normal spending ledger. A healthy basic doctor does not prove coding readiness. Failed local endpoint checks also look for an already-running Ollama server and explain how to reconfigure without switching automatically.
 
 ## Scripted local setup
 

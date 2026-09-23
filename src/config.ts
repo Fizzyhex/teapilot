@@ -66,6 +66,7 @@ export const policySchema = z.object({
 }).strict();
 export type Policy = z.infer<typeof policySchema>;
 export interface Config {
+  source?: { directory: string; reason: string; overrides: string[] };
   routingMode?: 'hosted' | 'direct';
   models: z.infer<typeof modelsSchema>;
   policy: Policy;
@@ -99,6 +100,8 @@ export async function configDirectory(explicit?: string, cwd = process.cwd(), pe
 }
 
 export async function loadConfig(root?: string, env = process.env): Promise<Config> {
+  const explicit = Boolean(root);
+  const overrides = Object.keys(env).filter(key => /^(TEAPILOT_|JEV_|LOCAL_|ECONOMY_|STRONG_|SEARCH_BASE_URL$|REQUEST_BUDGET_USD$|DAILY_BUDGET_USD$|TYPESAFE_API_KEY$|OPENROUTER_API_KEY$)/.test(key) && env[key] !== undefined).sort();
   root = await configDirectory(root);
   dotenv({ path: resolve(root, '.env'), processEnv: env, quiet: true });
   const select = async (override: string | undefined, name: string): Promise<string> => {
@@ -128,6 +131,7 @@ export async function loadConfig(root?: string, env = process.env): Promise<Conf
   if (env.DAILY_BUDGET_USD) policy.budget.dailyUsd = money.parse(Number(env.DAILY_BUDGET_USD));
   const provider = z.enum(['typesafe', 'openrouter']).parse(env.JEV_PROVIDER || 'typesafe');
   return {
+    source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides },
     routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'),
     models, policy,
     stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')),

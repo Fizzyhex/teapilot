@@ -2,7 +2,7 @@
 
 a small personal agent host for coding, questions, research, and planning. run local models without API keys, or configure cloud models with spending limits.
 
-use `ask` for questions and planning, and `code` to work in a repository. Each command handles one request. `--web` is available for 
+use `ask` for questions and planning, and `code` to work in a repository. Each command handles one request. Use `ask --web` for research with a configured search service.
 
 teapilot is built to be focused, resourceful and batteries included.
 
@@ -16,11 +16,10 @@ Until the first npm release is published, install from source. Authenticate Git 
 git clone https://github.com/fizzyhex/teapilot.git
 cd teapilot
 npm install
-npm run setup -- --config-dir .
-npm start -- ask "Explain dependency injection"
+npm run setup
 ```
 
-The setup wizard offers local Ollama, an existing local endpoint, or a cloud model. It can install Ollama and download a model with your consent, then check that it works. Local setup needs no API key and keeps cloud fallback disabled.
+The setup wizard offers local Ollama, an existing local endpoint, or a cloud model. It can install Ollama and download a model with your consent, then check that it works. Local setup needs no API key and keeps cloud fallback disabled. Follow the command printed by setup, replacing `teapilot` with `npm start --` when running from source. Setup saves a personal profile by default; use `npm run setup -- --config-dir .` only when you want checkout-specific settings.
 
 ## Use
 
