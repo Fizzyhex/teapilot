@@ -151,7 +151,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           return approved;
         },
         signal: request.signal,
-        prompt: basePrompt + (previous ? `\nPrevious cheaper attempt stopped: ${previous.reason}. Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
+        prompt: basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
       });
       check = previous.check;
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
@@ -167,7 +167,17 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         return { tier: nextTier, assessment: assessCandidate(config, candidate) };
       });
       const next = fallback.find(item => item.assessment.allowed)?.tier;
-      if (!next) return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || 'no higher tier configured'}.`));
+      if (!next) {
+        const resumableSameTier = ['unsupported', 'turn_limit', 'ineffective_calls', 'tool_failures', 'test_failures'];
+        const madeProgress = previous.turns > 0 || changedFiles.size > 0 || shellRan;
+        if (!previous.reason || !resumableSameTier.includes(previous.reason) || !madeProgress) {
+          return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || 'no higher tier configured'}.`));
+        }
+        dependencies.onProgress?.(`No higher-tier fallback is available; continuing ${selected} with its execution handoff.`);
+        await telemetry.event('continuation', { capability: selected, reason: previous.reason, fallback: 'unavailable' });
+        scope = { workload, tier };
+        continue;
+      }
       await telemetry.event('escalation', { from: selected, to: `${workload}.${next}`, reason: previous.reason });
       scope = { workload, tier: next };
     }
