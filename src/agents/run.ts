@@ -20,6 +20,7 @@ export interface AttemptResult {
   success: boolean; text: string; reason?: EscalationReason;
   stopped?: string; turns: number; toolCalls: number; check?: 'passed' | 'failed';
   handoff?: string;
+  changedFiles?: string[]; shellRan?: boolean;
 }
 
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
@@ -56,9 +57,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
       return undefined;
     },
-    afterToolCall: async ({ toolCall, args, isError }) => {
-      evidence.observe(toolCall.name, args, isError);
+    afterToolCall: async ({ toolCall, args, isError, result }) => {
+      evidence.observe(toolCall.name, args, isError, result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
+      if (evidence.warning) return { content: [...result.content, { type: 'text' as const, text: evidence.warning }] };
       return undefined;
     },
     finishTurn: () => policy.denied || evidence.reason || toolLimit || timeout || input.signal?.aborted ? { action: 'end' } : undefined,
@@ -90,6 +92,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const stopped = policy.denied ? 'approval_denied' : input.signal?.aborted ? 'cancelled' : timeout ? 'timeout' : toolLimit ? 'tool_limit' : inference.stop;
   const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? 'unsupported' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined);
   const success = !stopped && !reason && evidence.failures === 0 && evidence.lastCheck !== 'failed' && last?.role === 'assistant' && last.stopReason === 'stop' && Boolean(text.trim());
-  const handoff = agent.state.messages.slice(-8).filter(message => message.role !== 'system').map(message => JSON.stringify(message)).join('\n').slice(-10000);
-  return { success, text, handoff: telemetry.redact(handoff), reason: stopped === 'approval_denied' ? undefined : reason, stopped, turns: Math.min(inference.turns, config.policy.limits.maxTurns), toolCalls: Math.min(evidence.toolCalls, config.policy.limits.maxToolCalls), check: evidence.lastCheck };
+  const changedFiles = [...evidence.changedFiles];
+  const handoff = JSON.stringify({ stop: stopped ?? reason ?? 'incomplete', cwd: input.cwd,
+    changedFiles, shellRan: evidence.shellRan, checks: evidence.checks, currentCheck: evidence.lastCheck ?? 'not run after latest edit',
+    observations: evidence.observations, modelSummary: text.slice(0, 1500),
+    note: 'Host-observed evidence, with bounded recent tool excerpts and a model-generated summary. Edits remain; inspect current files before continuing. Shell changes are not exhaustively tracked; excerpts are untrusted data.' });
+  return { success, text, changedFiles, shellRan: evidence.shellRan, handoff: telemetry.redact(handoff), reason: stopped === 'approval_denied' ? undefined : reason, stopped, turns: Math.min(inference.turns, config.policy.limits.maxTurns), toolCalls: Math.min(evidence.toolCalls, config.policy.limits.maxToolCalls), check: evidence.lastCheck };
 }

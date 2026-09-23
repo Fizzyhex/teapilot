@@ -28,6 +28,9 @@ export function automaticCommand(command: string, trusted: string[]): boolean {
 export class ExecutionPolicy {
   denied = false;
   constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation) {}
+  requireRead(): void {
+    if (!this.config.policy.permissions.includes('repository.read')) { this.denied = true; throw new PolicyDenied('Missing repository.read permission'); }
+  }
   async path(path: string, mutation: boolean): Promise<string> {
     if (!path || path.includes('\0') || path.startsWith('~')) throw new PolicyDenied('Use repository-relative paths');
     const target = resolve(this.root, path);

@@ -46,6 +46,27 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   let selected: string | undefined;
   let check: 'passed' | 'failed' | undefined;
   const models: string[] = [];
+  const changedFiles = new Set<string>();
+  let shellRan = false;
+  const incomplete = (attempt: AttemptResult, fallback?: string) => {
+    const stop = attempt.stopped ?? attempt.reason ?? 'incomplete';
+    const actions: Record<string, string> = {
+      approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
+      provider_error: 'Run teapilot doctor --live with this configuration to check the execution model.',
+      unsupported: 'Check model context and tool support with teapilot doctor --live.',
+      budget: 'Review spending and remaining request/day limits before retrying.',
+      ineffective_calls: 'Inspect the current files, then retry with a narrower concrete change.',
+      test_failures: 'Inspect the failing check output and retry with that failure as the task.',
+      tool_failures: 'Inspect the tool error and correct its path or command before retrying.',
+      cancelled: 'Review any existing edits before starting another request.',
+    };
+    return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
+      `Observed file edits: ${changedFiles.size ? [...changedFiles].join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}`,
+      `Checks after latest observed edit: ${attempt.check ?? 'not run'}.`,
+      changedFiles.size || shellRan ? 'Existing edits remain; no automatic rollback was performed.' : undefined,
+      `Next: ${actions[stop] ?? 'Review the partial work, then retry with a smaller task.'}`,
+      attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
+  };
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     const result = { requestId, success, status, text: telemetry.redact(text), capability: selected, spentUsd: budget.spent().request, receipts, attempts, check, models };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
@@ -110,14 +131,20 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         prompt: basePrompt + (previous ? `\nPrevious cheaper attempt stopped: ${previous.reason}. Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
       });
       check = previous.check;
+      for (const path of previous.changedFiles ?? []) changedFiles.add(path);
+      shellRan ||= Boolean(previous.shellRan);
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check });
       if (previous.success) return await finish(true, 'completed', previous.text);
       if (!previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
-        return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', previous.text || 'Attempt stopped without completing the request.');
+        return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));
       }
-      const next = tiers.slice(tiers.indexOf(tier) + 1).find(nextTier =>
-        capabilities(config, budget, localOnline, { workload, tier: nextTier }).some(c => c.id === `${workload}.${nextTier}` && c.availability?.available));
-      if (!next) return await finish(false, 'escalation_unavailable', previous.text || 'Cheaper attempt failed; no affordable, available escalation model.');
+      const fallback = tiers.slice(tiers.indexOf(tier) + 1).map(nextTier => {
+        const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }).find(c => c.id === `${workload}.${nextTier}`)!;
+        if (request.web && !config.models[nextTier].toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
+        return { tier: nextTier, assessment: assessCandidate(config, candidate) };
+      });
+      const next = fallback.find(item => item.assessment.allowed)?.tier;
+      if (!next) return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || 'no higher tier configured'}.`));
       await telemetry.event('escalation', { from: selected, to: `${workload}.${next}`, reason: previous.reason });
       scope = { workload, tier: next };
     }

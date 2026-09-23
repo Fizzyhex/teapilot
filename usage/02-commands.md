@@ -16,6 +16,10 @@ The same argument syntax works in PowerShell, including paths with spaces. `teap
 
 `--cwd` is the filesystem boundary, so choose the repository root. To run compiled JavaScript: `npm run build`, then `node dist/cli.js ask "prompt"`.
 
+Coding has built-in repository listing and literal text search, so ordinary inspection needs no shell approval. These tools respect `.gitignore` and protected paths, skip links and generated directories, and report bounded/truncated results. Arbitrary shell commands still require approval unless explicitly trusted. Repeated inspection gets one prompt to change approach before stopping; limits still apply.
+
+Incomplete runs report the original stop reason, fallback eligibility, observed file edits, check status, and a next action. Shell changes may extend beyond the recorded file edits. Existing edits remain on disk. Escalation receives structured, bounded execution evidence; it is not a new session or an automatic rollback.
+
 ## Workload and routing
 
 In direct mode, `ask` has no repository tools; `code` selects the coding workload. A bare prompt asks which workload to use in an interactive terminal and is rejected noninteractively. Enabled tiers are considered local, economy, then strong; escalation retains the workload and all approval/budget checks. Fresh local setup enables only local inference and works with zero monetary budgets. Hosted mode retains automatic JevRouter selection; explicit commands constrain it to the requested workload.
