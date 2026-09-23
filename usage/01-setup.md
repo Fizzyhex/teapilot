@@ -13,6 +13,14 @@ teapilot code --cwd ./my-project "Fix the failing tests"
 
 ## Interactive setup
 
+The local model menu offers:
+
+- **Default:** Qwen3.5-9B abliterated ([Ollama package](https://ollama.com/huihui_ai/qwen3.5-abliterated:9b), about 6.6 GB).
+- **Hard task fallback:** Qwen3.5-35B-A3B abliterated Q4_K_M ([Ollama package](https://ollama.com/huihui_ai/qwen3.5-abliterated:35b-a3b-q4_K), about 24 GB).
+- **Cheap & Fast:** [mradermacher/Qwen3.5-4B-Uncensored-GGUF](https://huggingface.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF) **Q8_0**, about 4.7 GB. Setup downloads it directly using `hf.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF:Q8_0`; no conversion or additional setup is required.
+
+Enter one number or several separated by commas/spaces (for example `1, 2, 3`). Selections are installed sequentially in that order, with duplicates removed and existing downloads reused. Context settings and download confirmations are collected before the queue starts. Failed downloads can be retried before proceeding. After the queue completes, choose one active execution model to verify and save. Additional models remain installed for later selection; the role labels do not configure automatic fallback routing.
+
 The wizard offers local Ollama, an existing local endpoint, or a cloud model. For Ollama it detects the runtime, requests consent before installation/downloads, shows model sizes and memory guidance, and checks streaming, tool continuation, and a real edit in a disposable directory. CPU execution may be slow. It creates a separate model alias with an explicit context size rather than changing the original model. Runtime installation follows the official [Windows](https://docs.ollama.com/windows) and [Linux](https://docs.ollama.com/linux) installers; Linux may require sudo and systemd. On other Linux service configurations, start `ollama serve` separately and rerun setup.
 
 Generated configuration lives in `~/.teapilot/config`, with private file permissions (Windows user ACLs / POSIX mode 600). Repeating setup offers to retain and verify settings or reconfigure them. Downloads can be resumed after failure. Previous JSON generations are retained; the active `.env` pointer is replaced only after a complete save. A partial result disables unverified coding; rerun setup and choose reconfigure to validate it again. Configuration never silently enables cloud fallback.

@@ -6,6 +6,7 @@ import { createSdkProvider, type JevProvider } from 'jevrouter';
 import type { Config, ModelConfig, Tier } from '../config.js';
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
+import { estimateInputTokens, MAX_PAYLOAD_BYTES } from './context.js';
 
 export function piModel(config: ModelConfig): Model<'openai-completions'> {
   return {
@@ -50,7 +51,7 @@ export function budgetedJev(config: Config, governor: SpendGovernor, telemetry: 
   };
 }
 
-export interface InferenceState { turns: number; stop?: 'budget' | 'turn_limit' | 'unsupported' | 'provider_error' | 'timeout' }
+export interface InferenceState { turns: number; stop?: 'budget' | 'turn_limit' | 'context_limit' | 'payload_limit' | 'unsupported' | 'provider_error' | 'timeout' }
 
 function errorMessage(model: Model<'openai-completions'>, message: string): AssistantMessage {
   return {
@@ -93,6 +94,7 @@ export function guardedStream(
 ): StreamFn {
   const spec = config.models[tier];
   const model = piModel(spec);
+  const reservedOutputTokens = Math.min(controls?.maxOutputTokens ?? spec.maxOutputTokens, spec.maxOutputTokens);
   return (_model, context, options) => {
     const output = new AssistantMessageEventStream();
     const run = async (): Promise<void> => {
@@ -106,7 +108,7 @@ export function guardedStream(
       try {
         const stream = openAIStream(model, context, {
           apiKey: config.secrets[tier] || 'local-no-key',
-          signal, maxTokens: Math.min(controls?.maxOutputTokens ?? spec.maxOutputTokens, spec.maxOutputTokens), maxRetries: 0,
+          signal, maxTokens: reservedOutputTokens, maxRetries: 0,
           toolChoice: controls?.toolChoice,
           temperature: spec.temperature,
           timeoutMs: config.policy.limits.requestTimeoutMs,
@@ -117,18 +119,24 @@ export function guardedStream(
             ...(payload as Record<string, unknown>), reasoning_effort: 'none',
           } : undefined,
           fetch: async (input, init) => {
-            // A UTF-8 byte bound plus 2048 framing tokens is deliberately more
-            // conservative than a chars/4 estimate. Text-only requests only.
             const body = typeof init?.body === 'string' ? init.body : '';
-            if (!body || Buffer.byteLength(body) + 2048 > spec.contextTokens - spec.maxOutputTokens) {
-              state.stop = 'unsupported'; throw new Error('Context exceeds configured input ceiling');
+            const payloadBytes = Buffer.byteLength(body);
+            const estimatedInputTokens = body && payloadBytes <= MAX_PAYLOAD_BYTES ? estimateInputTokens(body) : undefined;
+            const rejection = payloadBytes > MAX_PAYLOAD_BYTES ? 'payload_limit'
+              : estimatedInputTokens !== undefined && estimatedInputTokens + reservedOutputTokens > spec.contextTokens ? 'context_limit' : undefined;
+            await telemetry.event('context_admission', { tier, model: spec.id, payloadBytes, estimatedInputTokens,
+              contextTokens: spec.contextTokens, reservedOutputTokens, method: 'conservative-lexical', rejection });
+            if (rejection) {
+              state.stop = rejection; throw new Error('Request exceeds configured admission ceiling');
             }
+            if (!body) throw new Error('Missing serialized request');
             if (sent) throw new Error('Unexpected provider retry blocked');
             try { reservation = await governor.reserve(callCeiling(spec), `${tier}:${spec.id}`); }
             catch (error) { if (error instanceof BudgetError) state.stop = 'budget'; throw error; }
             sent = true;
             const response = await fetch(input, { ...init, redirect: 'error', signal });
             if (response.status === 400 || response.status === 404 || response.status === 422) state.stop = 'unsupported';
+            if (!response.ok) await telemetry.event('provider_http_error', { tier, model: spec.id, status: response.status });
             return observeBilling(response, observed);
           },
         });

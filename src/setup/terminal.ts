@@ -10,6 +10,19 @@ export interface SetupUI {
   log(message: string): void;
 }
 
+export async function chooseMany(ui: SetupUI, message: string, choices: string[], fallback = 0): Promise<number[]> {
+  ui.log(`\n${message}\n${choices.map((choice, index) => `  ${index + 1}. ${choice}`).join('\n')}`);
+  for (;;) {
+    const answer = (await ui.input('Choose one or more numbers, separated by commas or spaces', String(fallback + 1))).trim() || String(fallback + 1);
+    const parts = answer.split(/[\s,]+/);
+    const values = parts.map(Number);
+    if (parts.every(part => /^\d+$/.test(part)) && values.every(value => Number.isInteger(value) && value >= 1 && value <= choices.length)) {
+      return [...new Set(values.map(value => value - 1))];
+    }
+    ui.log(`Enter numbers from 1 to ${choices.length}, for example 1, 2.`);
+  }
+}
+
 export function terminalUI(signal: AbortSignal): SetupUI & { close(): void } {
   const colour = terminalColour(process.stderr.isTTY) && !process.env.NODE_DISABLE_COLORS;
   const paint = (format: Parameters<typeof styleText>[0], text: string) => colour ? styleText(format, text, { validateStream: false }) : text;

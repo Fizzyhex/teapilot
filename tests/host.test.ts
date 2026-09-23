@@ -62,7 +62,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
       if (req.url === '/jev') jev(res, ++routes === 1 ? 'coder.local' : 'coder.economy');
       else if (req.url?.endsWith('/models')) res.end('{}');
       else if (req.url?.startsWith('/local')) { localCalls++; completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command } } }); }
-      else { cloudCalls++; expect(body.provider).toMatchObject({ require_parameters: true, max_price: { prompt: 0.2, completion: 0.5, request: 0 } }); expect(JSON.stringify(body.messages)).toContain('Previous cheaper attempt stopped'); completion(res, { text: 'Resolved using the economy model.', cost: 0.00004 }); }
+      else { cloudCalls++; expect(body.provider).toMatchObject({ require_parameters: true, max_price: { prompt: 0.2, completion: 0.5, request: 0 } }); expect(JSON.stringify(body.messages)).toContain('Previous attempt stopped'); completion(res, { text: 'Resolved using the economy model.', cost: 0.00004 }); }
     });
     f.config.policy.execution.trustedCommands = [command];
     await writeFile(join(f.cwd, 'failing.test.cjs'), 'throw new Error("test failed");');
@@ -231,9 +231,10 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
       else { calls++; completion(res, {}); }
     });
     await writeFile(join(f.cwd, 'AGENTS.md'), 'Project guidance. '.repeat(2000));
+    f.config.models.local.contextTokens = 16384;
     f.config.policy.escalation.maxEscalations = 0;
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Inspect code' }, { approve: async () => false });
-    expect(result.status).toBe('unsupported');
+    expect(result.status).toBe('context_limit');
     expect(calls).toBe(0);
     expect(result.spentUsd).toBe(0.00001);
   });

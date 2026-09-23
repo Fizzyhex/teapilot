@@ -63,7 +63,7 @@ it('empty-repository coding can inspect and write without a shell approval', asy
   expect(calls).toBe(3);
 });
 
-it('a local inspection loop reports its real failure and disabled fallbacks', async () => {
+it('a local inspection loop preserves same-tier recovery and reports its final failure', async () => {
   const f = await setup();
   const server = await mockServer((_body, req, res) => {
     if (req.url?.endsWith('/models')) res.end('{}');
@@ -72,9 +72,9 @@ it('a local inspection loop reports its real failure and disabled fallbacks', as
   f.config.routingMode = 'direct'; f.config.models.local.baseUrl = server.url;
   f.config.models.economy.enabled = false; f.config.models.strong.enabled = false;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Create Pong' }, { approve: async () => false });
-  expect(result).toMatchObject({ success: false, status: 'escalation_unavailable', attempts: 1 });
+  expect(result).toMatchObject({ success: false, status: 'ineffective_calls', attempts: 3 });
   expect(result.text).toContain('ineffective calls');
-  expect(result.text).toContain('Disabled by configuration');
+  expect(result.text).toContain('configured escalation limit reached');
   expect(result.text).toContain('Checks after latest observed edit: not run');
   expect(result.text).toContain('Next:');
 });

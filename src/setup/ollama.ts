@@ -5,12 +5,13 @@ import { homedir, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { exists } from '../config.js';
-import type { SetupUI } from './terminal.js';
+import { chooseMany, type SetupUI } from './terminal.js';
 
 export const ollamaURL = 'http://127.0.0.1:11434';
 export const presets = [
-  { id: 'qwen3.5:4b', bytes: 3_400_000_000, memoryGiB: 8, context: 16384 },
-  { id: 'qwen3.5:2b', bytes: 2_700_000_000, memoryGiB: 6, context: 16384 },
+  { label: 'Default - Qwen3.5-9B abliterated', id: 'huihui_ai/qwen3.5-abliterated:9b', bytes: 6_600_000_000, memoryGiB: 12, context: 16384 },
+  { label: 'Hard task fallback - Qwen3.5-35B-A3B abliterated Q4_K_M', id: 'huihui_ai/qwen3.5-abliterated:35b-a3b-q4_K', bytes: 24_000_000_000, memoryGiB: 32, context: 16384 },
+  { label: 'Cheap & Fast - mradermacher/Qwen3.5-4B-Uncensored-GGUF Q8_0', id: 'hf.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF:Q8_0', bytes: 4_700_000_000, memoryGiB: 8, context: 16384 },
 ];
 export interface OllamaModel { name: string; size: number; remote_model?: string }
 
@@ -134,13 +135,38 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   catch { signal.throwIfAborted(); ui.log('GPU memory unavailable; memory guidance is approximate.'); }
   const installed = (await ollamaJSON<{ models: OllamaModel[] }>('/api/tags', signal, undefined, base)).models.filter(model => !model.remote_model && !model.name.includes('cloud'));
   const visible = installed.filter(model => !/^teapilot-[a-f0-9]{10}-[0-9]+:latest$/.test(model.name) && !presets.some(preset => preset.id === model.name));
-  const choices = [...presets.map(p => `${p.id} - ${installed.some(model => model.name === p.id) ? 'installed' : `about ${(p.bytes / 1e9).toFixed(1)} GB download`}, ${p.memoryGiB}+ GiB RAM suggested`), ...visible.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
-  const suggested = memory >= presets[0]!.memoryGiB ? 0 : 1;
-  ui.log(`Suggested: ${presets[suggested]!.id} based on system RAM; GPU memory and context also affect fit. Coding is verified after preparation.`);
-  const choice = await ui.choose('Local model', choices, suggested);
-  const preset = presets[choice];
-  const id = preset?.id ?? visible[choice - presets.length]?.name ?? await ui.input('Local Ollama model name');
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(id) || id.includes('cloud')) throw new Error('Enter a local Ollama model name; cloud models are not a fully local setup.');
+  const choices = [...presets.map(p => `${p.label} - ${installed.some(model => model.name === p.id) ? 'installed' : `about ${(p.bytes / 1e9).toFixed(1)} GB download`}, ${p.memoryGiB}+ GiB RAM suggested`), ...visible.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
+  const suggested = 0;
+  ui.log(`Suggested: ${presets[suggested]!.id} is the default; system RAM, GPU memory and context affect fit. Coding is verified after preparation.`);
+  const selections = await chooseMany(ui, 'Local models to install (queued in selection order)', choices, suggested);
+  const queue: Array<{ id: string; preset: typeof presets[number] | undefined }> = [];
+  for (const choice of selections) {
+    const preset = presets[choice];
+    const id = preset?.id ?? visible[choice - presets.length]?.name ?? await ui.input('Local Ollama model name');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(id) || id.includes('cloud')) throw new Error('Enter a local Ollama model name; cloud models are not a fully local setup.');
+    if (!queue.some(item => item.id === id)) queue.push({ id, preset });
+  }
+  ui.log(`Install queue: ${queue.map(item => item.id).join(' -> ')}`);
+  const planned = [];
+  let reservedBytes = 0;
+  for (const item of queue) {
+    signal.throwIfAborted();
+    ui.log(`Configure ${item.id}`);
+    planned.push({ ...item, context: await configureOllamaModel(ui, item.id, item.preset, installed, memory, reservedBytes) });
+    if (!installed.some(model => model.name === item.id)) reservedBytes += (item.preset?.bytes ?? 0) * 1.1;
+  }
+  const prepared = [];
+  for (const [index, item] of planned.entries()) {
+    signal.throwIfAborted();
+    ui.log(`Model ${index + 1}/${queue.length}: ${item.id}`);
+    prepared.push(await prepareOllamaModel(ui, signal, item.id, item.context, installed, base, verbose));
+  }
+  if (prepared.length === 1) return prepared[0]!;
+  ui.log('All queued models are installed. Choose the active execution model; the others remain available for future setup.');
+  return prepared[await ui.choose('Active execution model', prepared.map(model => model.source), Math.max(0, prepared.findIndex(model => model.source === presets[0]!.id)))]!;
+}
+
+async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof presets[number] | undefined, installed: OllamaModel[], memory: number, reservedBytes: number): Promise<number> {
   ui.log('Context is how much text the model can work with at once. Larger values use more memory; Enter accepts the suggested value.');
   let context: number;
   for (;;) {
@@ -155,10 +181,16 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
     let storage = process.env.OLLAMA_MODELS || (process.platform === 'linux' && await exists('/usr/share/ollama') ? '/usr/share/ollama' : homedir());
     while (!await exists(storage)) { const parent = join(storage, '..'); if (parent === storage) break; storage = parent; }
     const disk = await statfs(storage);
-    const required = (preset?.bytes ?? 0) * 1.1 + 1_000_000_000;
+    const required = reservedBytes + (preset?.bytes ?? 0) * 1.1 + 1_000_000_000;
     checkDisk(disk.bavail * disk.bsize, required);
-    ui.log(`Free space on model storage filesystem: ${(disk.bavail * disk.bsize / 1e9).toFixed(1)} GB.${preset ? '' : ' Custom model download size is unknown.'}`);
-    if (!await ui.confirm(`Download ${id}${preset ? ` (about ${(preset.bytes / 1e9).toFixed(1)} GB)` : ''}?`)) throw new Error('Download declined; existing configuration is unchanged.');
+    ui.log(`Free space on model storage filesystem: ${(disk.bavail * disk.bsize / 1e9).toFixed(1)} GB.${preset?.bytes ? '' : ' Custom model download size is unknown.'}`);
+    if (!await ui.confirm(`Download ${id}${preset?.bytes ? ` (about ${(preset.bytes / 1e9).toFixed(1)} GB)` : ''}?`)) throw new Error('Download declined; existing configuration is unchanged.');
+  }
+  return context;
+}
+
+async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, context: number, installed: OllamaModel[], base: string, verbose: boolean): Promise<{ id: string; source: string; context: number; tools: boolean }> {
+  if (!installed.some(model => model.name === id)) {
     for (;;) {
       try { await streamOperation('/api/pull', { model: id, stream: true }, signal, ui.log, base, verbose); break; }
       catch (error) { signal.throwIfAborted(); if (!await ui.confirm('Download failed. Retry/resume?')) throw error; }

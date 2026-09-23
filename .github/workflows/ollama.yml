@@ -10,7 +10,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        model: ['qwen3.5:4b', 'qwen3.5:2b']
+        # The 35B preset needs a machine with enough RAM; validate it locally.
+        model: ['huihui_ai/qwen3.5-abliterated:9b', 'hf.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF:Q8_0']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:

@@ -55,6 +55,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
       provider_error: 'Run teapilot doctor --live with this configuration to check the execution model.',
       unsupported: 'Check model context and tool support with teapilot doctor --live.',
+      context_limit: 'Reduce conversation or tool-result size; the estimated input plus reserved output exceeds the configured model context.',
+      payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',
       budget: 'Review spending and remaining request/day limits before retrying.',
       ineffective_calls: 'Inspect the current files, then retry with a narrower concrete change.',
       test_failures: 'Inspect the failing check output and retry with that failure as the task.',
