@@ -52,8 +52,8 @@ async function main(): Promise<void> {
   if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
   const controller = new AbortController();
-  const presentation = new TerminalPresentation(Boolean(values.json), Boolean(values['no-motion']));
-  const ui = interactive ? terminalUI(controller.signal) : undefined;
+  const presentation = new TerminalPresentation(Boolean(values.json), Boolean(values['no-motion'] || values['non-interactive']));
+  const ui = interactive ? terminalUI(controller.signal, presentation) : undefined;
   const onInterrupt = () => { presentation.close(); controller.abort(); ui?.close(); };
   process.once('SIGINT', onInterrupt);
   try {
@@ -88,11 +88,10 @@ async function main(): Promise<void> {
     const approve: Approve = async approval => {
       if (!ui || controller.signal.aborted || approval.signal?.aborted) return false;
       presentation.approval(redact(`${approval.summary}\n${approval.details ?? ''}`));
-      try { return await ui.confirm('Approve this action?', approval.signal); }
-      finally { if (!controller.signal.aborted) presentation.start(); }
+      return await ui.confirm('Approve this action?', approval.signal);
     };
     if (command === 'doctor') {
-      process.exitCode = await doctor(config, values.cwd, { live: values.live, signal: controller.signal, consent: async message => ui ? ui.confirm(redact(message)) : false, log: text => console.log(redact(text)) }) ? 0 : 1;
+      process.exitCode = await doctor(config, values.cwd, { live: values.live, signal: controller.signal, consent: async message => ui ? ui.confirm(redact(message)) : false, activity: presentation.activity, log: text => presentation.write(redact(text) + '\n', 'stdout') }) ? 0 : 1;
       return;
     }
     let workload: Workload | undefined = command === 'code' ? 'coder' : command === 'ask' ? 'ask' : undefined;
@@ -103,14 +102,14 @@ async function main(): Promise<void> {
     const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui ? await ui.input('teapilot') : '');
     if (!prompt.trim()) throw new Error('Supply a prompt; use teapilot setup for first use or --help for examples.');
     const request = { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, signal: controller.signal };
-    const dependencies = { approve, onProgress: (message: string) => presentation.log(redact(message)), onEvent: (event: import('./integration/events.js').HostEvent) => presentation.event(event) };
+    const dependencies = { approve, onActivity: presentation.setActivity, onProgress: (message: string) => presentation.log(redact(message)), onEvent: (event: import('./integration/events.js').HostEvent) => presentation.event(event) };
     let result;
     presentation.start();
     try { result = await runHost(config, request, dependencies); }
     catch (error) {
       if (!(error instanceof SearchSetupError) || !ui || values.json) throw error;
       presentation.pause();
-      console.error(error.message);
+      presentation.log(error.message);
       if (!await ui.confirm('Continue without web search? The answer will be unverified against current sources.')) throw error;
       presentation.start();
       result = await runHost(config, { ...request, web: false }, dependencies);

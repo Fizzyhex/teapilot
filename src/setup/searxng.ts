@@ -1,3 +1,4 @@
+import { during } from '../activity.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
@@ -67,22 +68,22 @@ export class ManagedSearch {
   }
   async manage(action: string, ui: SetupUI): Promise<boolean> {
     if (!['status', 'start', 'stop', 'remove'].includes(action)) throw new Error('Use teapilot search status|start|stop|remove.');
-    await this.available();
+    await during(ui, 'Checking Docker...', () => this.available());
     if (action === 'start') {
       if (!await ui.confirm('Start local search (downloads SearXNG if needed) and send a connectivity query to external search engines?')) return false;
-      const url = await this.start(ui.log);
-      await searchQuery(url, 'teapilot connectivity check', this.signal);
+      const url = await during(ui, 'Starting local search...', () => this.start(ui.log));
+      await during(ui, 'Checking search connectivity...', () => searchQuery(url, 'teapilot connectivity check', this.signal));
       ui.log(`Search: PASS at ${url}. Rerun setup to connect this service to the profile.`);
       return true;
     }
-    const container = await this.inspect();
+    const container = await during(ui, 'Checking local search...', () => this.inspect());
     if (!container) { ui.log('Local search is not installed for this profile.'); return action !== 'status'; }
     if (action === 'status') {
       ui.log(`Local search: ${container.State.Running ? 'running' : 'stopped'}${container.State.Running ? ` at ${this.url(container)}` : ''}.`);
       return container.State.Running;
     }
     if (action === 'remove' && !await ui.confirm('Remove this profile’s search container? Local settings and the downloaded image will be retained.')) return false;
-    await this.docker(action === 'stop' ? ['stop', container.Id] : ['rm', '-f', container.Id]);
+    await during(ui, action === 'stop' ? 'Stopping local search...' : 'Removing local search...', () => this.docker(action === 'stop' ? ['stop', container.Id] : ['rm', '-f', container.Id]));
     ui.log(`Local search ${action === 'stop' ? 'stopped' : 'removed'}. Ordinary ask/code remain available. Rerun setup to change search settings.`);
     return true;
   }

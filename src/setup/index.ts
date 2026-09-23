@@ -1,3 +1,4 @@
+import { during } from '../activity.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -74,7 +75,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     if (options.nonInteractive) throw new Error('Configuration already exists. Rerun teapilot setup interactively to retain or replace it.');
     if (await ui.choose(`Configuration exists at ${directory}.`, ['Keep settings and verify', 'Reconfigure (confirm before saving)']) === 0) {
       const { doctor } = await import('../diagnostics.js');
-      const ready = await doctor(await loadConfig(directory, { ...process.env, ...await credentials?.load() }), process.cwd(), { live: true, signal, consent: ui.confirm, log: ui.log });
+      const ready = await doctor(await loadConfig(directory, { ...process.env, ...await credentials?.load() }), process.cwd(), { live: true, signal, consent: ui.confirm, log: ui.log, activity: ui.activity });
       ui.log(`Next: ${nextCommand}`);
       return ready;
     }
@@ -119,8 +120,8 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     }
   }
   if (choice === 0) {
-    await ensureOllama(ui, signal);
-    const model = await selectOllamaModel(ui, signal, undefined, options.verbose);
+    await during(ui, 'Preparing Ollama...', () => ensureOllama(ui, signal));
+    const model = await during(ui, 'Inspecting local models...', () => selectOllamaModel(ui, signal, undefined, options.verbose));
     displayModel = model.source;
     Object.assign(config.models.local, { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2 });
     delete env.LOCAL_API_KEY;
@@ -147,18 +148,18 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (tier === 'local') { config.models.local.inputUsdPerMillion = 0; config.models.local.outputUsdPerMillion = 0; }
   config.secrets = Object.fromEntries(Object.entries(config.models).map(([name, model]) => [name, env[model.apiKeyEnv] || undefined])) as Config['secrets'];
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
-  const status = await modelStatus(config, tier, signal);
+  const status = await during(ui, 'Checking model endpoint...', () => modelStatus(config, tier, signal));
   let report: LiveReport | undefined;
-  if (status) { ui.log(`Endpoint ${config.models[tier].baseUrl}: ${status}`); await endpointHint(config, tier, ui.log, signal); }
+  if (status) { ui.log(`Endpoint ${config.models[tier].baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
   else if (tier === 'local' || await ui.confirm(`Run paid live checks, bounded by $${config.policy.budget.requestUsd}/request and $${config.policy.budget.dailyUsd}/day?`)) {
-    report = await liveCheck(config, tier, signal, ui.log);
+    report = await during(ui, 'Verifying answers and coding...', () => liveCheck(config, tier, signal, ui.log));
   }
   // Failed or skipped coding validation never advertises a ready coding path.
   config.models[tier].toolCalling = Boolean(report?.tools);
   config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
   if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
   ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
-  const routingReady = config.routingMode === 'direct' || await routingCheck(config, ui.confirm, ui.log, signal);
+  const routingReady = config.routingMode === 'direct' || await during(ui, 'Verifying hosted routing...', () => routingCheck(config, ui.confirm, ui.log, signal));
   const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, directory, ui, signal);
   const selected = config.models[tier];
   ui.log('\nReady to save');
@@ -180,7 +181,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     await credentials.save(Object.fromEntries(Object.entries(env).filter(([key]) => keys.has(key))));
     env = Object.fromEntries(Object.entries(env).filter(([key]) => !keys.has(key)));
   }
-  await saveConfiguration(directory, config, env, signal);
+  await during(ui, 'Saving configuration...', () => saveConfiguration(directory, config, env, signal));
   ui.log(`Configuration saved in ${directory}. Environment variables still override saved settings.`);
   ui.log(report?.coding ? 'Model checks passed. See the routing and search results above.' : 'Partial: configuration saved; some model checks remain unverified.');
   ui.log(`Next: ${nextCommand}`);

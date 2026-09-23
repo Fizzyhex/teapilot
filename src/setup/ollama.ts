@@ -1,3 +1,4 @@
+import { during, terminalHandoff } from '../activity.js';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, open, rm, statfs } from 'node:fs/promises';
@@ -103,9 +104,9 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
     const directory = await mkdtemp(join(tmpdir(), 'teapilot-ollama-'));
     try {
       const path = join(directory, process.platform === 'win32' ? 'OllamaSetup.exe' : 'install.sh');
-      await downloadInstaller(process.platform === 'win32' ? 'https://ollama.com/download/OllamaSetup.exe' : 'https://ollama.com/install.sh', path, signal, ui);
-      if (process.platform === 'win32') await command(path, ['/VERYSILENT', '/NORESTART'], signal);
-      else await command('sh', [path], signal, true);
+      await during(ui, 'Downloading Ollama installer...', () => downloadInstaller(process.platform === 'win32' ? 'https://ollama.com/download/OllamaSetup.exe' : 'https://ollama.com/install.sh', path, signal, ui));
+      if (process.platform === 'win32') await during(ui, 'Installing Ollama...', () => command(path, ['/VERYSILENT', '/NORESTART'], signal));
+      else await terminalHandoff(ui, () => command('sh', [path], signal, true));
     } finally { await rm(directory, { recursive: true, force: true }); }
     executable = await binary(signal);
     if (!executable) throw new Error('Ollama installation is incomplete. Finish the installer, then rerun teapilot setup.');
@@ -113,7 +114,7 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
   if (await online()) return;
   if (!await ui.confirm('Start the installed Ollama service/application?')) throw new Error('Start Ollama, then rerun teapilot setup.');
   if (process.platform === 'linux') {
-    await command('sudo', ['systemctl', 'start', 'ollama'], signal, true).catch(() => {
+    await terminalHandoff(ui, () => command('sudo', ['systemctl', 'start', 'ollama'], signal, true)).catch(() => {
       throw new Error('Could not start the Ollama service. Run ollama serve in another terminal, then rerun setup.');
     });
   } else {
@@ -124,8 +125,10 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
       child.on('error', reject); child.on('spawn', () => { child.unref(); resolve(); });
     });
   }
-  for (let count = 0; count < 30; count++) { if (await online()) return; await delay(1000, undefined, { signal }); }
-  throw new Error('Ollama did not become ready. Check its service logs, then rerun setup.');
+  await during(ui, 'Waiting for Ollama to become ready...', async () => {
+    for (let count = 0; count < 30; count++) { if (await online()) return; await delay(1000, undefined, { signal }); }
+    throw new Error('Ollama did not become ready. Check its service logs, then rerun setup.');
+  });
 }
 
 export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<{ id: string; source: string; context: number; tools: boolean }> {
@@ -192,7 +195,7 @@ async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof pres
 async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, context: number, installed: OllamaModel[], base: string, verbose: boolean): Promise<{ id: string; source: string; context: number; tools: boolean }> {
   if (!installed.some(model => model.name === id)) {
     for (;;) {
-      try { await streamOperation('/api/pull', { model: id, stream: true }, signal, ui.log, base, verbose); break; }
+      try { await during(ui, `Downloading ${id}...`, () => streamOperation('/api/pull', { model: id, stream: true }, signal, ui.log, base, verbose)); break; }
       catch (error) { signal.throwIfAborted(); if (!await ui.confirm('Download failed. Retry/resume?')) throw error; }
     }
   }
@@ -204,6 +207,6 @@ async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, 
   // context actually used by the OpenAI API, which has no num_ctx parameter.
   const alias = `teapilot-${createHash('sha256').update(id).digest('hex').slice(0, 10)}-${context}:latest`;
   ui.log(`Preparing ${id} with a ${context.toLocaleString('en-US')}-token context...`);
-  await streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose);
+  await during(ui, `Preparing ${id}...`, () => streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose));
   return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true };
 }

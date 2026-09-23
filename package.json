@@ -16,7 +16,7 @@
     "doctor": "tsx src/cli.ts doctor",
     "setup": "tsx src/cli.ts setup",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-art.mjs",
     "test": "vitest run",
     "check": "npm run typecheck && npm test && npm run build",
     "prepack": "npm run build",
@@ -34,6 +34,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
+    "@xterm/headless": "^6.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"

@@ -1,9 +1,10 @@
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { styleText } from 'node:util';
-import { terminalColour } from '../presentation.js';
+import { stripVTControlCharacters, styleText } from 'node:util';
+import { terminalColour, terminalRows, type TerminalPresentation } from '../presentation.js';
+import type { ActivityUI } from '../activity.js';
 
-export interface SetupUI {
+export interface SetupUI extends ActivityUI {
   input(message: string, fallback?: string, secret?: boolean, signal?: AbortSignal): Promise<string>;
   choose(message: string, choices: string[], fallback?: number): Promise<number>;
   confirm(message: string, signal?: AbortSignal): Promise<boolean>;
@@ -23,7 +24,7 @@ export async function chooseMany(ui: SetupUI, message: string, choices: string[]
   }
 }
 
-export function terminalUI(signal: AbortSignal): SetupUI & { close(): void } {
+export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentation): SetupUI & { close(): void } {
   const colour = terminalColour(process.stderr.isTTY) && !process.env.NODE_DISABLE_COLORS;
   const paint = (format: Parameters<typeof styleText>[0], text: string) => colour ? styleText(format, text, { validateStream: false }) : text;
   let hidden = false;
@@ -31,22 +32,58 @@ export function terminalUI(signal: AbortSignal): SetupUI & { close(): void } {
     if (!hidden) process.stderr.write(chunk);
     callback();
   } });
+  Object.defineProperty(output, 'columns', { get: () => process.stderr.columns });
+  const resize = () => output.emit('resize');
+  process.stderr.on('resize', resize);
   const terminal = createInterface({ input: process.stdin, output, terminal: Boolean(process.stdin.isTTY) });
+  // Readline must not echo stray keys into an operation's live display.
+  terminal.pause();
+  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  const write = (text: string) => presentation ? presentation.write(text) : process.stderr.write(text);
+  const touch = () => presentation?.touchPrompt();
+  process.stdin.prependListener('data', touch);
   const ui = {
+    activity: presentation?.activity,
+    suspend: () => {
+      const resume = presentation?.suspend();
+      terminal.pause();
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      return () => resume?.();
+    },
     log: (message: string) => {
       const format = message.trim() === 'Ready to save' ? 'bold' : /FAIL|failed|Invalid/.test(message) ? 'red' : /NOT TESTED|not tested|unverified|Not verified|Partial|Skipped/.test(message) ? 'yellow' : /PASS|Passed|Ready|saved/.test(message) ? 'green' : /^(Next:|Then:|  \w+:)/.test(message) ? 'cyan' : 'dim';
-      process.stderr.write(`${paint(format, message)}\n`);
+      write(`${paint(format, message)}\n`);
     },
     async input(message: string, fallback?: string, secret = false, extraSignal?: AbortSignal): Promise<string> {
       signal.throwIfAborted();
       const label = `${paint('bold', message)}${fallback !== undefined && !secret && fallback !== '' ? paint('cyan', ` [${fallback}]`) : ''}: `;
+      const combined = extraSignal ? AbortSignal.any([signal, extraSignal]) : signal;
+      const plainLabel = stripVTControlCharacters(label);
+      presentation?.beginPrompt(label, () => secret
+        ? { rows: Math.floor(plainLabel.length / (process.stderr.columns || 80)), cols: plainLabel.length % (process.stderr.columns || 80) }
+        : terminal.getCursorPos());
+      let submitted = false;
+      let answer = '';
       if (secret) { process.stderr.write(label); hidden = true; }
-      try { return (await terminal.question(secret ? '' : label, { signal: extraSignal ? AbortSignal.any([signal, extraSignal]) : signal })).trim() || fallback || ''; }
-      finally { hidden = false; if (secret) process.stderr.write('\n'); }
+      try {
+        if (process.stdin.isTTY) process.stdin.setRawMode(true);
+        answer = await terminal.question(secret ? '' : label, { signal: combined });
+        submitted = true;
+        return answer.trim() || fallback || '';
+      } finally {
+        terminal.pause();
+        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+        hidden = false;
+        if (secret || !submitted) process.stderr.write('\n');
+        const text = plainLabel + (secret ? '' : answer);
+        const occupied = submitted && terminalRows(text, process.stderr.columns || 80) !== undefined
+          ? Math.floor(text.length / (process.stderr.columns || 80)) + 1 : undefined;
+        presentation?.endPrompt(submitted, occupied ?? Number.MAX_SAFE_INTEGER);
+      }
     },
     async choose(message: string, choices: string[], fallback = 0): Promise<number> {
-      process.stderr.write(`\n${paint('bold', message)}\n\n`);
-      choices.forEach((choice, index) => process.stderr.write(`  ${paint('cyan', String(index + 1))}. ${choice}\n`));
+      write(`\n${paint('bold', message)}\n\n`);
+      choices.forEach((choice, index) => write(`  ${paint('cyan', String(index + 1))}. ${choice}\n`));
       for (;;) {
         const value = Number(await ui.input('Choose', String(fallback + 1)));
         if (Number.isInteger(value) && value >= 1 && value <= choices.length) return value - 1;
@@ -57,7 +94,7 @@ export function terminalUI(signal: AbortSignal): SetupUI & { close(): void } {
       try { let r = (await ui.input(`${message} Type yes to confirm`, 'no', false, extraSignal)); return r === 'yes' || r === "ya"; }
       catch (error) { if (signal.aborted || extraSignal?.aborted) return false; throw error; }
     },
-    close: () => terminal.close(),
+    close: () => { process.stdin.removeListener('data', touch); process.stderr.removeListener('resize', resize); terminal.close(); },
   };
   terminal.on('SIGINT', () => process.emit('SIGINT'));
   return ui;

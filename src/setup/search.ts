@@ -1,3 +1,4 @@
+import { during } from '../activity.js';
 import type { Config } from '../config.js';
 import { searchQuery } from '../search.js';
 import type { SetupUI } from './terminal.js';
@@ -16,7 +17,7 @@ export async function configureSearch(config: Config, env: Record<string, string
   let base: string;
   if (choice === 0) {
     const service = new ManagedSearch(directory, signal);
-    try { await service.available(); }
+    try { await during(ui, 'Checking Docker...', () => service.available()); }
     catch (error) {
       signal.throwIfAborted();
       ui.log(`Skipped local search: ${error instanceof Error ? error.message : 'Docker is unavailable.'}`);
@@ -24,7 +25,7 @@ export async function configureSearch(config: Config, env: Record<string, string
       return 'Unchanged · local setup skipped';
     }
     if (!await ui.confirm('Download/start SearXNG as a background service, available only on this computer, and send a test query?')) return 'Unchanged · setup declined';
-    try { base = await service.start(ui.log); }
+    try { base = await during(ui, 'Starting local search...', () => service.start(ui.log)); }
     catch (error) {
       signal.throwIfAborted();
       ui.log(`Search setup failed: ${error instanceof Error ? error.message : 'Check Docker.'} You can continue saving the model settings.`);
@@ -45,7 +46,7 @@ export async function configureSearch(config: Config, env: Record<string, string
   }
   for (;;) {
     try {
-      await searchQuery(base, 'teapilot connectivity check', signal);
+      await during(ui, 'Checking search connectivity...', () => searchQuery(base, 'teapilot connectivity check', signal));
       config.searchUrl = base; env.SEARCH_BASE_URL = base;
       if (!config.policy.permissions.includes('web.search')) config.policy.permissions.push('web.search');
       ui.log('Search: PASS (SearXNG JSON response).');

@@ -1,3 +1,4 @@
+import { during, type ActivityUI } from './activity.js';
 import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
 import { Type } from '@earendil-works/pi-ai';
 import { randomUUID } from 'node:crypto';
@@ -136,7 +137,7 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
   }
 }
 
-export async function doctor(config: Config, cwd: string, options: { live?: boolean; signal?: AbortSignal; consent: (message: string) => Promise<boolean>; log: (text: string) => void }): Promise<boolean> {
+export async function doctor(config: Config, cwd: string, options: ActivityUI & { live?: boolean; signal?: AbortSignal; consent: (message: string) => Promise<boolean>; log: (text: string) => void }): Promise<boolean> {
   const { log } = options;
   let healthy = true;
   if (config.source) {
@@ -149,7 +150,7 @@ export async function doctor(config: Config, cwd: string, options: { live?: bool
   if (config.routingMode !== 'direct') {
     log(`Hosted routing credential: ${config.router.apiKey ? 'configured (not live-tested)' : 'MISSING; run teapilot setup'}`);
     healthy &&= Boolean(config.router.apiKey);
-    if (options.live) healthy = await routingCheck(config, options.consent, log, options.signal) && healthy;
+    if (options.live) healthy = await during(options, 'Verifying hosted routing...', () => routingCheck(config, options.consent, log, options.signal)) && healthy;
   }
   try {
     await access(cwd);
@@ -162,16 +163,16 @@ export async function doctor(config: Config, cwd: string, options: { live?: bool
   for (const tier of tiers) {
     const model = config.models[tier];
     if (!model.enabled) continue;
-    const error = tier !== 'local' && !config.secrets[tier] ? 'Missing credential; run teapilot setup.' : await modelStatus(config, tier, options.signal);
+    const error = tier !== 'local' && !config.secrets[tier] ? 'Missing credential; run teapilot setup.' : await during(options, `Checking ${tier} endpoint...`, () => modelStatus(config, tier, options.signal));
     log(`${tier}: ${model.id}; endpoint ${model.baseUrl}: ${error ? `FAIL: ${error}` : 'PASS (model found; live inference checked separately)'}`);
     if (config.policy.disabledCapabilities.includes(`coder.${tier}`)) log(`${tier}: coding is disabled by configuration; rerun setup to reconfigure and validate it.`);
-    if (error) { healthy = false; await endpointHint(config, tier, log, options.signal); continue; }
+    if (error) { healthy = false; await during(options, 'Checking local endpoint...', () => endpointHint(config, tier, log, options.signal)); continue; }
     available = true;
     if (options.live) {
       if (tier !== 'local' && !await options.consent(`Run paid ${tier} diagnostic calls within $${config.policy.budget.requestUsd}/request and $${config.policy.budget.dailyUsd}/day limits?`)) {
         log(`${tier}: live check declined`); healthy = false; continue;
       }
-      const result = await liveCheck(config, tier, options.signal, log);
+      const result = await during(options, `Verifying ${tier} answers and coding...`, () => liveCheck(config, tier, options.signal, log));
       log(`${tier}: answers ${result.ask ? 'PASS' : 'FAIL'}; tools ${result.tools ? 'PASS' : 'unverified'}; coding ${result.coding ? 'PASS' : 'unverified'}; accounted $${result.spentUsd.toFixed(6)}`);
       healthy &&= result.ask && (!model.toolCalling || result.coding);
     }

@@ -1,3 +1,4 @@
+import type { ActivitySink } from './activity.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -21,6 +22,7 @@ export interface HostResult {
 }
 export interface HostDependencies {
   approve: Approve;
+  onActivity?: ActivitySink;
   provider?: JevProvider;
   localProbe?: () => Promise<boolean>;
   onProgress?: (message: string) => void;
@@ -31,13 +33,17 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   if (config.routingMode === 'direct' && !request.workload) throw new Error('Direct routing requires teapilot ask or teapilot code.');
   const prompt = request.prompt.trim();
   if (!prompt || prompt.length + (request.correction?.length ?? 0) > config.policy.limits.maxPromptChars) throw new Error(`Prompt must contain 1–${config.policy.limits.maxPromptChars} characters`);
+  dependencies.onActivity?.({ kind: 'waiting', label: 'Checking request availability...' });
   const cwd = await realpath(request.cwd);
   if (!(await stat(cwd)).isDirectory()) throw new Error('Working directory is not a directory');
   const contextPolicy = new ExecutionPolicy(cwd, config, dependencies.approve);
   for (const context of request.context ?? []) if (context.path) await contextPolicy.path(context.path, false);
   const conversation = prepareConversation(prompt + (request.correction ? `\nUser correction:\n${request.correction}` : ''), request.context ?? [], request.history ?? [], config.policy.limits.maxPromptChars);
   if (conversation.omitted) dependencies.onEvent?.({ type: 'history_omitted', turns: conversation.omitted });
-  if (request.web) await checkSearch(config, request.signal);
+  if (request.web) {
+    dependencies.onActivity?.({ kind: 'waiting', label: 'Checking web search...' });
+    await checkSearch(config, request.signal);
+  }
   const unlock = await lockState(config.stateDir);
   const requestId = randomUUID();
   const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value)), dependencies.onEvent);
@@ -72,6 +78,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
   };
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
+    dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
     const result = { requestId, success, status, text: telemetry.redact(text), capability: selected, spentUsd: budget.spent().request, receipts, attempts, check, models };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
@@ -97,6 +104,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       }
       if (!candidates.some(c => c.availability?.available)) return await finish(false, 'unavailable', previous?.text || 'No capability fits the configured availability and budget. Run teapilot doctor.');
       dependencies.onProgress?.(scope ? `Routing escalation to ${scope.workload}.${scope.tier} (${previous?.reason}).` : router ? 'Routing with JevRouter.' : 'Selecting the requested workload directly.');
+      dependencies.onActivity?.({ kind: 'waiting', label: router ? 'Routing with JevRouter...' : 'Selecting workload...' });
       const decision = router ? await router.route({
         request: basePrompt,
         context: {
@@ -146,7 +154,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: config.models[tier].id, tier });
       previous = await runAttempt({
         config, workload, tier, cwd, web: Boolean(request.web), budget, telemetry,
-        history: conversation.history, onEvent: dependencies.onEvent, beforeMutation: dependencies.beforeMutation,
+        history: conversation.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
           const approved = await dependencies.approve(approval);
           await telemetry.event('approval', { kind: approval.kind, approved });
@@ -187,5 +195,5 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   } catch (error) {
     await telemetry.event('request_error', { name: error instanceof Error ? error.name : 'Error' });
     throw error;
-  } finally { await unlock(); }
+  } finally { try { await unlock(); } finally { dependencies.onActivity?.(undefined); } }
 }
