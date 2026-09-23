@@ -105,13 +105,34 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         actor_permissions: config.policy.permissions,
       }, candidates) : undefined;
       if (decision) receipts.push(await telemetry.receipt(decision));
-      selected = decision ? decision.decision.selected ?? undefined : candidates.find(c => assessCandidate(config, c).allowed)?.id;
-      if (!selected || decision?.status === 'no_decision') return await finish(false, 'no_decision', decision ? `JevRouter did not authorize a route (${decision.fallback.type ?? 'manual_review'}). Review the receipt or clarify the request.` : 'No capability passed the direct selection policy. Run teapilot doctor.');
+
+      const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
+      const fallbackWorkload = request.workload ?? scope?.workload;
+      const fallbackSelection = fallbackWorkload
+        ? candidates.find(candidate => candidate.id.startsWith(`${fallbackWorkload}.`) && assessCandidate(config, candidate).allowed)?.id
+        : undefined;
+      const usedRoutingFallback = Boolean(decision?.status === 'no_decision' && fallbackSelection);
+      selected = routedSelection ?? (decision ? fallbackSelection : candidates.find(c => assessCandidate(config, c).allowed)?.id);
+
+      if (decision?.status === 'no_decision' && !fallbackWorkload) {
+        return await finish(false, 'workload_uncertain', `JevRouter could not confidently determine whether this request needs repository access (${decision.fallback.type ?? 'manual_review'}). Use teapilot ask or teapilot code to state the intended workload.`);
+      }
+      if (!selected) {
+        return await finish(false, 'unavailable', decision
+          ? `JevRouter returned no usable route (${decision.fallback.type ?? 'manual_review'}), and no host-approved fallback capability was available.`
+          : 'No capability passed the direct selection policy. Run teapilot doctor.');
+      }
+
+      if (usedRoutingFallback) {
+        dependencies.onProgress?.(`JevRouter returned no confident route (${decision!.fallback.type ?? 'manual_review'}); using host-approved fallback ${selected}.`);
+        await telemetry.event('routing_fallback', { decisionId: decision!.decision_id, capability: selected, reason: decision!.fallback.type ?? 'manual_review' });
+      }
+
       const candidate = candidates.find(c => c.id === selected);
-      const assessment = decision?.decision.candidates.find(c => c.id === selected);
-      if (!candidate || !assessCandidate(config, candidate).allowed || (decision && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
+      const assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
+      if (!candidate || !assessCandidate(config, candidate).allowed || (decision && !usedRoutingFallback && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
-      if (assessCandidate(config, candidate).confirmation || decision?.status === 'needs_confirmation' || assessment?.router.requires_confirmation) {
+      if (assessCandidate(config, candidate).confirmation || (!usedRoutingFallback && (decision?.status === 'needs_confirmation' || assessment?.router.requires_confirmation))) {
         const approved = await dependencies.approve({ kind: 'route', summary: `Execute ${selected}?`, details: `Model: ${candidate.metadata?.model}\nMaximum inference charge per turn: $${Number(candidate.metadata?.max_call_usd).toFixed(6)}\nRequest ceiling: $${config.policy.budget.requestUsd}; already charged/reserved: $${budget.spent().request.toFixed(6)}\n${basePrompt}` });
         await telemetry.event('approval', { decisionId: decision?.decision_id, capability: selected, approved });
         if (!approved) return await finish(false, 'approval_denied', 'Route was not approved.');

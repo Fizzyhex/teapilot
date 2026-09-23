@@ -31,8 +31,20 @@ Copy `config/models.example.json` to `config/models.json` and `config/policy.exa
 | `limits`, `escalation` | Turn/tool/time limits and deterministic failure thresholds |
 | `execution.trustedCommands` | Exact shell command strings you explicitly trust to run automatically |
 
-## Routing policy
+## Fallback routing
 
-In hosted mode, JevRouter owns candidate selection, probabilities, confidence, filtering, risk, permissions, and confirmation. A low-confidence/no-decision response stops execution. Both hosted and direct selection cross the same host permission, risk, verification, availability, and confirmation gate. Direct selections are recorded in outcomes without fabricated JevRouter receipts. The default policy permits guarded repository editing at medium risk without a route-level prompt; add `medium` to `confirmation_risk_levels` to require one.
+In hosted mode, Teapilot normally uses JevRouter to choose how a request should be handled. JevRouter evaluates available capabilities, confidence, risk, permissions, confirmation requirements, and other execution constraints.
+
+When JevRouter returns a confident decision, Teapilot uses that route directly.
+
+If JevRouter cannot make a confident decision, Teapilot may fall back to another capability — but only when the workload is already known to be `ask` or `code`. The fallback chooses the first available capability for that workload that also passes the host execution policy.
+
+For a bare hosted prompt where the workload is unclear, Teapilot does not guess whether repository access or code execution was intended. Instead, it asks the caller to choose `ask` or `code`.
+
+Fallback routing never bypasses normal execution checks, including permissions, risk limits, verification, capability availability, budget limits, or action-level approval.
+
+Direct fallback selections are recorded in the outcome, but Teapilot does not create a fake JevRouter receipt for decisions JevRouter did not make.
+
+By default, guarded repository edits at medium risk do not require route-level confirmation. To require confirmation for these actions, add `medium` to `confirmation_risk_levels`.
 
 [Back to README](../README.md)

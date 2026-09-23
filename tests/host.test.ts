@@ -103,17 +103,47 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     expect(receipt.decision.candidates.find((c: any) => c.id === 'coder.economy').router.filtered).toBe(true);
   });
 
-  it('low confidence and missing permissions never execute', async () => {
-    let inference = 0, confidence = 0.1;
+  it('low confidence falls back within an explicit workload', async () => {
+    let inference = 0;
     const f = await setup((_body, req, res) => {
-      if (req.url === '/jev') jev(res, 'coder.local', confidence);
+      if (req.url === '/jev') jev(res, 'coder.local', 0.1);
+      else if (req.url?.endsWith('/models')) res.end('{}');
+      else { inference++; completion(res, { text: 'Completed with host fallback.' }); }
+    });
+
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Edit code', workload: 'coder' }, { approve: async () => true });
+    expect(result.success).toBe(true);
+    expect(result.capability).toBe('coder.local');
+    expect(inference).toBe(1);
+    expect((await events(f.config)).find(e => e.type === 'routing_fallback')).toMatchObject({ capability: 'coder.local', reason: 'low_confidence' });
+  });
+
+  it('low confidence does not guess repository access for a bare hosted prompt', async () => {
+    let inference = 0;
+    const f = await setup((_body, req, res) => {
+      if (req.url === '/jev') jev(res, 'coder.local', 0.1);
       else if (req.url?.endsWith('/models')) res.end('{}');
       else { inference++; completion(res, {}); }
     });
-    expect((await runHost(f.config, { cwd: f.cwd, prompt: 'Edit code' }, { approve: async () => true })).status).toBe('no_decision');
-    confidence = 0.99;
+
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Take a look at this' }, { approve: async () => true });
+    expect(result.success).toBe(false);
+    expect(result.status).toBe('workload_uncertain');
+    expect(result.text).toContain('teapilot ask or teapilot code');
+    expect(inference).toBe(0);
+  });
+
+  it('missing permissions prevent execution even when routing is confident', async () => {
+    let inference = 0;
+    const f = await setup((_body, req, res) => {
+      if (req.url === '/jev') jev(res, 'coder.local', 0.99);
+      else if (req.url?.endsWith('/models')) res.end('{}');
+      else { inference++; completion(res, {}); }
+    });
+
     f.config.policy.permissions = [];
-    expect((await runHost(f.config, { cwd: f.cwd, prompt: 'Edit code' }, { approve: async () => true })).success).toBe(false);
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Edit code', workload: 'coder' }, { approve: async () => true });
+    expect(result.success).toBe(false);
     expect(inference).toBe(0);
   });
 
@@ -253,7 +283,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     f.config.searchUrl = new URL(f.config.router.endpoint!).origin;
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Research current facts', web: true }, { approve: async () => false });
     expect(result.success).toBe(true);
-    expect(searches).toBe(2); // Connectivity check, then the model's actual query.
+    expect(searches).toBe(2);
   });
 
   it('does not retry or refund an interrupted/failed cloud request', async () => {
