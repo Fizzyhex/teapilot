@@ -1,8 +1,10 @@
 # teapilot
 
-A small personal agent host for coding, questions, research, and planning. Run local models without API keys, or configure cloud models with spending limits.
+a small personal agent host for coding, questions, research, and planning. run local models without API keys, or configure cloud models with spending limits.
 
-Use `ask` for questions and planning, and `code` to work in a repository. Each command handles one request.
+use `ask` for questions and planning, and `code` to work in a repository. Each command handles one request. `--web` is available for 
+
+teapilot is built to be focused, resourceful and batteries included.
 
 ## Quick start
 
