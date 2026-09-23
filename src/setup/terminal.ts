@@ -21,7 +21,7 @@ export function terminalUI(signal: AbortSignal): SetupUI & { close(): void } {
   const terminal = createInterface({ input: process.stdin, output, terminal: Boolean(process.stdin.isTTY) });
   const ui = {
     log: (message: string) => {
-      const format = /FAIL|failed|Invalid/.test(message) ? 'red' : /NOT TESTED|unverified|Partial|Skipped/.test(message) ? 'yellow' : /PASS|Passed|Ready|saved/.test(message) ? 'green' : /^(Next:|Then:|  \w+:)/.test(message) ? 'cyan' : 'dim';
+      const format = message.trim() === 'Ready to save' ? 'bold' : /FAIL|failed|Invalid/.test(message) ? 'red' : /NOT TESTED|not tested|unverified|Not verified|Partial|Skipped/.test(message) ? 'yellow' : /PASS|Passed|Ready|saved/.test(message) ? 'green' : /^(Next:|Then:|  \w+:)/.test(message) ? 'cyan' : 'dim';
       process.stderr.write(`${paint(format, message)}\n`);
     },
     async input(message: string, fallback?: string, secret = false, extraSignal?: AbortSignal): Promise<string> {

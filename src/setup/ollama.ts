@@ -127,7 +127,7 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
   throw new Error('Ollama did not become ready. Check its service logs, then rerun setup.');
 }
 
-export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<{ id: string; context: number; tools: boolean }> {
+export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<{ id: string; source: string; context: number; tools: boolean }> {
   const memory = totalmem() / 2 ** 30;
   ui.log(`System memory: ${memory.toFixed(1)} GiB. CPU inference is supported but can be slow.`);
   try { ui.log(`GPU: ${await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]))}`); }
@@ -173,5 +173,5 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   const alias = `teapilot-${createHash('sha256').update(id).digest('hex').slice(0, 10)}-${context}:latest`;
   ui.log(`Preparing ${id} with a ${context.toLocaleString('en-US')}-token context...`);
   await streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose);
-  return { id: alias, context, tools: metadata.capabilities?.includes('tools') ?? true };
+  return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true };
 }

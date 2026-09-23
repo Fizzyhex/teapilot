@@ -16,6 +16,7 @@ Completed:
 - Windows/Linux CI matrix, Docker image, exact native setup instructions.
 - Installable npm CLI with bundled JevRouter/runtime dependencies and upstream license; package installation needs no Git or build tools.
 - Guided Ollama installation/startup, model selection/downloads, private per-user configuration, repeatable setup, and partial-readiness reporting.
+- Styled setup prompts, settings review, recoverable optional search configuration, and profile-owned local SearXNG containers with status/start/stop/remove commands.
 - Qwen3.5 4B and 2B presets with fixed context aliases, non-thinking requests, and a conservative sampling temperature. Installed/custom model choices remain available.
 - Live doctor checks for streaming, tool continuation, and a verified disposable file edit through the production coding loop.
 - Package installation tests in CI; real Ollama release gates; version-tag publication through npm OIDC, disabled until owner configuration is complete.
@@ -38,5 +39,5 @@ Remaining limitations:
 - No OS sandbox. Approved/trusted shell commands run with the user's privileges; filesystem checks do not defend against concurrent malicious filesystem replacement. Trusting a test/build command trusts its executable project code.
 - Hard budget admission relies on conservative configured rates and compliant token limits. Unknown costs remain reserved; provider billing outside those assumptions can only be detected after the fact. Separately operated search costs are not tracked.
 - Success means the bounded run completed without a known execution failure; model output is not independently proven correct. Check status is derived from observed test/build-like shell command results.
-- Search is snippet-based, opt-in, and requires a separately configured SearXNG service. Local live checks establish basic compatibility, not broad model quality; no paid-provider validation or quality benchmarking has been performed.
+- Search is snippet-based and opt-in. Setup can connect an existing SearXNG service or manage a local container using an already-running Docker engine. Managed container behavior has mock coverage; live container startup has not been verified in this session because Docker daemon access was unavailable. Local model live checks establish basic compatibility, not broad model quality; no paid-provider validation or quality benchmarking has been performed.
 - The npm package is not yet published. The owner must establish package ownership, configure the trusted publisher for `release.yml`, and enable `NPM_PUBLISH_ENABLED` before tagged releases publish.

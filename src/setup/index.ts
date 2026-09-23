@@ -90,6 +90,8 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   ui.log('Model downloads and verification happen before the final settings review.');
   const choice = options.nonInteractive ? 1 : await ui.choose('Execution model', ['Local Ollama (execution runs locally; no execution API charges)', 'Existing OpenAI-compatible local endpoint', 'Cloud model (paid API key)']);
   const tier = choice === 2 ? 'economy' : 'local';
+  const previousModel = { ...config.models[tier] };
+  let displayModel: string | undefined;
   // A new profile enables precisely one execution tier, never a silent paid fallback.
   for (const model of Object.values(config.models)) model.enabled = false;
   config.models[tier].enabled = true;
@@ -119,6 +121,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (choice === 0) {
     await ensureOllama(ui, signal);
     const model = await selectOllamaModel(ui, signal, undefined, options.verbose);
+    displayModel = model.source;
     Object.assign(config.models.local, { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2 });
     delete env.LOCAL_API_KEY;
     config.policy.limits.requestTimeoutMs = 120000;
@@ -159,8 +162,11 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, directory, ui, signal);
   const selected = config.models[tier];
   ui.log('\nReady to save');
-  ui.log(`  Execution: ${selected.id}${hasConfiguration && before.execution !== selected.id ? ` (was ${before.execution})` : ''}`);
-  ui.log(`  Context:   ${selected.contextTokens.toLocaleString('en-US')} tokens`);
+  ui.log(`  Execution: ${displayModel ?? selected.id}${hasConfiguration && before.execution !== selected.id ? ` (was ${before.execution})` : ''}`);
+  ui.log(`  Endpoint:  ${selected.baseUrl}${hasConfiguration && previousModel.baseUrl !== selected.baseUrl ? ` (was ${previousModel.baseUrl})` : ''}`);
+  ui.log(`  Context:   ${selected.contextTokens.toLocaleString('en-US')} tokens${hasConfiguration && previousModel.contextTokens !== selected.contextTokens ? ` (was ${previousModel.contextTokens.toLocaleString('en-US')})` : ''}`);
+  if (tier === 'economy') ui.log(`  Rates:     $${selected.inputUsdPerMillion} input / $${selected.outputUsdPerMillion} output per million tokens`);
+  if (tier === 'economy' || config.routingMode === 'hosted') ui.log(`  Budgets:   $${config.policy.budget.requestUsd}/request · $${config.policy.budget.dailyUsd}/UTC day`);
   ui.log(`  Routing:   ${config.routingMode}${config.routingMode === 'hosted' ? ' · may incur charges' : ''}${hasConfiguration ? ` (was ${before.routing})` : ''}`);
   ui.log(`  Search:    ${searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);
   ui.log(`  Checks:    answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'}`);

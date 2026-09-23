@@ -21,7 +21,7 @@ export class ManagedSearch {
   private docker(args: string[], timeout = 30000) { return this.run('docker', args, AbortSignal.any([this.signal, AbortSignal.timeout(timeout)])); }
   async available() {
     const context = await this.docker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}']);
-    const host = process.env.DOCKER_HOST || context;
+    const host = process.env.DOCKER_CONTEXT ? context : process.env.DOCKER_HOST || context;
     if (!/^(unix:\/\/|npipe:\/\/)/.test(host)) throw new Error('Managed search requires a local Docker context. Connect a remote SearXNG URL instead.');
     const os = await this.docker(['info', '--format', '{{.OSType}}']);
     if (os !== 'linux') throw new Error('Switch Docker to Linux containers before setting up search.');
