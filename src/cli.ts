@@ -5,6 +5,7 @@ import { configDirectory, loadConfig, type Workload } from './config.js';
 import { runHost } from './host.js';
 import { doctor } from './diagnostics.js';
 import { setup } from './setup/index.js';
+import { ManagedSearch } from './setup/searxng.js';
 import { terminalUI } from './setup/terminal.js';
 import type { Approve } from './execution/policy.js';
 import { serve } from './integration/service.js';
@@ -17,10 +18,11 @@ teapilot setup
 teapilot ask "Explain dependency injection"
 teapilot code --cwd <repository> "Fix the failing tests"
 teapilot doctor [--live]
+teapilot search status|start|stop|remove
 teapilot serve --stdio
 
 Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json
-         --correction TEXT  --no-motion  --help
+         --correction TEXT  --no-motion  --verbose (setup progress)  --help
 Hosted routing also accepts a bare prompt. Direct routing uses ask/code.
 Approvals require an interactive terminal. Local setup needs no API key.
 
@@ -38,11 +40,12 @@ async function main(): Promise<void> {
     live: { type: 'boolean' }, 'non-interactive': { type: 'boolean' }, endpoint: { type: 'string' }, model: { type: 'string' }, 'context-tokens': { type: 'string' },
     stdio: { type: 'boolean' },
     'no-motion': { type: 'boolean' },
+    verbose: { type: 'boolean' },
   } });
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
-  const command = ['setup', 'doctor', 'ask', 'code', 'serve'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  const command = ['setup', 'doctor', 'ask', 'code', 'serve', 'search'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
   if (command === 'serve') { if (!values.stdio) throw new Error('serve requires --stdio'); await serve(); return; }
   if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
@@ -62,11 +65,18 @@ async function main(): Promise<void> {
         choose: async (): Promise<number> => { throw new Error('This setup choice requires an interactive terminal.'); },
         confirm: async () => false,
       };
-      const ready = await setup({ directory: values['config-dir'], nonInteractive: values['non-interactive'], endpoint: values.endpoint, model: values.model, contextTokens: values['context-tokens'] === undefined ? undefined : Number(values['context-tokens']) }, ui ?? headless, controller.signal);
+      const ready = await setup({ directory: values['config-dir'], verbose: values.verbose, nonInteractive: values['non-interactive'], endpoint: values.endpoint, model: values.model, contextTokens: values['context-tokens'] === undefined ? undefined : Number(values['context-tokens']) }, ui ?? headless, controller.signal);
       process.exitCode = ready ? 0 : 2;
       return;
     }
     const directory = await configDirectory(values['config-dir']);
+    if (command === 'search') {
+      const action = positionals.shift() ?? 'status';
+      if (positionals.length) throw new Error('Use teapilot search status|start|stop|remove.');
+      const serviceUI = ui ?? { log: (text: string) => console.error(text), confirm: async () => { throw new Error('Starting or removing search requires an interactive terminal.'); }, input: async () => '', choose: async () => 0 };
+      process.exitCode = await new ManagedSearch(directory, controller.signal).manage(action, serviceUI) ? 0 : 2;
+      return;
+    }
     let config;
     try { config = await loadConfig(values['config-dir'], { ...process.env }); }
     catch (error) {

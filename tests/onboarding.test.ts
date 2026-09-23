@@ -179,6 +179,23 @@ it('recognizes interrupted first setup without mislabeling retained generations'
   expect(messages.join('\n')).not.toContain('interrupted before activation');
 });
 
+it('blank optional search still saves a verified interactive setup', async () => {
+  const f = await local();
+  vi.stubEnv('TEAPILOT_STATE_DIR', f.config.stateDir);
+  const messages: string[] = [];
+  const ui: SetupUI = {
+    log: text => messages.push(text),
+    choose: async message => message === 'Execution model' || message.startsWith('Web search') ? 1 : 0,
+    input: async () => '',
+    confirm: async message => message.startsWith('Save these settings'),
+  };
+  const directory = join(f.cwd, 'interactive');
+  expect(await setup({ directory, endpoint: `${f.server.url}/v1`, model: 'local-test', contextTokens: 16384 }, ui, new AbortController().signal)).toBe(true);
+  expect((await loadConfig(directory, {})).models.local.id).toBe('local-test');
+  expect(messages.join('\n')).toContain('Ready to save');
+  expect(messages.join('\n')).toContain('Configuration saved');
+});
+
 it('config lookup chooses explicit, then repository, then personal settings', async () => {
   const f = await local();
   const personal = join(f.cwd, 'personal'), repository = join(f.cwd, 'repo');

@@ -31,7 +31,7 @@ export async function ollamaJSON<T>(path: string, signal: AbortSignal, body?: un
   return await response.json() as T;
 }
 
-export async function streamOperation(path: string, body: unknown, signal: AbortSignal, progress: (text: string) => void, base = ollamaURL): Promise<void> {
+export async function streamOperation(path: string, body: unknown, signal: AbortSignal, progress: (text: string) => void, base = ollamaURL, verbose = false): Promise<void> {
   const response = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.any([signal, AbortSignal.timeout(2 * 60 * 60 * 1000)]), redirect: 'error' });
   if (!response.ok || !response.body) throw new Error(`Ollama ${path} returned HTTP ${response.status}.`);
   let pending = '', success = false, previous = '';
@@ -41,7 +41,8 @@ export async function streamOperation(path: string, body: unknown, signal: Abort
     const item = JSON.parse(text) as { error?: string; status?: string; completed?: number; total?: number };
     if (item.error) throw new Error('Ollama could not complete the download/model operation. Check disk space and the model name, then retry.');
     success ||= item.status === 'success';
-    const status = `${item.status ?? 'Working'}${item.total ? ` ${Math.floor((item.completed ?? 0) / item.total * 100)}%` : ''}`;
+    const description = verbose ? item.status : item.status?.replace(/sha256:[a-f0-9]+/g, '').replace(/\s+$/g, '');
+    const status = `${description ?? 'Working'}${item.total ? ` ${Math.floor((item.completed ?? 0) / item.total * 100)}%` : ''}`;
     if (status !== previous) { progress(status); previous = status; }
   };
   try {
@@ -126,19 +127,27 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
   throw new Error('Ollama did not become ready. Check its service logs, then rerun setup.');
 }
 
-export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL): Promise<{ id: string; context: number; tools: boolean }> {
+export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<{ id: string; context: number; tools: boolean }> {
   const memory = totalmem() / 2 ** 30;
   ui.log(`System memory: ${memory.toFixed(1)} GiB. CPU inference is supported but can be slow.`);
   try { ui.log(`GPU: ${await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]))}`); }
   catch { signal.throwIfAborted(); ui.log('GPU memory unavailable; memory guidance is approximate.'); }
   const installed = (await ollamaJSON<{ models: OllamaModel[] }>('/api/tags', signal, undefined, base)).models.filter(model => !model.remote_model && !model.name.includes('cloud'));
-  const choices = [...presets.map(p => `${p.id} — about ${(p.bytes / 1e9).toFixed(1)} GB download, ${p.memoryGiB}+ GiB RAM suggested, tools; coding verified after download`), ...installed.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
-  const choice = await ui.choose('Choose a local model (memory includes room for context):', choices);
+  const visible = installed.filter(model => !/^teapilot-[a-f0-9]{10}-[0-9]+:latest$/.test(model.name) && !presets.some(preset => preset.id === model.name));
+  const choices = [...presets.map(p => `${p.id} - ${installed.some(model => model.name === p.id) ? 'installed' : `about ${(p.bytes / 1e9).toFixed(1)} GB download`}, ${p.memoryGiB}+ GiB RAM suggested`), ...visible.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
+  const suggested = memory >= presets[0]!.memoryGiB ? 0 : 1;
+  ui.log(`Suggested: ${presets[suggested]!.id} based on system RAM; GPU memory and context also affect fit. Coding is verified after preparation.`);
+  const choice = await ui.choose('Local model', choices, suggested);
   const preset = presets[choice];
-  const id = preset?.id ?? installed[choice - presets.length]?.name ?? await ui.input('Local Ollama model name');
+  const id = preset?.id ?? visible[choice - presets.length]?.name ?? await ui.input('Local Ollama model name');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(id) || id.includes('cloud')) throw new Error('Enter a local Ollama model name; cloud models are not a fully local setup.');
-  const context = preset?.context ?? Number(await ui.input('Context tokens (must fit your hardware)', '16384'));
-  if (!Number.isInteger(context) || context < 8192 || context > 2_000_000) throw new Error('Context must be an integer between 8192 and 2000000.');
+  ui.log('Context is how much text the model can work with at once. Larger values use more memory; Enter accepts the suggested value.');
+  let context: number;
+  for (;;) {
+    context = Number(await ui.input('Context tokens', String(preset?.context ?? 16384)));
+    if (Number.isInteger(context) && context >= 8192 && context <= 2_000_000) break;
+    ui.log('Enter a whole number between 8192 and 2000000.');
+  }
   if (preset && memory < preset.memoryGiB && !await ui.confirm('Memory is below the suggested amount. Continue with this model?')) throw new Error('Choose a smaller model when rerunning setup.');
   if (!installed.some(model => model.name === id)) {
     // The Linux system service normally stores models under /usr/share/ollama;
@@ -151,7 +160,7 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
     ui.log(`Free space on model storage filesystem: ${(disk.bavail * disk.bsize / 1e9).toFixed(1)} GB.${preset ? '' : ' Custom model download size is unknown.'}`);
     if (!await ui.confirm(`Download ${id}${preset ? ` (about ${(preset.bytes / 1e9).toFixed(1)} GB)` : ''}?`)) throw new Error('Download declined; existing configuration is unchanged.');
     for (;;) {
-      try { await streamOperation('/api/pull', { model: id, stream: true }, signal, ui.log, base); break; }
+      try { await streamOperation('/api/pull', { model: id, stream: true }, signal, ui.log, base, verbose); break; }
       catch (error) { signal.throwIfAborted(); if (!await ui.confirm('Download failed. Retry/resume?')) throw error; }
     }
   }
@@ -162,6 +171,7 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   // A separate alias leaves the user's original model untouched and fixes the
   // context actually used by the OpenAI API, which has no num_ctx parameter.
   const alias = `teapilot-${createHash('sha256').update(id).digest('hex').slice(0, 10)}-${context}:latest`;
-  await streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base);
+  ui.log(`Preparing ${id} with a ${context.toLocaleString('en-US')}-token context...`);
+  await streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose);
   return { id: alias, context, tools: metadata.capabilities?.includes('tools') ?? true };
 }

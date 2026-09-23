@@ -6,9 +6,9 @@ import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userCo
 import { liveCheck, modelStatus, routingCheck, endpointHint, type LiveReport } from '../diagnostics.js';
 import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js';
 import type { SetupUI } from './terminal.js';
-import { searchQuery } from '../search.js';
+import { configureSearch } from './search.js';
 
-export interface SetupOptions { directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number }
+export interface SetupOptions { directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number; verbose?: boolean }
 export interface CredentialStorage {
   load(): Promise<Record<string, string>>;
   save(credentials: Record<string, string>): Promise<void>;
@@ -86,7 +86,9 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   Object.assign(savedEnv, await credentials?.load());
   const config = await loadConfig(directory, { ...savedEnv });
   if (process.env.TEAPILOT_STATE_DIR) config.stateDir = resolve(process.env.TEAPILOT_STATE_DIR);
-  const choice = options.nonInteractive ? 1 : await ui.choose('Choose execution setup:', ['Local Ollama (no API key or inference charges)', 'Existing OpenAI-compatible local endpoint', 'Cloud model (paid API key)']);
+  const before = { execution: Object.values(config.models).filter(model => model.enabled).map(model => model.id).join(', '), routing: config.routingMode, search: config.searchUrl ?? 'Disabled' };
+  ui.log('Model downloads and verification happen before the final settings review.');
+  const choice = options.nonInteractive ? 1 : await ui.choose('Execution model', ['Local Ollama (execution runs locally; no execution API charges)', 'Existing OpenAI-compatible local endpoint', 'Cloud model (paid API key)']);
   const tier = choice === 2 ? 'economy' : 'local';
   // A new profile enables precisely one execution tier, never a silent paid fallback.
   for (const model of Object.values(config.models)) model.enabled = false;
@@ -100,9 +102,11 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     if (/^(LOCAL|ECONOMY|STRONG)_(ENABLED|MODEL|BASE_URL|INPUT_USD_PER_MILLION|OUTPUT_USD_PER_MILLION)$/.test(key) || ['REQUEST_BUDGET_USD', 'DAILY_BUDGET_USD'].includes(key)) delete env[key];
   }
   ui.log('The router chooses a model; the execution model does the work. Direct routing needs no routing key.');
-  if (!options.nonInteractive && await ui.confirm(`Change routing? Current: ${config.routingMode}.`)) {
-    config.routingMode = await ui.choose('Routing:', ['Direct (no hosted routing charges)', 'Hosted Jev (optional paid routing)']) === 0 ? 'direct' : 'hosted';
-    if (config.routingMode === 'hosted') {
+  if (config.routingMode === 'hosted') ui.log('Hosted routing may still incur charges, including when execution runs locally.');
+  if (!options.nonInteractive) {
+    const routing = await ui.choose('Routing', [`Keep current: ${config.routingMode}${config.routingMode === 'hosted' ? ' (may incur charges)' : ' (no routing charges)'}`, 'Direct (no hosted routing charges)', 'Hosted Jev (paid routing)']);
+    if (routing !== 0) config.routingMode = routing === 1 ? 'direct' : 'hosted';
+    if (routing === 2) {
       const provider = await ui.choose('Jev provider:', ['TypeSafe', 'OpenRouter']) === 0 ? 'typesafe' : 'openrouter';
       const keyName = provider === 'typesafe' ? 'TYPESAFE_API_KEY' : 'OPENROUTER_API_KEY';
       env.JEV_PROVIDER = provider;
@@ -114,7 +118,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   }
   if (choice === 0) {
     await ensureOllama(ui, signal);
-    const model = await selectOllamaModel(ui, signal);
+    const model = await selectOllamaModel(ui, signal, undefined, options.verbose);
     Object.assign(config.models.local, { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2 });
     delete env.LOCAL_API_KEY;
     config.policy.limits.requestTimeoutMs = 120000;
@@ -152,20 +156,19 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
   ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
   const routingReady = config.routingMode === 'direct' || await routingCheck(config, ui.confirm, ui.log, signal);
-  let searchReady = true;
-  if (!options.nonInteractive && await ui.confirm('Configure optional web search with an existing trusted SearXNG service?')) {
-    ui.log('Search sends queries to that service, including a connectivity test. Service costs are outside inference accounting. Requests still require --web.');
-    const base = await ui.input('SearXNG base URL (HTTP(S), no embedded credentials)', config.searchUrl ?? '');
-    const url = new URL(base);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Use an HTTP(S) search URL without credentials, query, or fragment.');
-    if (await ui.confirm('Allow web.search in this profile and send a connectivity test now?')) {
-      if (!config.policy.permissions.includes('web.search')) config.policy.permissions.push('web.search');
-      config.searchUrl = base; env.SEARCH_BASE_URL = base;
-      try { await searchQuery(base, 'teapilot connectivity check', signal); ui.log('Search: PASS (SearXNG JSON response).'); }
-      catch (error) { signal.throwIfAborted(); searchReady = false; ui.log(`Search: FAIL. ${error instanceof Error ? error.message : 'Check the search service.'} Rerun setup to repair it; ordinary ask/code remain available.`); }
-    } else ui.log('Search settings unchanged; no connectivity query sent.');
+  const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, directory, ui, signal);
+  const selected = config.models[tier];
+  ui.log('\nReady to save');
+  ui.log(`  Execution: ${selected.id}${hasConfiguration && before.execution !== selected.id ? ` (was ${before.execution})` : ''}`);
+  ui.log(`  Context:   ${selected.contextTokens.toLocaleString('en-US')} tokens`);
+  ui.log(`  Routing:   ${config.routingMode}${config.routingMode === 'hosted' ? ' · may incur charges' : ''}${hasConfiguration ? ` (was ${before.routing})` : ''}`);
+  ui.log(`  Search:    ${searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);
+  ui.log(`  Checks:    answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'}`);
+  ui.log(`  Routing check: ${config.routingMode === 'direct' ? 'Not needed' : routingReady ? 'Passed' : 'Not verified; see routing result above'}`);
+  if (!options.nonInteractive && !await ui.confirm(hasConfiguration ? 'Save these settings? Previous configuration files will be retained.' : 'Save these settings?')) {
+    ui.log('Settings were not saved. Completed downloads and any local search service are retained.');
+    return false;
   }
-  if (hasConfiguration && !await ui.confirm('Replace the active settings? Previous configuration files will be retained.')) return false;
   if (credentials) {
     const keys = new Set([...Object.values(config.models).map(model => model.apiKeyEnv), 'JEV_API_KEY', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY']);
     await credentials.save(Object.fromEntries(Object.entries(env).filter(([key]) => keys.has(key))));
@@ -173,7 +176,8 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   }
   await saveConfiguration(directory, config, env, signal);
   ui.log(`Configuration saved in ${directory}. Environment variables still override saved settings.`);
+  ui.log(report?.coding ? 'Model checks passed. See the routing and search results above.' : 'Partial: configuration saved; some model checks remain unverified.');
   ui.log(`Next: ${nextCommand}`);
   if (report?.coding) ui.log(`Then: teapilot code --config-dir "${directory}" --cwd "${process.cwd()}" "Describe this project"`);
-  return Boolean(report?.ask && report.coding && routingReady && searchReady);
+  return Boolean(report?.ask && report.coding && routingReady);
 }
