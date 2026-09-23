@@ -9,6 +9,7 @@ import { terminalUI } from './setup/terminal.js';
 import type { Approve } from './execution/policy.js';
 import { serve } from './integration/service.js';
 import { SearchSetupError } from './search.js';
+import { TerminalPresentation } from './presentation.js';
 
 const help = `teapilot — local and hosted personal agent
 
@@ -19,7 +20,7 @@ teapilot doctor [--live]
 teapilot serve --stdio
 
 Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json
-         --correction TEXT  --help
+         --correction TEXT  --no-motion  --help
 Hosted routing also accepts a bare prompt. Direct routing uses ask/code.
 Approvals require an interactive terminal. Local setup needs no API key.
 
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
     prompt: { type: 'string' }, correction: { type: 'string' }, web: { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
     live: { type: 'boolean' }, 'non-interactive': { type: 'boolean' }, endpoint: { type: 'string' }, model: { type: 'string' }, 'context-tokens': { type: 'string' },
     stdio: { type: 'boolean' },
+    'no-motion': { type: 'boolean' },
   } });
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
@@ -47,8 +49,9 @@ async function main(): Promise<void> {
   if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
   const controller = new AbortController();
+  const presentation = new TerminalPresentation(Boolean(values.json), Boolean(values['no-motion']));
   const ui = interactive ? terminalUI(controller.signal) : undefined;
-  const onInterrupt = () => { controller.abort(); ui?.close(); };
+  const onInterrupt = () => { presentation.close(); controller.abort(); ui?.close(); };
   process.once('SIGINT', onInterrupt);
   try {
     if (command === 'setup') {
@@ -74,8 +77,9 @@ async function main(): Promise<void> {
     const redact = (message: string) => secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), message);
     const approve: Approve = async approval => {
       if (!ui || controller.signal.aborted || approval.signal?.aborted) return false;
-      console.error(redact(`${approval.summary}\n${approval.details ?? ''}`));
-      return ui.confirm('Approve this action?', approval.signal);
+      presentation.approval(redact(`${approval.summary}\n${approval.details ?? ''}`));
+      try { return await ui.confirm('Approve this action?', approval.signal); }
+      finally { if (!controller.signal.aborted) presentation.start(); }
     };
     if (command === 'doctor') {
       process.exitCode = await doctor(config, values.cwd, { live: values.live, signal: controller.signal, consent: async message => ui ? ui.confirm(redact(message)) : false, log: text => console.log(redact(text)) }) ? 0 : 1;
@@ -89,20 +93,24 @@ async function main(): Promise<void> {
     const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui ? await ui.input('teapilot') : '');
     if (!prompt.trim()) throw new Error('Supply a prompt; use teapilot setup for first use or --help for examples.');
     const request = { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, signal: controller.signal };
-    const dependencies = { approve, onProgress: (message: string) => console.error(redact(message)) };
+    const dependencies = { approve, onProgress: (message: string) => presentation.log(redact(message)), onEvent: (event: import('./integration/events.js').HostEvent) => presentation.event(event) };
     let result;
+    presentation.start();
     try { result = await runHost(config, request, dependencies); }
     catch (error) {
       if (!(error instanceof SearchSetupError) || !ui || values.json) throw error;
+      presentation.pause();
       console.error(error.message);
       if (!await ui.confirm('Continue without web search? The answer will be unverified against current sources.')) throw error;
+      presentation.start();
       result = await runHost(config, { ...request, web: false }, dependencies);
       result.text = `Web search was unavailable. This answer is unverified against current sources.\n\n${result.text}`;
     }
-    console.log(values.json ? JSON.stringify(result, null, 2) : result.text);
-    if (!values.json) console.error(`\n${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
+    if (values.json) console.log(JSON.stringify(result, null, 2));
+    else presentation.answer(result.text);
+    if (!values.json) presentation.log(`\nResult: ${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
     process.exitCode = result.success ? 0 : 2;
-  } finally { ui?.close(); process.removeListener('SIGINT', onInterrupt); }
+  } finally { presentation.close(); ui?.close(); process.removeListener('SIGINT', onInterrupt); }
 }
 
 main().catch(error => {

@@ -26,6 +26,8 @@ In direct mode, `ask` has no repository tools; `code` selects the coding workloa
 
 ## Exit codes
 
+Interactive terminals stream responses with restrained colour and literal Markdown styling: markers, URLs, and code indentation remain copyable. Progress and results use stderr; `--json` keeps stdout machine-readable, and redirected answers remain plain. Use `NO_COLOR` to disable colours, and `--no-motion` or `TEAPILOT_NO_MOTION=1` to disable the small activity indicator. The indicator clears for streamed answers, approvals, completion, and cancellation.
+
 Exit codes: `0` completed (or healthy doctor), `1` configuration/runtime failure, `2` blocked or incomplete. Inspect the status as well as the response: generated text alone is not proof of successful execution.
 
 ## Web research
