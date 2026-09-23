@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { PassThrough } from 'node:stream';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture, mockServer, completion } from './helpers.js';
 import { StreamRedactor, prepareConversation } from '../src/integration/events.js';
@@ -8,6 +8,7 @@ import { runHost } from '../src/host.js';
 import { inferenceContext, inferenceSchema, modelInformation, runInference } from '../src/integration/inference.js';
 import { Review, cleanReviews, readReviewText } from '../src/integration/review.js';
 import { serve } from '../src/integration/service.js';
+import { callCeiling } from '../src/inference/budget.js';
 
 describe('VS Code integration boundaries', () => {
   const cleanups: (() => Promise<unknown>)[] = [];
@@ -65,15 +66,55 @@ describe('VS Code integration boundaries', () => {
     f.config.models.local.enabled = false;
     expect(modelInformation(f.config).some(m => m.id === 'local')).toBe(false);
   });
+  it('Auto retries an eligible tier before output, but never after partial output', async () => {
+    const models: string[] = [];
+    const f = await local((body, _request, response) => {
+      models.push(body.model);
+      if (body.model === 'local-test') { response.writeHead(500); response.end('failure'); }
+      else completion(response, { text: 'fallback', cost: 0.00001 });
+    });
+    f.config.models.economy.baseUrl = f.config.models.local.baseUrl;
+    const request = inferenceSchema.parse({ model: 'auto', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] });
+    const result = await runInference(f.config, request, { approve: async () => true });
+    expect(result.tier).toBe('economy'); expect(models).toEqual(['local-test', 'economy-test']);
+    const partial = await mockServer((_body, _request, response) => {
+      response.setHeader('Content-Type', 'text/event-stream');
+      response.write('data: {"id":"partial","object":"chat.completion.chunk","created":1,"model":"local-test","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n');
+      setTimeout(() => response.destroy(), 30);
+    }); cleanups.push(partial.close);
+    f.config.models.local.baseUrl = partial.url;
+    await expect(runInference(f.config, request, { approve: async () => true })).rejects.toThrow('partial responses');
+    expect(models).toHaveLength(2);
+  });
+  it('shares daily spending across calls and performs no inference after approval denial', async () => {
+    let calls = 0;
+    const f = await local((_body, _request, response) => { calls++; completion(response, { text: 'paid', cost: 0.00001 }); });
+    f.config.models.economy.baseUrl = f.config.models.local.baseUrl;
+    f.config.models.strong.baseUrl = f.config.models.local.baseUrl;
+    const request = inferenceSchema.parse({ model: 'economy', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] });
+    f.config.policy.budget.dailyUsd = callCeiling(f.config.models.economy) + 0.000001;
+    await runInference(f.config, request, { approve: async () => true });
+    await expect(runInference(f.config, request, { approve: async () => true })).rejects.toThrow('remaining budget');
+    expect(calls).toBe(1);
+    f.config.policy.budget.dailyUsd = 5;
+    await expect(runInference(f.config, { ...request, model: 'strong' }, { approve: async () => false })).rejects.toThrow('approval denied');
+    expect(calls).toBe(1);
+  });
+  it('rejects attached protected paths before invoking a provider', async () => {
+    const f = await fixture(); cleanups.push(f.cleanup); f.config.routingMode = 'direct';
+    await expect(runHost(f.config, { prompt: 'explain', workload: 'ask', cwd: f.cwd, context: [{ name: 'credential', text: 'sensitive', path: '.env' }] }, { approve: async () => true })).rejects.toThrow('protected');
+  });
   it('captures pre-existing edits and shell-style additions/deletions, with protected paths excluded', async () => {
     const f = await fixture(); cleanups.push(f.cleanup);
     await writeFile(join(f.cwd, 'existing.txt'), 'user edits');
+    await writeFile(join(f.cwd, 'deleted.txt'), 'original');
     await writeFile(join(f.cwd, '.env'), 'password=private');
     const review = new Review(f.cwd, f.config); await review.start();
     await writeFile(join(f.cwd, 'existing.txt'), 'agent edits');
     await writeFile(join(f.cwd, 'created.txt'), 'new');
+    await unlink(join(f.cwd, 'deleted.txt'));
     const result = await review.finish();
-    expect(result.changes.map(c => c.path).sort()).toEqual(['created.txt', 'existing.txt']);
+    expect(result.changes.map(c => c.path).sort()).toEqual(['created.txt', 'deleted.txt', 'existing.txt']);
     const changed = result.changes.find(c => c.path === 'existing.txt')!;
     expect(await readReviewText(f.config.stateDir, result.id, changed.index, 'before')).toBe('user edits');
     expect(await readReviewText(f.config.stateDir, result.id, changed.index, 'after')).toBe('agent edits');

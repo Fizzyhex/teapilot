@@ -5,13 +5,33 @@
   "version": "0.1.0",
   "publisher": "fizzyhex",
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "https://github.com/fizzyhex/teapilot.git" },
-  "engines": { "vscode": "^1.138.0" },
-  "categories": ["AI", "Chat"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fizzyhex/teapilot.git"
+  },
+  "engines": {
+    "vscode": "^1.138.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
   "main": "./dist/extension.cjs",
-  "extensionKind": ["ui"],
-  "capabilities": { "untrustedWorkspaces": { "supported": false }, "virtualWorkspaces": { "supported": false } },
-  "activationEvents": ["onChatParticipant:teapilot.chat", "onLanguageModelChatProvider:teapilot"],
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "activationEvents": [
+    "onChatParticipant:teapilot.chat",
+    "onLanguageModelChatProvider:teapilot"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build.mjs",
@@ -24,30 +44,164 @@
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "4.0.0",
     "esbuild": "^0.25.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "yauzl": "^3.4.0"
   },
   "contributes": {
-    "chatParticipants": [{ "id": "teapilot.chat", "name": "teapilot", "fullName": "TeaPilot", "description": "Use TeaPilot's own models, coding tools, approvals, and budgets.", "isSticky": true, "commands": [{ "name": "ask", "description": "Ask with no repository tools" }, { "name": "code", "description": "Work in a selected local folder" }] }],
-    "languageModelChatProviders": [{ "vendor": "teapilot", "displayName": "TeaPilot", "managementCommand": "teapilot.manageModels" }],
+    "chatParticipants": [
+      {
+        "id": "teapilot.chat",
+        "name": "teapilot",
+        "fullName": "TeaPilot",
+        "description": "Use TeaPilot's own models, coding tools, approvals, and budgets.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "ask",
+            "description": "Ask with no repository tools"
+          },
+          {
+            "name": "code",
+            "description": "Work in a selected local folder"
+          }
+        ]
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "teapilot",
+        "displayName": "TeaPilot",
+        "managementCommand": "teapilot.manageModels"
+      }
+    ],
     "languageModelTools": [
-      { "name": "teapilot_ask", "displayName": "Ask TeaPilot", "toolReferenceName": "teapilotAsk", "canBeReferencedInPrompt": true, "userDescription": "Delegate a bounded question to TeaPilot.", "modelDescription": "Delegate an independent question, explanation, or research task to TeaPilot. It uses separately configured local or paid models with its own budget. It cannot read repositories or execute commands. Pass all necessary context; it has no access to this conversation. Do not delegate recursively.", "when": "teapilot.supported", "inputSchema": { "type": "object", "additionalProperties": false, "properties": { "task": { "type": "string", "maxLength": 20000 }, "context": { "type": "string", "maxLength": 20000 }, "web": { "type": "boolean" } }, "required": ["task"] } },
-      { "name": "teapilot_code", "displayName": "Code with TeaPilot", "toolReferenceName": "teapilotCode", "canBeReferencedInPrompt": true, "userDescription": "Delegate coding work; edits are applied directly.", "modelDescription": "Delegate one bounded coding task to TeaPilot's independent agent. It edits files directly and asks for shell approvals. Pass the full task and an open workspace folder's absolute path or name; it cannot access this conversation. Await completion and inspect its changed-file/check summary before further edits. Never invoke recursively.", "when": "teapilot.supported && workspaceFolderCount > 0", "inputSchema": { "type": "object", "additionalProperties": false, "properties": { "task": { "type": "string", "maxLength": 20000 }, "context": { "type": "string", "maxLength": 20000 }, "web": { "type": "boolean" }, "workspace": { "type": "string", "description": "Absolute path or name of an open local workspace folder" } }, "required": ["task", "workspace"] } }
+      {
+        "name": "teapilot_ask",
+        "displayName": "Ask TeaPilot",
+        "toolReferenceName": "teapilotAsk",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Delegate a bounded question to TeaPilot.",
+        "modelDescription": "Delegate an independent question, explanation, or research task to TeaPilot. It uses separately configured local or paid models with its own budget. It cannot read repositories or execute commands. Pass all necessary context; it has no access to this conversation. Do not delegate recursively.",
+        "when": "teapilot.supported",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "task": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "context": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "web": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "task"
+          ]
+        }
+      },
+      {
+        "name": "teapilot_code",
+        "displayName": "Code with TeaPilot",
+        "toolReferenceName": "teapilotCode",
+        "canBeReferencedInPrompt": true,
+        "userDescription": "Delegate coding work; edits are applied directly.",
+        "modelDescription": "Delegate one bounded coding task to TeaPilot's independent agent. It edits files directly and asks for shell approvals. Pass the full task and an open workspace folder's absolute path or name; it cannot access this conversation. Await completion and inspect its changed-file/check summary before further edits. Never invoke recursively.",
+        "when": "teapilot.supported && workspaceFolderCount > 0",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "task": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "context": {
+              "type": "string",
+              "maxLength": 20000
+            },
+            "web": {
+              "type": "boolean"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "Absolute path or name of an open local workspace folder"
+            }
+          },
+          "required": [
+            "task",
+            "workspace"
+          ]
+        }
+      }
     ],
     "commands": [
-      { "command": "teapilot.setup", "title": "TeaPilot: Setup" },
-      { "command": "teapilot.doctor", "title": "TeaPilot: Run Diagnostics" },
-      { "command": "teapilot.manageModels", "title": "TeaPilot: Manage Models" },
-      { "command": "teapilot.toggleWeb", "title": "TeaPilot: Toggle Web Search" },
-      { "command": "teapilot.askSelection", "title": "TeaPilot: Ask About Selection" },
-      { "command": "teapilot.changes", "title": "TeaPilot: View Changes" },
-      { "command": "teapilot.spending", "title": "TeaPilot: View Spending" },
-      { "command": "teapilot.logs", "title": "TeaPilot: Show Diagnostics Output" },
-      { "command": "teapilot.clearReviews", "title": "TeaPilot: Clear Change Review History" }
+      {
+        "command": "teapilot.setup",
+        "title": "TeaPilot: Setup"
+      },
+      {
+        "command": "teapilot.doctor",
+        "title": "TeaPilot: Run Diagnostics"
+      },
+      {
+        "command": "teapilot.manageModels",
+        "title": "TeaPilot: Manage Models"
+      },
+      {
+        "command": "teapilot.toggleWeb",
+        "title": "TeaPilot: Toggle Web Search"
+      },
+      {
+        "command": "teapilot.askSelection",
+        "title": "TeaPilot: Ask About Selection"
+      },
+      {
+        "command": "teapilot.changes",
+        "title": "TeaPilot: View Changes"
+      },
+      {
+        "command": "teapilot.spending",
+        "title": "TeaPilot: View Spending"
+      },
+      {
+        "command": "teapilot.logs",
+        "title": "TeaPilot: Show Diagnostics Output"
+      },
+      {
+        "command": "teapilot.clearReviews",
+        "title": "TeaPilot: Clear Change Review History"
+      }
     ],
-    "menus": { "editor/context": [{ "command": "teapilot.askSelection", "when": "editorHasSelection && teapilot.supported", "group": "navigation" }] },
-    "configuration": { "title": "TeaPilot", "properties": {
-      "teapilot.nodePath": { "type": "string", "default": "node", "scope": "machine", "description": "Installed Node.js >=22.19 executable. User setting only; never a shell command." },
-      "teapilot.webSearch.enabled": { "type": "boolean", "default": false, "scope": "window", "description": "Enable configured SearXNG search for TeaPilot chat requests." }
-    } }
+    "menus": {
+      "editor/context": [
+        {
+          "command": "teapilot.askSelection",
+          "when": "editorHasSelection && teapilot.supported",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "TeaPilot",
+      "properties": {
+        "teapilot.nodePath": {
+          "type": "string",
+          "default": "node",
+          "scope": "machine",
+          "description": "Installed Node.js >=22.19 executable. User setting only; never a shell command."
+        },
+        "teapilot.webSearch.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Enable configured SearXNG search for TeaPilot chat requests."
+        }
+      }
+    }
   }
 }

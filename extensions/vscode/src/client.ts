@@ -61,6 +61,7 @@ export class Client implements vscode.Disposable {
     this.child = child; this.profileUsed = profile.directory;
     let buffer = ''; const decoder = new StringDecoder('utf8');
     const fail = () => {
+      if (this.child !== child) return;
       for (const pending of this.pending.values()) pending.reject(new Error('TeaPilot host stopped. Interrupted actions are not replayed; inspect changes and retry.'));
       this.pending.clear(); if (this.child === child) { this.child = undefined; this.profileUsed = undefined; }
     };
@@ -90,14 +91,18 @@ export class Client implements vscode.Disposable {
       }
     });
     const secrets = JSON.parse(await this.context.secrets.get(`profile:${profile.directory}`) ?? '{}');
-    const hello = await this.raw('initialize', { configDir: profile.directory, managed: profile.managed, secrets }, never, () => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const hello = await Promise.race([
+      this.raw('initialize', { configDir: profile.directory, managed: profile.managed, secrets }, never, () => {}),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { fail(); child.stdin.end(); reject(new Error('TeaPilot host did not initialize within 20 seconds.')); }, 20_000); }),
+    ]).finally(() => clearTimeout(timer));
     if (hello.protocolVersion !== 1) throw new Error('TeaPilot runtime protocol mismatch; reinstall the extension.');
   }
   private async interact(id: string, event: WireEvent, pending: Pending) {
     let value: unknown = false;
     if (!pending.token.isCancellationRequested) {
       if (event.kind === 'checkpoint') {
-        value = supported() && !vscode.workspace.textDocuments.some(document => document.isDirty && Boolean(vscode.workspace.getWorkspaceFolder(document.uri)));
+        value = supported() && !vscode.workspace.textDocuments.some(document => document.isDirty && vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath === event.cwd);
       } else if (event.kind === 'credentials_save') {
         await this.context.secrets.store(`profile:${this.profile().directory}`, JSON.stringify(event.credentials)); value = true;
       } else if (event.kind === 'input') {
@@ -148,6 +153,8 @@ export class Client implements vscode.Disposable {
   dispose() {
     this.stopped = true;
     for (const id of this.pending.keys()) { try { this.send({ version: 1, id, method: 'cancel' }); } catch {} }
+    for (const pending of this.pending.values()) pending.reject(new Error('TeaPilot extension stopped'));
+    this.pending.clear();
     this.stopChild();
   }
 }

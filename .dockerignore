@@ -11,3 +11,6 @@ policy-*.json
 .jevrouter
 config/models.json
 config/policy.json
+extensions/vscode/runtime
+extensions/vscode/.vscode-test
+*.vsix

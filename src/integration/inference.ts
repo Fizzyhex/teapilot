@@ -137,5 +137,8 @@ export async function runInference(config: Config, request: InferenceRequest, de
       return result;
     }
     throw new Error('Inference escalation limit reached');
+  } catch (error) {
+    await telemetry.event('request_end', { requestId, status: signal?.aborted ? 'cancelled' : 'error', spentUsd: budget.spent().request });
+    throw error;
   } finally { await unlock(); }
 }

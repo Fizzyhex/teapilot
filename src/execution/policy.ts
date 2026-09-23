@@ -65,7 +65,6 @@ export class ExecutionPolicy {
         const mutation = tool.name === 'write' || tool.name === 'edit';
         const permission = shell ? 'repository.shell' : mutation ? 'repository.write' : 'repository.read';
         if (!this.config.policy.permissions.includes(permission)) throw new PolicyDenied(`Missing ${permission} permission`);
-        if (shell) await this.beforeMutation?.({ tool: tool.name }, signal);
         if (shell) {
           const command = String(args.command);
           if (!automaticCommand(command, this.config.policy.execution.trustedCommands)) {
@@ -77,9 +76,9 @@ export class ExecutionPolicy {
             args.command = command.replace(/^git /, 'git -c core.fsmonitor=false -c core.untrackedCache=false -c log.showSignature=false -c submodule.recurse=false --no-pager ');
           }
           args.timeout = Math.min(typeof args.timeout === 'number' ? args.timeout : Infinity, this.config.policy.limits.commandTimeoutSeconds);
+          await this.beforeMutation?.({ tool: tool.name }, signal);
         } else {
           const target = await this.path(String(args.path), mutation);
-          if (mutation) await this.beforeMutation?.({ tool: tool.name, path: target }, signal);
           if (mutation) {
             const old = await readFile(target, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
             const removed = tool.name === 'write' ? old : String(args.oldText ?? '');
@@ -90,6 +89,7 @@ export class ExecutionPolicy {
           }
           // Pi's factories accept absolute paths; validate again just before use.
           args.path = await this.path(target, mutation);
+          if (mutation) await this.beforeMutation?.({ tool: tool.name, path: target }, signal);
         }
         signal?.throwIfAborted();
         return await tool.execute(id, params, signal, update);

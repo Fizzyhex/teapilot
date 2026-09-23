@@ -53,12 +53,14 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(output, client, status, changedModels);
   void vscode.commands.executeCommand('setContext', 'teapilot.supported', supported());
   context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(() => { void vscode.commands.executeCommand('setContext', 'teapilot.supported', supported()); }));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { void vscode.commands.executeCommand('setContext', 'teapilot.supported', supported()); changedModels.fire(); }));
 
   const record = (event: WireEvent) => {
     if (event.type === 'model_selection' || event.type === 'attempt_start') {
       status.text = `$(coffee) TeaPilot · ${event.model}`;
       output.appendLine(`Model: ${event.model}; tier: ${event.tier}`);
     } else if (event.type === 'usage') output.appendLine(`Accounted $${Number(event.chargedUsd).toFixed(6)} (${event.basis}).`);
+    else if (event.type === 'request_end') status.tooltip = `${event.status ?? (event.success ? 'completed' : 'incomplete')}; accounted $${Number(event.spentUsd ?? 0).toFixed(6)}. Model-provider caps apply per call, not per agent task.`;
     else if (event.type === 'progress') output.appendLine(String(event.text));
     else if (event.type === 'review') {
       const review = event.review as Review;
@@ -136,7 +138,7 @@ export function activate(context: vscode.ExtensionContext) {
       const metadata = previous?.result.metadata as Metadata | undefined;
       const workload = request.command === 'code' ? 'coder' : request.command === 'ask' ? 'ask' : metadata?.workload ?? 'ask';
       const needsFolder = workload === 'coder' || request.references.some(r => typeof r.value !== 'string');
-      const root = needsFolder ? (await folder(undefined, metadata?.root)).uri.fsPath : metadata?.root;
+      const root = needsFolder ? (await folder(undefined, request.command === 'code' ? undefined : metadata?.root)).uri.fsPath : metadata?.root;
       const cwd = root ?? homedir();
       const result = await run({ prompt: request.prompt, cwd, workload, web: vscode.workspace.getConfiguration('teapilot').get('webSearch.enabled', false), history: conversation(chat.history, root), context: await attachments(request.references, cwd, token) }, token, stream);
       return { metadata: { workload, root, answer: result.text.slice(-20_000), reviewId: result.review?.id, requestId: result.requestId } };
@@ -177,11 +179,12 @@ export function activate(context: vscode.ExtensionContext) {
     },
     async provideLanguageModelChatResponse(model, messages, options, progress, token) {
       const request = { model: model.id, messages: messages.map(encodeMessage), tools: (options.tools ?? []).map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema ?? { type: 'object', properties: {} } })), toolMode: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto' };
-      await client.request('inference', request, token, event => {
+      const result = await client.request('inference', request, token, event => {
         record(event);
         if (event.type === 'text') progress.report(new vscode.LanguageModelTextPart(event.text));
         if (event.type === 'tool_call') progress.report(new vscode.LanguageModelToolCallPart(event.id, event.name, event.arguments));
       });
+      if (result.status === 'length') throw new Error('TeaPilot model reached its output limit; the response is incomplete.');
     },
     async provideTokenCount(_model, value) {
       return Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(encodeMessage(value)), 'utf8') + 128;

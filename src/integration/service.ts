@@ -116,7 +116,7 @@ export async function serve(input: NodeJS.ReadableStream = process.stdin, output
       try {
         const result = await runHost(config, { ...request, signal }, { approve, onEvent, onProgress: log, beforeMutation: async (action, actionSignal) => {
           const combined = actionSignal ? AbortSignal.any([signal, actionSignal]) : signal;
-          if (await ask(owner, combined, 'checkpoint', action) !== true) throw new PolicyDenied('Editor has unsaved changes or the run was cancelled');
+          if (await ask(owner, combined, 'checkpoint', { ...action, cwd: request.cwd }) !== true) throw new PolicyDenied('Editor has unsaved changes or the run was cancelled');
           if (action.path) await review?.capture(action.path);
         } });
         return result;
