@@ -2,12 +2,12 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configDirectory, loadConfig } from '../src/config.js';
-import { doctor, liveCheck, modelStatus } from '../src/diagnostics.js';
+import { doctor, liveCheck, modelStatus, routingCheck } from '../src/diagnostics.js';
 import { runHost } from '../src/host.js';
 import { saveConfiguration, setup } from '../src/setup/index.js';
 import { checkDisk, streamOperation } from '../src/setup/ollama.js';
 import type { SetupUI } from '../src/setup/terminal.js';
-import { completion, events, fixture, mockServer, type Handler } from './helpers.js';
+import { completion, events, fixture, jev, mockServer, type Handler } from './helpers.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); for (const fn of cleanup.splice(0).reverse()) await fn(); });
@@ -111,6 +111,23 @@ it('paid live diagnostics require consent and remain bounded by the spend govern
   expect(await doctor(f.config, f.cwd, { live: true, log, consent: async () => true })).toBe(false);
   expect(inferenceCalls).toBe(0); // Zero budget blocks before the HTTP request.
   expect(JSON.stringify(log.mock.calls)).not.toContain('paid-secret');
+});
+
+it('hosted routing verification needs consent and budget, and never invokes execution', async () => {
+  const f = await local();
+  let calls = 0;
+  const server = await mockServer((_body, _req, res) => { calls++; jev(res, 'ask.local'); }); cleanup.push(server.close);
+  f.config.routingMode = 'hosted';
+  f.config.router.apiKey = 'routing-test-key'; f.config.router.endpoint = server.url;
+  const log = vi.fn();
+  expect(await routingCheck(f.config, async () => false, log)).toBe(false);
+  expect(calls).toBe(0);
+  expect(await routingCheck(f.config, async () => true, log)).toBe(false);
+  expect(calls).toBe(0);
+  f.config.policy.budget.requestUsd = 1; f.config.policy.budget.dailyUsd = 5;
+  expect(await routingCheck(f.config, async () => true, log)).toBe(true);
+  expect(calls).toBe(1);
+  expect(JSON.stringify(log.mock.calls)).not.toContain('routing-test-key');
 });
 
 it('model checks distinguish missing models, invalid credentials, and an unavailable server', async () => {

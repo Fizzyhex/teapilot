@@ -78,3 +78,16 @@ it('a local inspection loop reports its real failure and disabled fallbacks', as
   expect(result.text).toContain('Checks after latest observed edit: not run');
   expect(result.text).toContain('Next:');
 });
+
+it('does not claim a denied shell command executed or changed files', async () => {
+  const f = await setup();
+  const server = await mockServer((_body, req, res) => {
+    if (req.url?.endsWith('/models')) res.end('{}');
+    else completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command: 'echo denied' } } });
+  }); cleanup.push(server.close);
+  f.config.routingMode = 'direct'; f.config.models.local.baseUrl = server.url;
+  const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Run a command' }, { approve: async () => false });
+  expect(result.status).toBe('approval_denied');
+  expect(result.text).not.toContain('Shell commands ran');
+  expect(result.text).not.toContain('Existing edits remain');
+});

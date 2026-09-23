@@ -27,6 +27,7 @@ export function automaticCommand(command: string, trusted: string[]): boolean {
 
 export class ExecutionPolicy {
   denied = false;
+  shellRan = false;
   constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation) {}
   requireRead(): void {
     if (!this.config.policy.permissions.includes('repository.read')) { this.denied = true; throw new PolicyDenied('Missing repository.read permission'); }
@@ -95,6 +96,7 @@ export class ExecutionPolicy {
           if (mutation) await this.beforeMutation?.({ tool: tool.name, path: target }, signal);
         }
         signal?.throwIfAborted();
+        if (shell) this.shellRan = true;
         return await tool.execute(id, params, signal, update);
       } catch (error) {
         if (error instanceof PolicyDenied) this.denied = true;

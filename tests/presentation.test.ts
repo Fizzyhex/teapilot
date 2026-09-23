@@ -13,7 +13,7 @@ const strip = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, '');
 it('styles chunked Markdown while preserving literal characters, code, and URLs', () => {
   let output = '';
   const markdown = new MarkdownOutput(text => output += text, true);
-  const source = '# Heading\n**bold** and *italic* https://example.com/a_b\n```js\n  **literal**\n```\n    **indented**\n`**inline**`';
+  const source = '# Heading\n**bold** and *italic* https://example.com/a_b_c\n```js\n  **literal**\n```\n    **indented**\n`**inline**`';
   for (const character of source) markdown.push(character);
   markdown.finish();
   expect(strip(output)).toBe(source);
@@ -21,6 +21,7 @@ it('styles chunked Markdown while preserving literal characters, code, and URLs'
   expect(output).toContain('\n  **literal**\n');
   expect(output).toContain('\n    **indented**\n');
   expect(output).toContain('`**inline**`');
+  expect(output).toContain('https://example.com/a_b_c');
 });
 it('keeps redirected, no-colour, and dumb terminal formatting plain', () => {
   expect(terminalColour(false, {})).toBe(false);

@@ -63,8 +63,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       search_unavailable: `Check the search service connection and JSON output. ${searchRepair(config)}`,
     };
     return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
-      `Observed file edits: ${changedFiles.size ? [...changedFiles].join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}`,
-      `Checks after latest observed edit: ${attempt.check ?? 'not run'}.`,
+      selected?.startsWith('coder.') ? `Observed file edits: ${changedFiles.size ? [...changedFiles].join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}` : undefined,
+      selected?.startsWith('coder.') ? `Checks after latest observed edit: ${attempt.check ?? 'not run'}.` : undefined,
       changedFiles.size || shellRan ? 'Existing edits remain; no automatic rollback was performed.' : undefined,
       `Next: ${actions[stop] ?? 'Review the partial work, then retry with a smaller task.'}`,
       attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
@@ -137,7 +137,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       shellRan ||= Boolean(previous.shellRan);
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check });
       if (previous.success) return await finish(true, 'completed', previous.text);
-      if (!previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
+      if (!previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit', 'search_unavailable'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
         return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));
       }
       const fallback = tiers.slice(tiers.indexOf(tier) + 1).map(nextTier => {

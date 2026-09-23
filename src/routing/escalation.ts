@@ -10,7 +10,6 @@ export class Evidence {
   lastCheck?: 'passed' | 'failed';
   warning?: string;
   changedFiles = new Set<string>();
-  shellRan = false;
   checks: Array<{ command: string; status: 'passed' | 'failed' }> = [];
   observations: Array<{ tool: string; failed: boolean; detail: string }> = [];
   private inspectionWarning = false;
@@ -19,7 +18,6 @@ export class Evidence {
   observe(name: string, args: unknown, failed: boolean, result?: string): void {
     this.warning = undefined;
     const data = args as { path?: string; command?: string };
-    if (['bash', 'powershell'].includes(name)) this.shellRan = true;
     this.observations.push({ tool: name, failed, detail: (result ?? '').slice(0, 700) });
     this.observations = this.observations.slice(-6);
     this.failures = failed ? this.failures + 1 : 0;

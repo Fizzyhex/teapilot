@@ -30,7 +30,7 @@ export class MarkdownOutput {
     }
     if (this.fence || /^( {4}|\t)/.test(text)) return text;
     if (/^#{1,6} /.test(text)) return paint(text, '1;32', this.colour);
-    return text.split(/(`+[^`]*`+)/g).map((part, index) => index % 2 ? part :
+    return text.split(/(`+[^`]*`+|https?:\/\/\S+)/g).map((part, index) => index % 2 ? part :
       part.replace(/\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_/g, match => paint(match, match.startsWith('**') || match.startsWith('__') ? '1' : '3', this.colour))).join('');
   }
 }
@@ -42,7 +42,6 @@ export class TerminalPresentation {
   private timer?: ReturnType<typeof setInterval>;
   private frame = 0;
   private visible = false;
-  private lastToken = 0;
   private message = '';
   private lastMessage = '';
   private messageOpen = false;
@@ -50,9 +49,8 @@ export class TerminalPresentation {
   start(): void {
     if (this.timer || this.json || this.noMotion || !this.stream || process.env.TEAPILOT_NO_MOTION !== undefined) return;
     this.timer = setInterval(() => {
-      const label = Date.now() - this.lastToken < 800 ? 'Receiving response' : 'Working';
       const frames = ['.', '..', '...'];
-      const text = `${label}${frames[this.frame++ % frames.length]}`;
+      const text = `Working${frames[this.frame++ % frames.length]}`;
       process.stderr.write(`\r\x1b[2K${paint(text.slice(0, Math.max(1, (process.stderr.columns || 80) - 1)), '32', this.colour)}`);
       this.visible = true;
     }, 200);
@@ -65,13 +63,12 @@ export class TerminalPresentation {
   event(event: HostEvent): void {
     if (this.json) return;
     if (event.type === 'text' && typeof event.text === 'string') {
-      this.lastToken = Date.now();
       if (!this.stream) return;
       this.pause();
       if (!this.messageOpen) { process.stdout.write(paint('\nResponse\n', '1', terminalColour(process.stdout.isTTY))); this.messageOpen = true; this.message = ''; }
       this.message += event.text;
       this.markdown.push(event.text);
-    } else if (event.type === 'message_end') { this.endMessage(); this.lastToken = 0; }
+    } else if (event.type === 'message_end') this.endMessage();
     else if (event.type === 'tool_execution_start' || event.type === 'attempt_start') this.start();
   }
   private endMessage(): void {

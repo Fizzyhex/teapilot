@@ -15,4 +15,8 @@ The package smoke test installs an npm tarball in a temporary directory with Git
 
 See [publishing](10-publishing.md) for release setup and [Docker](07-docker.md) for container use.
 
+For a local UX observation, build, set `TEAPILOT_TEST_MODEL` to an already installed Ollama model with a 16,384-token context, then run `node scripts/ux-smoke.mjs`. It retains a disposable Pong workspace and report in the temporary directory, uses no cloud models, and approves only `git init` and tightly restricted JS syntax checks. Incomplete runs exit with code 2. This is a model-quality observation, not a gameplay acceptance test.
+
+On Linux with util-linux `script`, `sh scripts/terminal-smoke.sh` checks real PTY menu validation, hidden input, and cancellation without saving a profile or sending inference requests. Run it from a built checkout. The [UX implementation record](../feedback/IMPLEMENTATION.md) distinguishes automated validation from remaining visual and model-quality checks.
+
 [Back to README](../README.md)
