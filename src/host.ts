@@ -11,6 +11,7 @@ import { budgetedJev, localAvailable } from './inference/providers.js';
 import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
+import { checkSearch, searchRepair } from './search.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[] }
 export interface HostResult {
@@ -36,7 +37,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   for (const context of request.context ?? []) if (context.path) await contextPolicy.path(context.path, false);
   const conversation = prepareConversation(prompt + (request.correction ? `\nUser correction:\n${request.correction}` : ''), request.context ?? [], request.history ?? [], config.policy.limits.maxPromptChars);
   if (conversation.omitted) dependencies.onEvent?.({ type: 'history_omitted', turns: conversation.omitted });
-  if (request.web && (!config.searchUrl || !config.policy.permissions.includes('web.search'))) throw new Error('--web requires SEARCH_BASE_URL and web.search permission');
+  if (request.web) await checkSearch(config, request.signal);
   const unlock = await lockState(config.stateDir);
   const requestId = randomUUID();
   const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value)), dependencies.onEvent);
@@ -59,6 +60,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       test_failures: 'Inspect the failing check output and retry with that failure as the task.',
       tool_failures: 'Inspect the tool error and correct its path or command before retrying.',
       cancelled: 'Review any existing edits before starting another request.',
+      search_unavailable: `Check the search service connection and JSON output. ${searchRepair(config)}`,
     };
     return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
       `Observed file edits: ${changedFiles.size ? [...changedFiles].join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}`,

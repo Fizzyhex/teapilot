@@ -253,7 +253,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     f.config.searchUrl = new URL(f.config.router.endpoint!).origin;
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Research current facts', web: true }, { approve: async () => false });
     expect(result.success).toBe(true);
-    expect(searches).toBe(1);
+    expect(searches).toBe(2); // Connectivity check, then the model's actual query.
   });
 
   it('does not retry or refund an interrupted/failed cloud request', async () => {

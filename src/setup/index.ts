@@ -6,6 +6,7 @@ import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userCo
 import { liveCheck, modelStatus, routingCheck, endpointHint, type LiveReport } from '../diagnostics.js';
 import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js';
 import type { SetupUI } from './terminal.js';
+import { searchQuery } from '../search.js';
 
 export interface SetupOptions { directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number }
 export interface CredentialStorage {
@@ -151,6 +152,19 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
   ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
   const routingReady = config.routingMode === 'direct' || await routingCheck(config, ui.confirm, ui.log, signal);
+  let searchReady = true;
+  if (!options.nonInteractive && await ui.confirm('Configure optional web search with an existing trusted SearXNG service?')) {
+    ui.log('Search sends queries to that service, including a connectivity test. Service costs are outside inference accounting. Requests still require --web.');
+    const base = await ui.input('SearXNG base URL (HTTP(S), no embedded credentials)', config.searchUrl ?? '');
+    const url = new URL(base);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Use an HTTP(S) search URL without credentials, query, or fragment.');
+    if (await ui.confirm('Allow web.search in this profile and send a connectivity test now?')) {
+      if (!config.policy.permissions.includes('web.search')) config.policy.permissions.push('web.search');
+      config.searchUrl = base; env.SEARCH_BASE_URL = base;
+      try { await searchQuery(base, 'teapilot connectivity check', signal); ui.log('Search: PASS (SearXNG JSON response).'); }
+      catch (error) { signal.throwIfAborted(); searchReady = false; ui.log(`Search: FAIL. ${error instanceof Error ? error.message : 'Check the search service.'} Rerun setup to repair it; ordinary ask/code remain available.`); }
+    } else ui.log('Search settings unchanged; no connectivity query sent.');
+  }
   if (hasConfiguration && !await ui.confirm('Replace the active settings? Previous configuration files will be retained.')) return false;
   if (credentials) {
     const keys = new Set([...Object.values(config.models).map(model => model.apiKeyEnv), 'JEV_API_KEY', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY']);
@@ -161,5 +175,5 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   ui.log(`Configuration saved in ${directory}. Environment variables still override saved settings.`);
   ui.log(`Next: ${nextCommand}`);
   if (report?.coding) ui.log(`Then: teapilot code --config-dir "${directory}" --cwd "${process.cwd()}" "Describe this project"`);
-  return Boolean(report?.ask && report.coding && routingReady);
+  return Boolean(report?.ask && report.coding && routingReady && searchReady);
 }

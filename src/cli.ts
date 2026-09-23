@@ -8,6 +8,7 @@ import { setup } from './setup/index.js';
 import { terminalUI } from './setup/terminal.js';
 import type { Approve } from './execution/policy.js';
 import { serve } from './integration/service.js';
+import { SearchSetupError } from './search.js';
 
 const help = `teapilot — local and hosted personal agent
 
@@ -87,7 +88,17 @@ async function main(): Promise<void> {
     }
     const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui ? await ui.input('teapilot') : '');
     if (!prompt.trim()) throw new Error('Supply a prompt; use teapilot setup for first use or --help for examples.');
-    const result = await runHost(config, { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, signal: controller.signal }, { approve, onProgress: message => console.error(redact(message)) });
+    const request = { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, signal: controller.signal };
+    const dependencies = { approve, onProgress: (message: string) => console.error(redact(message)) };
+    let result;
+    try { result = await runHost(config, request, dependencies); }
+    catch (error) {
+      if (!(error instanceof SearchSetupError) || !ui || values.json) throw error;
+      console.error(error.message);
+      if (!await ui.confirm('Continue without web search? The answer will be unverified against current sources.')) throw error;
+      result = await runHost(config, { ...request, web: false }, dependencies);
+      result.text = `Web search was unavailable. This answer is unverified against current sources.\n\n${result.text}`;
+    }
     console.log(values.json ? JSON.stringify(result, null, 2) : result.text);
     if (!values.json) console.error(`\n${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
     process.exitCode = result.success ? 0 : 2;

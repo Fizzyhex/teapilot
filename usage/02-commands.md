@@ -36,6 +36,10 @@ Set `SEARCH_BASE_URL` to a SearXNG instance you operate/trust with JSON response
 teapilot ask --web "Research current information and cite sources"
 ```
 
+Alternatively, run `teapilot setup` with the intended `--config-dir`, choose Reconfigure, and opt into search setup. It asks before allowing `web.search` and sending a connectivity query. The wizard does not install a search service. Preserve the existing endpoint by declining this optional step.
+
+Web requests check policy, endpoint configuration, and connectivity before model execution. Errors distinguish missing configuration, denied permission, and an unavailable/incompatible service, and identify the active profile. Noninteractive requests fail rather than silently answer without search; interactive requests may explicitly choose an answer labelled unverified. Connectivity checks send a fixed test query to your configured service.
+
 Only `--web` exposes search to the selected agent; normal ask has no filesystem or shell tools. Search uses the [SearXNG JSON Search API](https://docs.searxng.org/dev/search_api.html), returns at most five bounded snippets, and does not fetch arbitrary pages. It has no built-in paid search subscription. Any costs from your separately operated search service are outside the inference ledger. Without search, ask discloses that it cannot verify current information.
 
 [Back to README](../README.md)
