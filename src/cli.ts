@@ -2,7 +2,8 @@
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
 import { configDirectory, loadConfig, type Workload } from './config.js';
-import { runHost } from './host.js';
+import { runHost, type HostRequest } from './host.js';
+import { runChat } from './chat.js';
 import { doctor } from './diagnostics.js';
 import { setup } from './setup/index.js';
 import { ManagedSearch } from './setup/searxng.js';
@@ -16,6 +17,7 @@ const help = `teapilot — local and hosted personal agent
 
 teapilot setup
 teapilot ask "Explain dependency injection"
+teapilot chat ["Help me think through an idea"]
 teapilot code --cwd <repository> "Fix the failing tests"
 teapilot doctor [--live]
 teapilot search status|start|stop|remove
@@ -23,7 +25,8 @@ teapilot serve --stdio
 
 Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json
          --correction TEXT  --no-motion  --verbose (setup progress)  --help
-Hosted routing also accepts a bare prompt. Direct routing uses ask/code.
+Hosted routing also accepts a bare prompt. Direct routing uses ask/chat/code.
+Chat requires an interactive terminal; /exit or /quit ends the session.
 Approvals require an interactive terminal. Local setup needs no API key.
 
 Unattended setup (existing local endpoint, new config only):
@@ -45,12 +48,13 @@ async function main(): Promise<void> {
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
-  const command = ['setup', 'doctor', 'ask', 'code', 'serve', 'search'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
   if (command === 'serve') { if (!values.stdio) throw new Error('serve requires --stdio'); await serve(); return; }
   if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
   if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
+  if (command === 'chat' && (!interactive || values.json)) throw new Error('Chat requires an interactive terminal and does not support --json. Use ask for one-shot or scripted requests.');
   const controller = new AbortController();
   const presentation = new TerminalPresentation(Boolean(values.json), Boolean(values['no-motion'] || values['non-interactive']));
   const ui = interactive ? terminalUI(controller.signal, presentation) : undefined;
@@ -94,37 +98,46 @@ async function main(): Promise<void> {
       process.exitCode = await doctor(config, values.cwd, { live: values.live, signal: controller.signal, consent: async message => ui ? ui.confirm(redact(message)) : false, activity: presentation.activity, log: text => presentation.write(redact(text) + '\n', 'stdout') }) ? 0 : 1;
       return;
     }
-    let workload: Workload | undefined = command === 'code' ? 'coder' : command === 'ask' ? 'ask' : undefined;
+    let workload: Workload | undefined = command === 'code' ? 'coder' : (command === 'ask' || command === 'chat') ? 'ask' : undefined;
     if (config.routingMode === 'direct' && !workload) {
       if (!ui) throw new Error('Direct routing requires teapilot ask or teapilot code.');
       workload = await ui.choose('What would you like to do?', ['Ask a question (no repository tools)', 'Work on code in the selected repository']) === 0 ? 'ask' : 'coder';
     }
-    const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui ? await ui.input('teapilot') : '');
-    if (!prompt.trim()) throw new Error('Supply a prompt; use teapilot setup for first use or --help for examples.');
+    const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui && command !== 'chat' ? await ui.prompt('teapilot', resolve(values.cwd)) : '');
+    if (command !== 'chat' && !prompt.trim()) throw new Error('Supply a prompt; use teapilot setup for first use or --help for examples.');
     const request = { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, signal: controller.signal };
     const dependencies = { approve, onActivity: presentation.setActivity, onProgress: (message: string) => presentation.log(redact(message)), onEvent: (event: import('./integration/events.js').HostEvent) => presentation.event(event) };
-    let result;
-    presentation.start();
-    try { result = await runHost(config, request, dependencies); }
-    catch (error) {
-      if (!(error instanceof SearchSetupError) || !ui || values.json) throw error;
-      presentation.pause();
-      presentation.log(error.message);
-      if (!await ui.confirm('Continue without web search? The answer will be unverified against current sources.')) throw error;
+    const execute = async (request: HostRequest) => {
+      let result;
       presentation.start();
-      result = await runHost(config, { ...request, web: false }, dependencies);
-      result.text = `Web search was unavailable. This answer is unverified against current sources.\n\n${result.text}`;
+      try { result = await runHost(config, request, dependencies); }
+      catch (error) {
+        if (!(error instanceof SearchSetupError) || !ui || values.json) throw error;
+        presentation.pause();
+        presentation.log(error.message);
+        if (!await ui.confirm('Continue without web search? The answer will be unverified against current sources.')) throw error;
+        presentation.start();
+        result = await runHost(config, { ...request, web: false }, dependencies);
+        result.text = `Web search was unavailable. This answer is unverified against current sources.\n\n${result.text}`;
+      }
+      if (values.json) console.log(JSON.stringify(result, null, 2));
+      else presentation.answer(result.text);
+      if (!values.json) presentation.log(`\nResult: ${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
+      return result;
+    };
+    if (command === 'chat') {
+      presentation.log('Chat started. Type /exit or /quit to leave.');
+      process.exitCode = await runChat({ request, maxPromptChars: config.policy.limits.maxPromptChars, input: () => ui!.prompt('>', resolve(values.cwd)), run: execute });
+    } else {
+      const result = await execute(request);
+      process.exitCode = result.success ? 0 : 2;
     }
-    if (values.json) console.log(JSON.stringify(result, null, 2));
-    else presentation.answer(result.text);
-    if (!values.json) presentation.log(`\nResult: ${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
-    process.exitCode = result.success ? 0 : 2;
   } finally { presentation.close(); ui?.close(); process.removeListener('SIGINT', onInterrupt); }
 }
 
 main().catch(error => {
   if (error && typeof error === 'object' && 'issues' in error) console.error('Invalid configuration. Check model rates, endpoint URLs, context sizes, and policy field types. Run teapilot setup.');
-  else if (error?.name === 'AbortError') console.error('Cancelled. Rerun setup to reuse completed downloads and saved settings.');
+  else if (error?.name === 'AbortError') console.error('Cancelled.');
   else console.error(error instanceof Error ? error.message : 'teapilot failed');
   process.exitCode = 1;
 });

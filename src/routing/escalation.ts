@@ -10,11 +10,14 @@ export class Evidence {
   lastCheck?: 'passed' | 'failed';
   warning?: string;
   changedFiles = new Set<string>();
+  unresolvedChecks: Set<string>;
   checks: Array<{ command: string; status: 'passed' | 'failed' }> = [];
   observations: Array<{ tool: string; failed: boolean; detail: string }> = [];
   private inspectionWarning = false;
   private repeated = new Map<string, number>();
-  constructor(private readonly thresholds: Policy['escalation']) {}
+  constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = []) {
+    this.unresolvedChecks = new Set(unresolvedChecks);
+  }
   observe(name: string, args: unknown, failed: boolean, result?: string): void {
     this.warning = undefined;
     const data = args as { path?: string; command?: string };
@@ -24,6 +27,8 @@ export class Evidence {
     if (this.failures >= this.thresholds.consecutiveFailures) this.reason = 'tool_failures';
     if (['bash', 'powershell'].includes(name) && /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(String((args as { command?: string }).command))) {
       this.lastCheck = failed ? 'failed' : 'passed';
+      if (failed) this.unresolvedChecks.add(String(data.command));
+      else this.unresolvedChecks.delete(String(data.command));
       this.checks.push({ command: String(data.command).slice(0, 1000), status: this.lastCheck });
       this.checks = this.checks.slice(-8);
       this.testFailures = failed ? this.testFailures + 1 : 0;

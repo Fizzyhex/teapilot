@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline/promises';
-import { Writable } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import { stripVTControlCharacters, styleText } from 'node:util';
 import { terminalColour, terminalRows, type TerminalPresentation } from '../presentation.js';
 import type { ActivityUI } from '../activity.js';
@@ -24,7 +24,7 @@ export async function chooseMany(ui: SetupUI, message: string, choices: string[]
   }
 }
 
-export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentation): SetupUI & { close(): void } {
+export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentation): SetupUI & { close(): void; prompt(message: string, cwd: string): Promise<string> } {
   const colour = terminalColour(process.stderr.isTTY) && !process.env.NODE_DISABLE_COLORS;
   const paint = (format: Parameters<typeof styleText>[0], text: string) => colour ? styleText(format, text, { validateStream: false }) : text;
   let hidden = false;
@@ -35,9 +35,13 @@ export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentat
   Object.defineProperty(output, 'columns', { get: () => process.stderr.columns });
   const resize = () => output.emit('resize');
   process.stderr.on('resize', resize);
-  const terminal = createInterface({ input: process.stdin, output, terminal: Boolean(process.stdin.isTTY) });
+  const input = new PassThrough();
+  const forward = (chunk: Buffer) => input.write(chunk);
+  process.stdin.on('data', forward);
+  const terminal = createInterface({ input, output, terminal: Boolean(process.stdin.isTTY) });
   // Readline must not echo stray keys into an operation's live display.
   terminal.pause();
+  process.stdin.pause();
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
   const write = (text: string) => presentation ? presentation.write(text) : process.stderr.write(text);
   const touch = () => presentation?.touchPrompt();
@@ -66,12 +70,14 @@ export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentat
       let answer = '';
       if (secret) { process.stderr.write(label); hidden = true; }
       try {
+        process.stdin.resume();
         if (process.stdin.isTTY) process.stdin.setRawMode(true);
         answer = await terminal.question(secret ? '' : label, { signal: combined });
         submitted = true;
         return answer.trim() || fallback || '';
       } finally {
         terminal.pause();
+        process.stdin.pause();
         if (process.stdin.isTTY) process.stdin.setRawMode(false);
         hidden = false;
         if (secret || !submitted) process.stderr.write('\n');
@@ -94,7 +100,15 @@ export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentat
       try { let r = (await ui.input(`${message} Type yes to confirm`, 'no', false, extraSignal)); return r === 'yes' || r === "ya"; }
       catch (error) { if (signal.aborted || extraSignal?.aborted) return false; throw error; }
     },
-    close: () => { process.stdin.removeListener('data', touch); process.stderr.removeListener('resize', resize); terminal.close(); },
+    prompt: async (message: string, cwd: string) => {
+      const { promptInput } = await import('../prompt.js');
+      terminal.pause();
+      process.stdin.removeListener('data', forward);
+      presentation?.pause();
+      try { return await promptInput(message, cwd, signal); }
+      finally { process.stdin.on('data', forward); }
+    },
+    close: () => { process.stdin.removeListener('data', forward); input.destroy(); process.stdin.pause(); process.stdin.removeListener('data', touch); process.stderr.removeListener('resize', resize); terminal.close(); },
   };
   terminal.on('SIGINT', () => process.emit('SIGINT'));
   return ui;

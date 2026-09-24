@@ -2,19 +2,19 @@ import type { ActivitySink } from './activity.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { defaultPolicy, JevRouter, type JevProvider } from 'jevrouter';
+import { defaultPolicy, JevRouter } from 'jevrouter';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
 import { prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
 import { lockState, SpendGovernor } from './inference/budget.js';
-import { budgetedJev, localAvailable } from './inference/providers.js';
+import { budgetedJev, localAvailable, type CancellableJevProvider } from './inference/providers.js';
 import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[] }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; chat?: boolean; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[] }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
@@ -23,7 +23,7 @@ export interface HostResult {
 export interface HostDependencies {
   approve: Approve;
   onActivity?: ActivitySink;
-  provider?: JevProvider;
+  provider?: CancellableJevProvider;
   localProbe?: () => Promise<boolean>;
   onProgress?: (message: string) => void;
   onEvent?: EventSink; beforeMutation?: BeforeMutation;
@@ -87,7 +87,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     await budget.load();
     await mkdir(config.stateDir, { recursive: true });
     await telemetry.event('request_start', { correction: Boolean(request.correction), web: Boolean(request.web) });
-    const router = config.routingMode === 'direct' ? undefined : new JevRouter(budgetedJev(config, budget, telemetry, dependencies.provider), { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false });
+    const router = config.routingMode === 'direct' ? undefined : new JevRouter(budgetedJev(config, budget, telemetry, dependencies.provider, request.signal), { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false });
     const localOnline = await (dependencies.localProbe ?? (() => localAvailable(config)))();
     let scope: { workload: Workload; tier: Tier } | undefined;
     let previous: AttemptResult | undefined;
@@ -110,10 +110,12 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         context: {
           preference: 'Prefer local inference when suitable. Use economy cloud when local is unavailable or unsuitable. Difficulty alone is not evidence of failure. coder operates in the repository; ask has no filesystem or shell.',
           web_enabled: Boolean(request.web),
+          history: conversation.history,
           ...(scope ? { escalation: { ...scope, evidence: previous?.reason } } : {}),
         },
         actor_permissions: config.policy.permissions,
       }, candidates) : undefined;
+      if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
       if (decision) receipts.push(await telemetry.receipt(decision));
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
@@ -142,9 +144,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
       if (!candidate || !assessCandidate(config, candidate).allowed || (decision && !usedRoutingFallback && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
+      if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
       if (assessCandidate(config, candidate).confirmation || (!usedRoutingFallback && (decision?.status === 'needs_confirmation' || assessment?.router.requires_confirmation))) {
         const approved = await dependencies.approve({ kind: 'route', summary: `Execute ${selected}?`, details: `Model: ${candidate.metadata?.model}\nMaximum inference charge per turn: $${Number(candidate.metadata?.max_call_usd).toFixed(6)}\nRequest ceiling: $${config.policy.budget.requestUsd}; already charged/reserved: $${budget.spent().request.toFixed(6)}\n${basePrompt}` });
         await telemetry.event('approval', { decisionId: decision?.decision_id, capability: selected, approved });
+        if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
         if (!approved) return await finish(false, 'approval_denied', 'Route was not approved.');
       }
       const [workload, tier] = selected.split('.') as [Workload, Tier];
@@ -153,7 +157,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       models.push(config.models[tier].id);
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: config.models[tier].id, tier });
       previous = await runAttempt({
-        config, workload, tier, cwd, web: Boolean(request.web), budget, telemetry,
+        config, workload, tier, cwd, web: Boolean(request.web), chat: request.chat, budget, telemetry,
+        unresolvedChecks: previous?.unresolvedChecks,
         history: conversation.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
           const approved = await dependencies.approve(approval);
@@ -193,6 +198,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     }
     return await finish(false, 'limit', 'Escalation limit reached.');
   } catch (error) {
+    if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
     await telemetry.event('request_error', { name: error instanceof Error ? error.name : 'Error' });
     throw error;
   } finally { try { await unlock(); } finally { dependencies.onActivity?.(undefined); } }

@@ -2,7 +2,7 @@
 
 a small personal agent host for coding, questions, research, and planning. run local models without API keys, or configure cloud models with spending limits.
 
-use `ask` for questions and planning, and `code` to work in a repository. Each command handles one request. Use `ask --web` for research with a configured search service.
+use `ask` for questions and planning, and `code` to work in a repository. Use `chat` for an ongoing conversation; `ask` and `code` handle one request. Use `ask --web` for research with a configured search service.
 
 teapilot is built to be focused, resourceful and batteries included.
 
@@ -27,11 +27,12 @@ From the source checkout:
 
 ```sh
 npm start -- ask "Help plan the next three workdays"
+npm start -- chat "Help me think through an idea"
 npm start -- code --cwd "path/to/repository" "Fix the failing tests"
 npm start -- doctor
 ```
 
-Choose the repository root with `--cwd`. `ask` has no repository tools; `code` can read, edit, and run approved commands. Requests are independent, with no persistent conversation or personal memory.
+Choose the repository root with `--cwd`. `ask` has no repository tools; `code` can read, edit, and run approved commands. `chat` remembers recent turns for the current session and has the same tool access as `ask`. Type `/exit` or `/quit` to leave. There is no personal memory across sessions. Interactive prompts use Enter for newlines, Shift+Enter to send (Alt+Enter is a fallback), and Tab after `@` to complete files from `--cwd`.
 
 After installing the published package, use `teapilot` in place of `npm start --`. See [setup and diagnostics](usage/01-setup.md) for package installation and readiness checks, and [usage](usage/02-commands.md) for more examples and web research.
 

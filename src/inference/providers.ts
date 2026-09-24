@@ -29,17 +29,44 @@ export async function localAvailable(config: Config): Promise<boolean> {
   } catch { return false; }
 }
 
-export function budgetedJev(config: Config, governor: SpendGovernor, telemetry: Telemetry, provider?: JevProvider): JevProvider {
+// The SDK does not accept a signal. Custom providers may opt in; racing also
+// releases the host promptly for SDK calls without touching their late results.
+export interface CancellableJevProvider extends JevProvider {
+  decide(request: Parameters<JevProvider['decide']>[0], signal?: AbortSignal): ReturnType<JevProvider['decide']>;
+}
+
+async function decideUntilCancelled(provider: CancellableJevProvider, request: Parameters<JevProvider['decide']>[0], signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  let cancel: (() => void) | undefined;
+  try {
+    return await new Promise<Awaited<ReturnType<JevProvider['decide']>>>((resolve, reject) => {
+      cancel = () => reject(signal!.reason);
+      signal?.addEventListener('abort', cancel, { once: true });
+      provider.decide(request, signal).then(resolve, reject);
+    });
+  } finally {
+    if (cancel) signal?.removeEventListener('abort', cancel);
+  }
+}
+
+export function budgetedJev(config: Config, governor: SpendGovernor, telemetry: Telemetry, provider?: CancellableJevProvider, signal?: AbortSignal): JevProvider {
   const inner = provider ?? createSdkProvider({ ...config.router, cache: false });
   return {
     name: inner.name,
     async decide(request) {
+      signal?.throwIfAborted();
+      // Fit whole recent turns against the actual SDK request, including its
+      // candidate metadata and questions. Never truncate the current request.
+      request = structuredClone(request);
+      const state = request.state as { context?: { history?: unknown[] } };
+      const history = state?.context?.history;
+      while (Array.isArray(history) && history.length && Buffer.byteLength(JSON.stringify(request)) > 32000) history.shift();
       if (Buffer.byteLength(JSON.stringify(request)) > 32000) throw new Error('Routing input is too large');
       const reservation = await governor.reserve(config.router.maxCallUsd, 'jev');
       let cost: number | undefined;
       let usage: Record<string, unknown> | undefined;
       try {
-        const result = await inner.decide(request);
+        const result = await decideUntilCancelled(inner, request, signal);
         usage = result.usage;
         if (typeof usage?.cost === 'number' && usage.cost >= 0) cost = usage.cost;
         return result;

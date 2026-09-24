@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runHost } from '../src/host.js';
 import { completion, events, fixture, jev, mockServer, type Handler } from './helpers.js';
@@ -16,6 +16,52 @@ async function setup(handler: Handler) {
 }
 
 describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
+  it('routes follow-ups using recent history while dropping oversized older turns', async () => {
+    let routedHistory: unknown;
+    const recent = { user: 'Suggest two changes to this repository.', assistant: 'First: rename a variable. Second: add validation.' };
+    const f = await setup((body, req, res) => {
+      if (req.url === '/jev') { routedHistory = body.state.context.history; jev(res, 'coder.local'); }
+      else completion(res, { text: 'Inspected the requested change.' });
+    });
+    f.config.policy.limits.maxPromptChars = 20000;
+    f.config.models.local.contextTokens = 128000;
+    const result = await runHost(f.config, {
+      cwd: f.cwd, prompt: 'Implement the second option',
+      history: [{ user: '旧'.repeat(14000), assistant: 'Earlier discussion' }, recent],
+    }, { approve: async () => false, localProbe: async () => true });
+    expect(result.success).toBe(true);
+    expect(routedHistory).toEqual([recent]);
+  });
+
+  it('cancels pending routing, releases the lock, and retains the charge despite a late reply', async () => {
+    const f = await fixture(); cleanups.push(f.cleanup);
+    const controller = new AbortController();
+    let resolveRoute!: (value: any) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>(resolve => { markStarted = resolve; });
+    const approve = vi.fn(async () => true);
+    const pending = runHost(f.config, { cwd: f.cwd, prompt: 'Explain a topic', workload: 'ask', signal: controller.signal }, {
+      approve, localProbe: async () => true,
+      provider: { name: 'pending', decide: (_request, signal) => {
+        expect(signal).toBe(controller.signal);
+        markStarted();
+        return new Promise(resolve => { resolveRoute = resolve; });
+      } },
+    });
+    await started;
+    controller.abort();
+    const result = await pending;
+    expect(result.status).toBe('cancelled');
+    expect(result.attempts).toBe(0);
+    expect(result.spentUsd).toBe(f.config.router.maxCallUsd);
+    expect(approve).not.toHaveBeenCalled();
+    await expect(stat(join(f.config.stateDir, 'run.lock'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const ledger = await readFile(join(f.config.stateDir, 'spend.jsonl'), 'utf8');
+    resolveRoute({ answers: {}, usage: { cost: 0 } });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(await readFile(join(f.config.stateDir, 'spend.jsonl'), 'utf8')).toBe(ledger);
+  });
+
   it('routes ask with no filesystem/shell tools, records receipts and actual usage', async () => {
     let sentTools: string[] = [];
     const f = await setup((body, req, res) => {
@@ -55,22 +101,32 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     expect(calls).toBe(3);
   });
 
-  it('persistent test failures escalate local → economy with execution context', async () => {
+  it.each([false, true])('requires verification after test failures escalate (repair: %s)', async repair => {
     let routes = 0, localCalls = 0, cloudCalls = 0;
     const command = 'node --test failing.test.cjs';
     const f = await setup((body, req, res) => {
       if (req.url === '/jev') jev(res, ++routes === 1 ? 'coder.local' : 'coder.economy');
       else if (req.url?.endsWith('/models')) res.end('{}');
       else if (req.url?.startsWith('/local')) { localCalls++; completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command } } }); }
-      else { cloudCalls++; expect(body.provider).toMatchObject({ require_parameters: true, max_price: { prompt: 0.2, completion: 0.5, request: 0 } }); expect(JSON.stringify(body.messages)).toContain('Previous attempt stopped'); completion(res, { text: 'Resolved using the economy model.', cost: 0.00004 }); }
+      else {
+        cloudCalls++;
+        expect(body.provider).toMatchObject({ require_parameters: true, max_price: { prompt: 0.2, completion: 0.5, request: 0 } });
+        expect(JSON.stringify(body.messages)).toContain('Previous attempt stopped');
+        if (repair && cloudCalls === 1) completion(res, { tool: { name: 'write', arguments: { path: 'failing.test.cjs', content: '// repaired' } } });
+        else if (repair && cloudCalls === 2) completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command } } });
+        else completion(res, { text: 'Resolved using the economy model.', cost: 0.00004 });
+      }
     });
     f.config.policy.execution.trustedCommands = [command];
+    f.config.policy.escalation.maxEscalations = 1;
     await writeFile(join(f.cwd, 'failing.test.cjs'), 'throw new Error("test failed");');
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Fix the failing tests' }, { approve: async () => false });
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(repair);
+    expect(result.check).toBe(repair ? 'passed' : 'failed');
+    expect(result.status).toBe(repair ? 'completed' : 'test_failures');
     expect(result.capability).toBe('coder.economy');
     expect(localCalls).toBe(2);
-    expect(cloudCalls).toBe(1);
+    expect(cloudCalls).toBe(repair ? 3 : 1);
     expect(result.receipts).toHaveLength(2);
     expect((await events(f.config)).find(e => e.type === 'escalation')).toMatchObject({ from: 'coder.local', to: 'coder.economy', reason: 'test_failures' });
   });

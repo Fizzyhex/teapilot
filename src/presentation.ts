@@ -15,7 +15,7 @@ const paint = (text: string, code: string, enabled: boolean) => enabled ? `\x1b[
 export class MarkdownOutput {
   private pending = '';
   private fence?: string;
-  constructor(private readonly write: (text: string) => void, private readonly colour: boolean) {}
+  constructor(private readonly write: (text: string) => void, private readonly colour: boolean) { }
   push(text: string): void {
     this.pending += text;
     let end: number;
@@ -91,7 +91,7 @@ export class TerminalPresentation implements ActivityUI {
     }
   };
   private readonly drain = () => { if (!this.closed) this.draw(); };
-  constructor(private readonly json: boolean, private readonly noMotion: boolean) {}
+  constructor(private readonly json: boolean, private readonly noMotion: boolean) { }
 
   private eligible(): boolean {
     return !this.closed && !this.json && !this.noMotion && this.stream && Boolean(process.stdin.isTTY)
@@ -137,12 +137,14 @@ export class TerminalPresentation implements ActivityUI {
       rows.forEach((row, index) => {
         if (row !== this.artRows[index]) {
           const distance = rows.length - index;
-          update += `\r\x1b[${distance}A\x1b[2K${paint(row, '32', this.colour)}\r\x1b[${distance}B`;
+          update += `\r\x1b[${distance}A\x1b[2K${paint(row, ACTIVITY_COLOUR, this.colour)}\r\x1b[${distance}B`;
         }
       });
       if (update) process.stderr.write(update);
     } else {
-      process.stderr.write(paint(rows.join('\n'), '32', this.colour) + '\n');
+      process.stderr.write(
+        paint(rows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n'
+      );
     }
     this.artRows = rows;
   }
@@ -203,7 +205,9 @@ export class TerminalPresentation implements ActivityUI {
       // Allocate above the prompt before readline writes it. Subsequent frames
       // move relative to readline's public cursor position, never saved cursors.
       this.artRows = [...clips.pawing.frames[2]!.split('\n'), 'Waiting for your input...'];
-      process.stderr.write(paint(this.artRows.join('\n'), '32', this.colour) + '\n');
+      process.stderr.write(
+        paint(this.artRows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n'
+      );
       this.playback.play(clips.pawing, [2, 3]);
     }
   }
@@ -218,8 +222,12 @@ export class TerminalPresentation implements ActivityUI {
     const rows = [...this.playback.frame.split('\n'), 'Waiting for your input...'];
     if (rows.every((row, index) => row === this.artRows[index])) return;
     const distance = rows.length + position.rows;
-    process.stderr.write(`\r\x1b[${distance}A` + paint(rows.join('\n'), '32', this.colour)
-      + `\r\x1b[${position.rows + 1}B` + (position.cols ? `\x1b[${position.cols}C` : ''));
+    process.stderr.write(
+      `\r\x1b[${distance}A` +
+      paint(rows.join('\n'), ACTIVITY_COLOUR, this.colour) +
+      `\r\x1b[${position.rows + 1}B` +
+      (position.cols ? `\x1b[${position.cols}C` : '')
+    );
     this.artRows = rows;
   }
   endPrompt(submitted: boolean, occupiedRows: number): void {

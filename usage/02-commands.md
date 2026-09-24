@@ -3,6 +3,7 @@
 ```sh
 teapilot code --cwd "path/to/repository" "Fix the failing unit tests"
 teapilot ask "Explain dependency injection"
+teapilot chat ["Help me plan a project"]
 teapilot ask "Help plan the next three workdays"
 teapilot code --correction "The previous change missed empty input" "Fix the parser"
 teapilot code --json --cwd "path/to/repository" "Review the code"
@@ -12,13 +13,23 @@ For a source checkout, replace `teapilot` with `npm start --`.
 
 ## Request behavior
 
-The same argument syntax works in PowerShell, including paths with spaces. `teapilot` without arguments asks for one prompt and, in direct mode, a workload. Each invocation is one request, not a persistent conversation. Corrections are included in the prompt and noted in outcomes; there is no personal memory or automatic retrieval of previous sessions.
+The same argument syntax works in PowerShell, including paths with spaces. `teapilot` without arguments asks for one prompt and, in direct mode, a workload. `ask` and `code` handle one request. `chat` always prompts for another turn, including when an opening prompt is supplied. Corrections are included in the prompt and noted in outcomes; there is no personal memory or automatic retrieval of previous sessions.
 
 `--cwd` is the filesystem boundary, so choose the repository root. To run compiled JavaScript: `npm run build`, then `node dist/cli.js ask "prompt"`.
 
 Coding starts with a bounded read-only file inventory and has built-in repository listing and literal text search, so ordinary inspection needs no shell approval. These tools respect `.gitignore` and protected paths, skip links and generated directories, and report bounded/truncated results. Arbitrary shell commands still require approval unless explicitly trusted. Repeated inspection gets one prompt to change approach before stopping; limits still apply.
 
 Incomplete runs report the original stop reason, fallback eligibility, observed file edits, check status, and a next action. Shell changes may extend beyond the recorded file edits. Existing edits remain on disk. Escalation receives structured, bounded execution evidence; it is not a new session or an automatic rollback.
+
+## Interactive chat and prompts
+
+Run `teapilot chat` with an optional opening prompt or `--prompt`. It uses the `ask` workload in both direct and hosted routing, with optional `--web`, and no filesystem or shell tools. Recent complete turns are carried forward within the configured prompt limit; older turns are omitted when needed. History is held in memory for this session only. Each message has its own request budget, while the daily spending limit remains shared. Incomplete responses remain visible and you can continue; the session exits with code 2 if any turn was incomplete.
+
+Type `/exit` or `/quit` to end chat, Ctrl+D at an empty prompt to leave, or Ctrl+C to cancel. Chat requires an interactive terminal and rejects `--json` rather than silently becoming a one-shot request.
+
+When entering an interactive prompt for `ask`, `code`, or `chat`, Enter inserts a newline and Shift+Enter submits. The editor enables the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) and also recognises the xterm modified-Enter sequence. Terminals that do not distinguish Shift+Enter from Enter can use Alt+Enter or bind Shift+Enter to `ESC [ 13 ; 2 u`. Setup questions and approvals still use Enter.
+
+Type `@` followed by a path prefix and press Tab. A unique file or directory completes automatically; multiple matches appear below the prompt so you can narrow the prefix. Directories end in `/`; paths with spaces are quoted. Completion is relative to `--cwd` (the launch directory by default), stays inside it, and skips symlinks. It inserts a path only, without automatically reading or attaching file contents.
 
 ## Workload and routing
 

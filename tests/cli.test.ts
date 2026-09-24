@@ -24,6 +24,14 @@ it('starts the native CLI and provides help without credentials', async () => {
   const result = await cli(['--help']);
   expect(result.code).toBe(0);
   expect(result.stdout).toContain('teapilot');
+  expect(result.stdout).toContain('teapilot chat');
+});
+
+it('rejects noninteractive chat instead of silently running a one-shot request', async () => {
+  const result = await cli(['chat', 'Hello']);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain('Chat requires an interactive terminal');
+  expect(result.stdout).toBe('');
 });
 
 it('doctor and an ask request work from a clean machine config with mock endpoints', async () => {
