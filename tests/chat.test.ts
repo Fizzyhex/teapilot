@@ -32,7 +32,7 @@ it('continues after an opening prompt and carries the conversation and correctio
   const run = vi.fn(async (_request: HostRequest) => result);
   expect(await runChat({ request: { prompt: 'Help plan', correction: 'Keep it simple', cwd: '.', web: true }, maxPromptChars: 2000, input, run })).toBe(0);
   expect(run).toHaveBeenCalledTimes(2);
-  expect(run.mock.calls[0]![0]).toMatchObject({ workload: 'ask', chat: true, web: true, history: [] });
+  expect(run.mock.calls[0]![0]).toMatchObject({ workload: 'ask', mode: 'chat', web: true, history: [] });
   expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'Cost', correction: undefined, history: [{ user: 'Help plan\nUser correction:\nKeep it simple', assistant: result.text }] });
 });
 
@@ -72,4 +72,26 @@ it('sends conversational instructions and prior turns to the ask model without r
     expect.objectContaining({ role: 'user', content: [{ type: 'text', text: 'Cost' }] }),
   ]));
   expect(payloads[0].tools.map((tool: any) => tool.function.name)).toEqual(['request_escalation']);
+});
+
+
+it('compacts on demand with focus and /new clears the checkpoint', async () => {
+  const input = vi.fn()
+    .mockResolvedValueOnce('/compact focus on parser failures')
+    .mockResolvedValueOnce('Next')
+    .mockResolvedValueOnce('/new')
+    .mockResolvedValueOnce('After reset')
+    .mockResolvedValueOnce('/exit');
+  const run = vi.fn(async (_request: HostRequest) => result);
+  const compact = vi.fn(async (request: import('../src/inference/compaction.js').SessionCompactionInput) => {
+    if (request.force) return {
+      performed: true, summary: 'parser checkpoint', history: [], compactedTurns: request.history.length,
+      tokensBefore: 100, estimatedTokensAfter: 20, spentUsd: 0, tier: 'normal' as const, model: 'local',
+    };
+    return { performed: false, summary: request.summary, history: request.history, compactedTurns: 0, tokensBefore: 20, spentUsd: 0, tier: 'normal' as const, model: 'local' };
+  });
+  expect(await runChat({ request: { prompt: 'Opening', cwd: '.' }, maxPromptChars: 2000, input, run, compact })).toBe(0);
+  expect(compact.mock.calls.some(call => call[0].force && call[0].focus === 'focus on parser failures')).toBe(true);
+  expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'Next', summary: 'parser checkpoint', history: [] });
+  expect(run.mock.calls[2]![0]).toMatchObject({ prompt: 'After reset', summary: undefined, history: [] });
 });
