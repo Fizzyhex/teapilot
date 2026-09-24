@@ -4,9 +4,10 @@ import { z } from 'zod';
 import { normalizeContext, Type, type Message } from '@earendil-works/pi-ai';
 import { defaultPolicy, JevRouter, validateManifest } from 'jevrouter';
 import { tiers, type Config, type Tier } from '../config.js';
-import { budgetedJev, guardedStream, piModel, type InferenceState } from '../inference/providers.js';
+import { budgetedJev, discoverNativeReasoning, guardedStream, piModel, type InferenceState } from '../inference/providers.js';
 import { callCeiling, lockState, SpendGovernor } from '../inference/budget.js';
 import { assessCandidate } from '../routing/selection.js';
+import { directTier, effectiveProfile, modelFor, profileAvailable, profileFor } from '../routing/execution.js';
 import { Telemetry } from '../telemetry/outcome.js';
 import type { HostDependencies } from '../host.js';
 import { StreamRedactor } from './events.js';
@@ -24,12 +25,12 @@ export type InferenceRequest = z.infer<typeof inferenceSchema>;
 export const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 
 export function modelInformation(config: Config) {
-  const available = tiers.filter(tier => config.models[tier].enabled && !config.policy.disabledCapabilities.includes(`inference.${tier}`) && (tier === 'local' || config.secrets[tier]));
+  const available = tiers.filter(tier => modelFor(config, tier).enabled && !config.policy.disabledCapabilities.includes(`inference.${tier}`) && profileAvailable(config, tier).available);
   if (!config.policy.permissions.includes('inference')) return [];
-  const fixed = available.map(tier => ({ id: tier, name: `TeaPilot ${tier[0]!.toUpperCase()}${tier.slice(1)} · ${config.models[tier].id}`, family: 'teapilot', version: '1',
-    maxInputTokens: config.models[tier].contextTokens - config.models[tier].maxOutputTokens - 2048, maxOutputTokens: config.models[tier].maxOutputTokens,
-    capabilities: { toolCalling: config.models[tier].toolCalling, imageInput: false },
-    detail: `${tier === 'local' ? 'Local' : 'Paid'} · $${config.policy.budget.requestUsd}/call · $${config.policy.budget.dailyUsd}/UTC day`,
+  const fixed = available.map(tier => ({ id: tier, name: `TeaPilot ${tier[0]!.toUpperCase()}${tier.slice(1)} · ${modelFor(config, tier).id}`, family: 'teapilot', version: '1',
+    maxInputTokens: effectiveProfile(config, tier).contextTokens - effectiveProfile(config, tier).maxOutputTokens - 2048, maxOutputTokens: effectiveProfile(config, tier).maxOutputTokens,
+    capabilities: { toolCalling: modelFor(config, tier).toolCalling, imageInput: false },
+    detail: `Local · ${profileFor(tier).thinking} reasoning · $${config.policy.budget.requestUsd}/call · $${config.policy.budget.dailyUsd}/UTC day`,
   }));
   return fixed.length ? [{ ...fixed[0]!, id: 'auto', name: 'TeaPilot Auto', maxInputTokens: Math.max(...fixed.map(m => m.maxInputTokens)), maxOutputTokens: Math.min(...fixed.map(m => m.maxOutputTokens)), capabilities: { toolCalling: fixed.some(m => m.capabilities.toolCalling), imageInput: false } }, ...fixed] : [];
 }
@@ -43,7 +44,7 @@ export function inferenceContext(request: InferenceRequest, config: Config, tier
       if (!content.length) return;
       if (message.role === 'assistant') {
         if (content.some(part => part.type === 'toolResult')) throw new Error('Tool results must use the user role');
-        messages.push({ role: 'assistant', content: content as ({ type: 'text'; text: string } | z.infer<typeof call>)[], api: 'openai-completions', provider: config.models[tier].provider, model: config.models[tier].id, timestamp: Date.now(), usage: emptyUsage(), stopReason: content.some(p => p.type === 'toolCall') ? 'toolUse' : 'stop' });
+        const model = modelFor(config, tier); messages.push({ role: 'assistant', content: content as ({ type: 'text'; text: string } | z.infer<typeof call>)[], api: 'openai-completions', provider: model.provider, model: model.id, timestamp: Date.now(), usage: emptyUsage(), stopReason: content.some(p => p.type === 'toolCall') ? 'toolUse' : 'stop' });
       } else {
         if (content.some(part => part.type !== 'text')) throw new Error('Tool calls must use the assistant role');
         messages.push({ role: 'user', content: content as z.infer<typeof text>[], timestamp: Date.now() });
@@ -78,21 +79,23 @@ export async function runInference(config: Config, request: InferenceRequest, de
   let emitted = false;
   try {
     await budget.load();
+    for (const physical of ['fast', 'capable'] as const) if (config.models[physical].provider === 'ollama') await discoverNativeReasoning(config, physical, signal);
     const advertised = modelInformation(config).find(m => m.id === request.model);
     if (!advertised) throw new Error('Model is disabled or lacks credentials. Open TeaPilot: Manage Models.');
     for (let attempt = 0; attempt <= config.policy.escalation.maxEscalations; attempt++) {
       signal?.throwIfAborted();
       const routingCost = request.model === 'auto' && config.routingMode !== 'direct' ? config.router.maxCallUsd : 0;
       const candidates = tiers.map(tier => {
-        const spec = config.models[tier];
+        const spec = modelFor(config, tier); const profile = effectiveProfile(config, tier);
         const size = Buffer.byteLength(JSON.stringify(inferenceContext(request, config, tier))) + 4096;
         const available = spec.enabled && !config.policy.disabledCapabilities.includes(`inference.${tier}`) && !tried.has(tier)
-          && (request.model === 'auto' || request.model === tier) && (tier === 'local' || Boolean(config.secrets[tier]))
-          && (!request.tools.length || spec.toolCalling) && size <= spec.contextTokens - spec.maxOutputTokens
+          && (request.model === 'auto' || request.model === tier)
+          && (!request.tools.length || spec.toolCalling) && profileAvailable(config, tier).available && size <= profile.contextTokens - profile.maxOutputTokens
           && budget.permits(callCeiling(spec) + routingCost);
-        return validateManifest({ id: `inference.${tier}`, name: spec.id, type: 'subagent', description: `Supply ${tier} text inference${spec.toolCalling ? ' and tool calls' : ''}; caller executes tools.`, verification: { status: 'verified', source: 'teapilot:built-in' }, permissions: ['inference'], risk: { level: 'low', categories: [] }, availability: { available }, policy: { requires_confirmation: tier !== 'local' && (callCeiling(spec) >= config.policy.budget.approvalThresholdUsd || tier === 'strong' && config.policy.budget.strongRequiresApproval) }, execution: { mode: 'subagent', target: 'inference' }, metadata: { model: spec.id, tier, context_tokens: spec.contextTokens } });
+        return validateManifest({ id: `inference.${tier}`, name: spec.id, type: 'subagent', description: `Supply ${tier} text inference${spec.toolCalling ? ' and tool calls' : ''}; caller executes tools.`, verification: { status: 'verified', source: 'teapilot:built-in' }, permissions: ['inference'], risk: { level: 'low', categories: [] }, availability: { available }, policy: { requires_confirmation: callCeiling(spec) >= config.policy.budget.approvalThresholdUsd }, execution: { mode: 'subagent', target: 'inference' }, metadata: { model: spec.id, tier, effort: profile.thinking, context_tokens: profile.contextTokens } });
       });
-      let chosen = candidates.find(candidate => assessCandidate(config, candidate).allowed);
+      const preferredTier = directTier('ask', request.model === 'auto' ? undefined : request.model);
+      let chosen = candidates.find(candidate => candidate.id === `inference.${preferredTier}` && assessCandidate(config, candidate).allowed);
       let routeConfirmation = false;
       if (!chosen) throw new Error('No enabled model fits this context, tool requirements, and remaining budget.');
       if (routingCost) {
@@ -108,11 +111,11 @@ export async function runInference(config: Config, request: InferenceRequest, de
       tried.add(tier);
       signal?.throwIfAborted();
       if (assessCandidate(config, chosen).confirmation || routeConfirmation) {
-        if (!await dependencies.approve({ kind: 'route', summary: `Use ${config.models[tier].id}?`, details: `Maximum inference charge: $${callCeiling(config.models[tier]).toFixed(6)}. Budget: $${config.policy.budget.requestUsd}/call; $${config.policy.budget.dailyUsd}/UTC day.`, signal })) throw new Error('Inference approval denied');
+        if (!await dependencies.approve({ kind: 'route', summary: `Use ${modelFor(config, tier).id}?`, details: `Maximum inference charge: $${callCeiling(modelFor(config, tier)).toFixed(6)}. Budget: $${config.policy.budget.requestUsd}/call; $${config.policy.budget.dailyUsd}/UTC day.`, signal })) throw new Error('Inference approval denied');
       }
-      await telemetry.event('model_selection', { model: config.models[tier].id, tier, attempt: attempt + 1 });
+      await telemetry.event('model_selection', { model: modelFor(config, tier).id, tier, effort: profileFor(tier).thinking, attempt: attempt + 1 });
       const state: InferenceState = { turns: 0 };
-      const stream = await guardedStream(config, tier, budget, telemetry, state, { toolChoice: request.toolMode, maxOutputTokens: advertised.maxOutputTokens })(piModel(config.models[tier]), inferenceContext(request, config, tier), { signal });
+      const stream = await guardedStream(config, tier, budget, telemetry, state, { toolChoice: request.toolMode, maxOutputTokens: advertised.maxOutputTokens })(piModel(modelFor(config, tier), effectiveProfile(config, tier)), inferenceContext(request, config, tier), { signal });
       const redactor = new StreamRedactor(secrets);
       for await (const event of stream) {
         if (event.type === 'text_delta') {
@@ -132,7 +135,7 @@ export async function runInference(config: Config, request: InferenceRequest, de
         throw new Error(`Inference stopped (${state.stop ?? final.stopReason}); partial responses are never replayed.`);
       }
       if (request.toolMode === 'required' && !final.content.some(p => p.type === 'toolCall')) throw new Error('Model did not honor required tool mode');
-      const result = { requestId, status: final.stopReason === 'length' ? 'length' : 'completed', model: config.models[tier].id, tier, spentUsd: budget.spent().request, receipts };
+      const result = { requestId, status: final.stopReason === 'length' ? 'length' : 'completed', model: modelFor(config, tier).id, tier, spentUsd: budget.spent().request, receipts };
       await telemetry.event('request_end', result);
       return result;
     }

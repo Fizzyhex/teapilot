@@ -8,19 +8,21 @@ import { tiers, type Config, type Tier, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
 import { prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
 import { lockState, SpendGovernor } from './inference/budget.js';
-import { budgetedJev, localAvailable, type CancellableJevProvider } from './inference/providers.js';
+import { budgetedJev, discoverNativeReasoning, localAvailable, type CancellableJevProvider } from './inference/providers.js';
 import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
-import type { Mode, SessionGrants, Permission } from './execution/grants.js';
-import { capabilityPlanner, readCapabilityPlan } from './routing/intent.js';
+import { withPrerequisites, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
+import { capabilityPlanner, readRoutingPlan } from './routing/intent.js';
+import { directTier, modelFor, profileFor } from './routing/execution.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; chat?: boolean; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; chat?: boolean; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; tier?: Tier | 'auto'; relatedTier?: Tier; sessionId?: string; taskId?: string }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
   check?: 'passed' | 'failed'; models?: string[];
+  tier?: Tier;
 }
 export interface HostDependencies {
   approve: Approve;
@@ -86,7 +88,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         searchDisabled = true; searchUnverified = true;
       }
     }
-    for (const permission of required) if (!activePermissions.includes(permission) && !(permission === 'web.search' && searchDisabled)) activePermissions.push(permission);
+    for (const permission of withPrerequisites(required)) if (!activePermissions.includes(permission) && !(permission === 'web.search' && searchDisabled)) activePermissions.push(permission);
     return true;
   };
   const incomplete = (attempt: AttemptResult, fallback?: string) => {
@@ -113,7 +115,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   };
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
-    const result = { requestId, success, status, text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, spentUsd: budget.spent().request, receipts, attempts, check, models };
+    const result = { requestId, success, status, text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
   };
@@ -126,12 +128,14 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     const provider = budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
     const router = config.routingMode === 'direct' ? undefined : new JevRouter(request.authorization ? capabilityPlanner(provider) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false });
     const localOnline = await (dependencies.localProbe ?? (() => localAvailable(config)))();
+    for (const physical of ['fast', 'capable'] as const) if (config.models[physical].provider === 'ollama') await discoverNativeReasoning(config, physical, request.signal);
     let scope: { workload: Workload; tier: Tier } | undefined;
     let previous: AttemptResult | undefined;
     const basePrompt = conversation.current;
     for (let index = 0; index <= config.policy.escalation.maxEscalations; index++) {
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
-      const candidates = capabilities(config, budget, localOnline, scope);
+      const candidates = capabilities(config, budget, localOnline, scope, { explicitTier: request.tier && request.tier !== 'auto' ? request.tier : undefined, relatedLock: request.relatedTier });
+      if (request.tier && request.tier !== 'auto') for (const candidate of candidates) if (!candidate.id.endsWith(`.${request.tier}`)) candidate.availability = { available: false, reason: 'Outside explicit tier preference' };
       if (request.workload) for (const candidate of candidates) {
         if (!candidate.id.startsWith(`${request.workload}.`)) candidate.availability = { available: false, reason: 'Outside requested workload' };
       }
@@ -140,7 +144,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       }
       if (request.web) for (const candidate of candidates) {
         const tier = candidate.id.split('.')[1] as Tier;
-        if (!config.models[tier].toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
+        if (!modelFor(config, tier).toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
       }
       if (!candidates.some(c => c.availability?.available)) return await finish(false, 'unavailable', previous?.text || 'No capability fits the configured availability and budget. Run teapilot doctor.');
       dependencies.onProgress?.(scope ? `Routing escalation to ${scope.workload}.${scope.tier} (${previous?.reason}).` : router ? 'Routing with JevRouter.' : 'Selecting the requested workload directly.');
@@ -148,7 +152,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const decision = router ? await router.route({
         request: basePrompt,
         context: {
-          preference: 'Prefer local inference when suitable. Use economy cloud when local is unavailable or unsuitable. Difficulty alone is not evidence of failure. Choose coder only when the user request needs repository access; ordinary questions use ask, including in Code mode.',
+          preference: 'Use the lowest suitable local execution profile. Default repository and agentic work to normal; use fast only for genuinely tiny standalone work. Scale capable work through normal, reasoning, deep when evidence warrants it. Choose coder only when the user request needs repository access; ordinary questions use ask.',
           mode: request.mode,
           granted_access: request.authorization?.list(),
           web_enabled: Boolean(request.web),
@@ -166,7 +170,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         ? candidates.find(candidate => candidate.id.startsWith(`${fallbackWorkload}.`) && assessCandidate(config, candidate).allowed)?.id
         : undefined;
       const usedRoutingFallback = Boolean(decision?.status === 'no_decision' && fallbackSelection);
-      selected = routedSelection ?? (decision ? fallbackSelection : candidates.find(c => assessCandidate(config, c).allowed)?.id);
+      selected = routedSelection ?? (decision ? fallbackSelection : candidates.find(c => c.id === `${fallbackWorkload ?? 'ask'}.${directTier(fallbackWorkload ?? 'ask', request.tier && request.tier !== 'auto' ? request.tier : undefined))` && assessCandidate(config, c).allowed)?.id);
 
       if (decision?.status === 'no_decision' && !fallbackWorkload) {
         return await finish(false, 'workload_uncertain', `JevRouter could not confidently determine whether this request needs repository access (${decision.fallback.type ?? 'manual_review'}). Use teapilot ask or teapilot code to state the intended workload.`);
@@ -182,13 +186,18 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         await telemetry.event('routing_fallback', { decisionId: decision!.decision_id, capability: selected, reason: decision!.fallback.type ?? 'manual_review' });
       }
 
-      const candidate = candidates.find(c => c.id === selected);
-      const assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
+      let candidate = candidates.find(c => c.id === selected);
+      let assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
       if (!candidate || !assessCandidate(config, candidate).allowed || (decision && !usedRoutingFallback && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
       if (request.authorization && decision) {
-        const required = readCapabilityPlan(decision.raw_jev, config.policy.router.min_confidence, selected.split('.')[0]!);
-        if (!required) return await finish(false, 'intent_uncertain', 'Please clarify whether this request needs repository reading, file edits, command execution, or live web research. No additional access was granted.');
-        if (!await activate(required, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
+        const plan = readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selected.split('.')[0]!);
+        if (!plan) return await finish(false, 'intent_uncertain', 'Please clarify whether this request needs repository reading, file edits, command execution, or live web research. No additional access was granted.');
+        if (!request.tier && plan.tier && plan.tier !== 'auto') {
+          const preferred = candidates.find(candidate => candidate.id === `${selected.split('.')[0]}.${plan.tier}`);
+          const preferredAssessment = preferred && decision?.decision.candidates.find(c => c.id === preferred.id);
+          if (preferred && preferredAssessment && assessCandidate(config, preferred).allowed && preferredAssessment.router.allowed && !preferredAssessment.router.filtered) { selected = preferred.id; candidate = preferred; assessment = preferredAssessment; }
+        }
+        if (!await activate(plan.permissions, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
       }
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
@@ -199,21 +208,21 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         if (!approved) return await finish(false, 'approval_denied', 'Route was not approved.');
       }
       const [workload, tier] = selected.split('.') as [Workload, Tier];
-      dependencies.onProgress?.(`Executing ${selected} using ${config.models[tier].id}.`);
+      dependencies.onProgress?.(`Executing ${selected} using ${modelFor(config, tier).id} (${profileFor(tier).thinking}).`);
       attempts++;
-      models.push(config.models[tier].id);
-      dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: config.models[tier].id, tier });
+      models.push(modelFor(config, tier).id);
+      dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
       previous = await runAttempt({
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), chat: request.chat, budget, telemetry,
         mode: request.mode, conversational: request.conversational, authorization: request.authorization,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {
-            const repository = capabilities(config, budget, localOnline, { workload: 'coder', tier }).find(value => value.id === `coder.${tier}`)!;
+            const repository = capabilities(config, budget, localOnline, { workload: 'coder', tier }, { explicitTier: tier }).find(value => value.id === `coder.${tier}`)!;
             const admission = assessCandidate(config, repository);
             if (!admission.allowed) { accessFailure = admission.reason ?? 'Repository capability unavailable'; return false; }
             if (admission.confirmation && workload !== 'coder' && !activePermissions.includes('repository.read')) {
-              if (!await dependencies.approve({ kind: 'route', summary: `Use repository tools with ${config.models[tier].id}?`, details: reason, signal })) return false;
+              if (!await dependencies.approve({ kind: 'route', summary: `Use repository tools with ${modelFor(config, tier).id}?`, details: reason, signal })) return false;
             }
           }
           return activate(required, reason, signal);
@@ -238,8 +247,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));
       }
       const fallback = tiers.slice(tiers.indexOf(tier) + 1).map(nextTier => {
-        const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }).find(c => c.id === `${workload}.${nextTier}`)!;
-        if (request.web && !config.models[nextTier].toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
+        const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }, { relatedLock: request.relatedTier }).find(c => c.id === `${workload}.${nextTier}`)!;
+        if (request.web && !modelFor(config, nextTier).toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
         return { tier: nextTier, assessment: assessCandidate(config, candidate) };
       });
       const next = fallback.find(item => item.assessment.allowed)?.tier;

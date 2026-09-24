@@ -1,5 +1,6 @@
 import { getChoiceAnswer, type JevProvider, type JevRawResponse, type JevRouteQuestion } from 'jevrouter';
 import type { Permission } from '../execution/grants.js';
+import type { Tier } from '../config.js';
 
 const questions: Record<string, JevRouteQuestion> = Object.fromEntries([
   ['repository.read', 'Does fulfilling the user request require reading this repository?'],
@@ -11,11 +12,28 @@ const questions: Record<string, JevRouteQuestion> = Object.fromEntries([
   criteria: { yes: 'Required by the user request', no: 'Not required', unclear: 'User intent needs clarification' },
 }]));
 
+const routingQuestions: Record<string, JevRouteQuestion> = {
+  execution_tier: { type: 'choice', instructions: 'Choose the least capable local execution profile that safely fits this request. Default repository and agentic work to normal; use fast only for a genuinely tiny standalone request. Reasoning and deep require evidence or an explicit user preference.', criteria: { auto: 'No explicit preference; select conservatively', fast: 'Tiny standalone light request', normal: 'Default capable execution for ordinary work', reasoning: 'Requires sustained reasoning or evidence of normal insufficiency', deep: 'Requires deepest deliberate reasoning or explicit preference' } },
+  relatedness: { type: 'choice', instructions: 'Classify whether this request continues the previous task. Unknown must preserve the capable model lock.', criteria: { new: 'Starts a new task boundary', related: 'Continues the previous task', unknown: 'Cannot determine; preserve capable model lock' } },
+};
+
 /** Decorates the SDK's existing routing question, retaining its policy engine and receipt. */
 export function capabilityPlanner(provider: JevProvider): JevProvider {
   return { name: provider.name, decide: request => provider.decide({ ...request,
-    questions: { ...questions, ...(request.questions ?? { tool: {} }) },
+    questions: { ...questions, ...routingQuestions, ...(request.questions ?? { tool: {} }) },
   }) };
+}
+
+export interface RoutingPlan { permissions: Permission[]; tier?: Tier | 'auto'; relatedness?: 'new' | 'related' | 'unknown' }
+export function readRoutingPlan(raw: JevRawResponse | null | undefined, threshold: number, workload: string): RoutingPlan | undefined {
+  const permissions = readCapabilityPlan(raw, threshold, workload); if (!permissions) return undefined;
+  try {
+    const tierAnswer = getChoiceAnswer(raw, 'execution_tier'); const relatedAnswer = getChoiceAnswer(raw, 'relatedness');
+    if (![tierAnswer.confidence, relatedAnswer.confidence].every(value => Number.isFinite(value) && value >= threshold)) return undefined;
+    const tier = ['auto', 'fast', 'normal', 'reasoning', 'deep'].includes(tierAnswer.choice) ? tierAnswer.choice as Tier | 'auto' : 'auto';
+    const relatedness = ['new', 'related', 'unknown'].includes(relatedAnswer.choice) ? relatedAnswer.choice as RoutingPlan['relatedness'] : 'unknown';
+    return { permissions, tier, relatedness };
+  } catch { return { permissions, relatedness: 'unknown' }; }
 }
 
 export function readCapabilityPlan(raw: JevRawResponse | null | undefined, threshold: number, workload: string): Permission[] | undefined {

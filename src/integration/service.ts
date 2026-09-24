@@ -18,7 +18,7 @@ import { Review, cleanReviews, readReview, readReviewText } from './review.js';
 export const PROTOCOL_VERSION = 1;
 const id = z.string().min(1).max(100);
 const envelope = z.object({ version: z.literal(PROTOCOL_VERSION), id, method: z.string(), params: z.unknown().optional() }).strict();
-const runSchema = z.object({ prompt: z.string().min(1).max(20_000), cwd: z.string().min(1), workload: z.enum(['ask', 'coder']), web: z.boolean().optional(), context: contextSchema.optional(), history: historySchema.optional(), review: z.boolean().optional() }).strict();
+const runSchema = z.object({ prompt: z.string().min(1).max(20_000), cwd: z.string().min(1), workload: z.enum(['ask', 'coder']), tier: z.enum(['auto', 'fast', 'normal', 'reasoning', 'deep']).optional(), sessionId: id.optional(), taskId: id.optional(), web: z.boolean().optional(), context: contextSchema.optional(), history: historySchema.optional(), review: z.boolean().optional() }).strict();
 const initSchema = z.object({ configDir: z.string().optional(), secrets: z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.string()).default({}), managed: z.boolean().default(false) }).strict();
 const reviewSchema = z.object({ id: z.string(), index: z.number().int().nonnegative().optional(), side: z.enum(['before', 'after']).optional() }).strict();
 
@@ -28,6 +28,7 @@ export async function serve(input: NodeJS.ReadableStream = process.stdin, output
   let directory = userConfigDir();
   let secretEnv: Record<string, string> = {};
   let managed = false;
+  const connectionSessionId = randomUUID();
   let active: { id: string; controller: AbortController; done: Promise<void> } | undefined;
   const interactions = new Map<string, { owner: string; resolve: (value: unknown) => void }>();
   let redact = (text: string) => text;
@@ -114,7 +115,7 @@ export async function serve(input: NodeJS.ReadableStream = process.stdin, output
       const review = request.workload === 'coder' && request.review ? new Review(request.cwd, config) : undefined;
       await review?.start();
       try {
-        const result = await runHost(config, { ...request, signal }, { approve, onEvent, onProgress: log, beforeMutation: async (action, actionSignal) => {
+        const result = await runHost(config, { ...request, sessionId: request.sessionId ?? connectionSessionId, taskId: request.taskId ?? randomUUID(), signal }, { approve, onEvent, onProgress: log, beforeMutation: async (action, actionSignal) => {
           const combined = actionSignal ? AbortSignal.any([signal, actionSignal]) : signal;
           if (await ask(owner, combined, 'checkpoint', { ...action, cwd: request.cwd }) !== true) throw new PolicyDenied('Editor has unsaved changes or the run was cancelled');
           if (action.path) await review?.capture(action.path);

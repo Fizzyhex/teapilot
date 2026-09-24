@@ -10,9 +10,8 @@ import { chooseMany, type SetupUI } from './terminal.js';
 
 export const ollamaURL = 'http://127.0.0.1:11434';
 export const presets = [
-  { label: 'Default - Qwen3.5-9B abliterated', id: 'huihui_ai/qwen3.5-abliterated:9b', bytes: 6_600_000_000, memoryGiB: 12, context: 16384 },
-  { label: 'Hard task fallback - Qwen3.6-35B-A3B (Unrestricted)', id: 'llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-GGUF', bytes: 24_000_000_000, memoryGiB: 32, context: 32768 },
-  { label: 'Cheap & Fast - mradermacher/Qwen3.5-4B-Uncensored-GGUF Q8_0', id: 'hf.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF:Q8_0', bytes: 4_700_000_000, memoryGiB: 8, context: 16384 },
+  { label: 'Fast - Qwen3.5-9B Heretic Q4_K_M', id: 'hf.co/mradermacher/Qwen3.5-9B-heretic-GGUF:Q4_K_M', bytes: 6_600_000_000, memoryGiB: 12, context: 8192 },
+  { label: 'Capable - Qwen3.8-27B Heretic Q4_K_M', id: 'hf.co/DevJac/Qwen3.8-27B-heretic:Q4_K_M', bytes: 18_000_000_000, memoryGiB: 24, context: 32768 },
 ];
 export interface OllamaModel { name: string; size: number; remote_model?: string }
 
@@ -205,7 +204,7 @@ async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, 
   if (typeof maximum === 'number' && context > maximum) throw new Error(`This model supports at most ${maximum} context tokens.`);
   // A separate alias leaves the user's original model untouched and fixes the
   // context actually used by the OpenAI API, which has no num_ctx parameter.
-  const alias = `teapilot-${createHash('sha256').update(id).digest('hex').slice(0, 10)}-${context}:latest`;
+  const alias = `teapilot-${createHash('sha256').update(id).digest('hex').slice(0, 10)}:latest`;
   ui.log(`Preparing ${id} with a ${context.toLocaleString('en-US')}-token context...`);
   await during(ui, `Preparing ${id}...`, () => streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose));
   return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true };

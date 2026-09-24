@@ -13,12 +13,12 @@ import { budgetedJev, guardedStream, piModel } from './inference/providers.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import { capabilities } from './routing/capabilities.js';
+import { effectiveProfile, modelFor, profileFor } from './routing/execution.js';
 
 export async function endpointHint(config: Config, tier: Tier, log: (text: string) => void, signal?: AbortSignal): Promise<void> {
-  if (tier !== 'local') return;
   try {
     const response = await fetch('http://127.0.0.1:11434/api/version', { redirect: 'error', signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(1500)]) });
-    if (response.ok) log(`Ollama detected at http://127.0.0.1:11434; configured endpoint: ${config.models.local.baseUrl}. To choose installed models, run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and select Reconfigure, then Local Ollama. No endpoint was changed.`);
+    if (response.ok) log(`Ollama detected at http://127.0.0.1:11434; configured endpoint: ${modelFor(config, tier).baseUrl}. To choose installed models, run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and select Reconfigure, then Local Ollama. No endpoint was changed.`);
   } catch { signal?.throwIfAborted(); }
 }
 
@@ -49,10 +49,10 @@ export async function routingCheck(config: Config, consent: (message: string) =>
 }
 
 export async function modelStatus(config: Config, tier: Tier, signal?: AbortSignal): Promise<string | undefined> {
-  const model = config.models[tier];
+  const model = modelFor(config, tier); const secret = config.secrets[profileFor(tier).model];
   try {
     const response = await fetch(`${model.baseUrl.replace(/\/$/, '')}/models`, {
-      headers: config.secrets[tier] ? { Authorization: `Bearer ${config.secrets[tier]}` } : {},
+      headers: secret ? { Authorization: `Bearer ${secret}` } : {},
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000), redirect: 'error',
     });
     if (!response.ok) return `Model listing returned HTTP ${response.status}; check the endpoint and credential.`;
@@ -82,12 +82,12 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     await budget.load();
     const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((v): v is string => Boolean(v)));
     const probeConfig = structuredClone(config);
-    probeConfig.models[tier].temperature = 0;
+    modelFor(probeConfig, tier).temperature = 0;
     probeConfig.policy.limits.maxTurns = Math.min(6, config.policy.limits.maxTurns);
     async function run(prompt: string, tools: AgentTool[] = []): Promise<{ text: string; ok: boolean }> {
       const state = { turns: 0 };
       const agent = new Agent({
-        initialState: { model: piModel(probeConfig.models[tier]), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. /no_think', tools, thinkingLevel: 'off' },
+        initialState: { model: piModel(modelFor(probeConfig, tier), effectiveProfile(probeConfig, tier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer.', tools, thinkingLevel: profileFor(tier).thinking },
         streamFn: guardedStream(probeConfig, tier, budget, telemetry, state), toolExecution: 'sequential',
       });
       const abort = () => agent.abort();
@@ -102,7 +102,7 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     progress('Checking streamed answers...');
     const answer = await run('Reply with exactly TEAPILOT_OK.');
     report.ask = answer.ok && answer.text.includes('TEAPILOT_OK');
-    if (report.ask && config.models[tier].toolCalling) {
+    if (report.ask && modelFor(config, tier).toolCalling) {
       progress('Checking tool calls and continuation...');
       const token = randomUUID();
       let called = false;
@@ -161,17 +161,15 @@ export async function doctor(config: Config, cwd: string, options: ActivityUI & 
   } catch { log('Workspace or state directory is inaccessible; check paths and permissions.'); healthy = false; }
   let available = false;
   for (const tier of tiers) {
-    const model = config.models[tier];
+    const model = modelFor(config, tier);
     if (!model.enabled) continue;
-    const error = tier !== 'local' && !config.secrets[tier] ? 'Missing credential; run teapilot setup.' : await during(options, `Checking ${tier} endpoint...`, () => modelStatus(config, tier, options.signal));
+    const error = await during(options, `Checking ${tier} endpoint...`, () => modelStatus(config, tier, options.signal));
     log(`${tier}: ${model.id}; endpoint ${model.baseUrl}: ${error ? `FAIL: ${error}` : 'PASS (model found; live inference checked separately)'}`);
     if (config.policy.disabledCapabilities.includes(`coder.${tier}`)) log(`${tier}: coding is disabled by configuration; rerun setup to reconfigure and validate it.`);
     if (error) { healthy = false; await during(options, 'Checking local endpoint...', () => endpointHint(config, tier, log, options.signal)); continue; }
     available = true;
     if (options.live) {
-      if (tier !== 'local' && !await options.consent(`Run paid ${tier} diagnostic calls within $${config.policy.budget.requestUsd}/request and $${config.policy.budget.dailyUsd}/day limits?`)) {
-        log(`${tier}: live check declined`); healthy = false; continue;
-      }
+      if (!await options.consent(`Run local ${tier} diagnostic calls within the configured request/day limits?`)) { log(`${tier}: live check declined`); healthy = false; continue; }
       const result = await during(options, `Verifying ${tier} answers and coding...`, () => liveCheck(config, tier, options.signal, log));
       log(`${tier}: answers ${result.ask ? 'PASS' : 'FAIL'}; tools ${result.tools ? 'PASS' : 'unverified'}; coding ${result.coding ? 'PASS' : 'unverified'}; accounted $${result.spentUsd.toFixed(6)}`);
       healthy &&= result.ask && (!model.toolCalling || result.coding);

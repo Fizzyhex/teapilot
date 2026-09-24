@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
-import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config } from '../config.js';
+import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config, type Tier } from '../config.js';
+import { modelFor, profileFor } from '../routing/execution.js';
 import { liveCheck, modelStatus, routingCheck, endpointHint, type LiveReport } from '../diagnostics.js';
 import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js';
 import type { SetupUI } from './terminal.js';
@@ -89,13 +90,13 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (process.env.TEAPILOT_STATE_DIR) config.stateDir = resolve(process.env.TEAPILOT_STATE_DIR);
   const before = { execution: Object.values(config.models).filter(model => model.enabled).map(model => model.id).join(', '), routing: config.routingMode, search: config.searchUrl ?? 'Disabled' };
   ui.log('Model downloads and verification happen before the final settings review.');
-  const choice = options.nonInteractive ? 1 : await ui.choose('Execution model', ['Local Ollama (execution runs locally; no execution API charges)', 'Existing OpenAI-compatible local endpoint', 'Cloud model (paid API key)']);
-  const tier = choice === 2 ? 'economy' : 'local';
-  const previousModel = { ...config.models[tier] };
+  const choice = options.nonInteractive ? 1 : await ui.choose('Execution model', ['Local Ollama (execution runs locally; no execution API charges)', 'Existing OpenAI-compatible local endpoint']);
+  const tier: Tier = choice === 0 ? 'fast' : 'normal';
+  const previousModel = { ...modelFor(config, tier) };
   let displayModel: string | undefined;
   // A new profile enables precisely one execution tier, never a silent paid fallback.
   for (const model of Object.values(config.models)) model.enabled = false;
-  config.models[tier].enabled = true;
+  config.models[profileFor(tier).model].enabled = true;
   if (!hasConfiguration) config.routingMode = 'direct';
   let env: Record<string, string> = { ...savedEnv };
   if (process.env.TEAPILOT_STATE_DIR) env.TEAPILOT_STATE_DIR = config.stateDir.replace(/\\/g, '/');
@@ -123,51 +124,42 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     await during(ui, 'Preparing Ollama...', () => ensureOllama(ui, signal));
     const model = await during(ui, 'Inspecting local models...', () => selectOllamaModel(ui, signal, undefined, options.verbose));
     displayModel = model.source;
-    Object.assign(config.models.local, { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2 });
+    Object.assign(modelFor(config, tier), { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
     delete env.LOCAL_API_KEY;
     config.policy.limits.requestTimeoutMs = 120000;
   } else {
-    const model = config.models[tier];
-    model.baseUrl = options.endpoint ?? await ui.input('API base URL including /v1', choice === 2 ? 'https://openrouter.ai/api/v1' : 'http://127.0.0.1:8080/v1');
+    const model = modelFor(config, tier);
+    model.baseUrl = options.endpoint ?? await ui.input('API base URL including /v1', 'http://127.0.0.1:8080/v1');
     model.id = options.model ?? await ui.input('Exact model ID');
     model.contextTokens = options.contextTokens ?? await numberInput(ui, 'Actual server context tokens', 16384, 8192);
     model.maxOutputTokens = Math.min(2048, Math.floor(model.contextTokens / 4));
     model.toolCalling = true;
-    model.provider = choice === 2 && new URL(model.baseUrl).hostname === 'openrouter.ai' ? 'openrouter' : 'local';
-    const key = options.nonInteractive ? process.env.LOCAL_API_KEY ?? '' : await ui.input(choice === 2 ? 'API key (hidden; blank keeps existing)' : 'API key if required (hidden; blank keeps existing)', env[model.apiKeyEnv] ?? '', true);
+    model.provider = 'local';
+    const key = options.nonInteractive ? process.env.LOCAL_API_KEY ?? '' : await ui.input('API key if required (hidden; blank keeps existing)', env[model.apiKeyEnv] ?? '', true);
     if (key) env[model.apiKeyEnv] = key;
-    if (choice === 2) {
-      if (!key) throw new Error('A cloud API key is required.');
-      model.inputUsdPerMillion = await numberInput(ui, 'Conservative maximum input USD per million tokens (from your rate card)', model.inputUsdPerMillion || undefined, 0.000001);
-      model.outputUsdPerMillion = await numberInput(ui, 'Conservative maximum output USD per million tokens (from your rate card)', model.outputUsdPerMillion || undefined, 0.000001);
-      config.policy.budget.requestUsd = await numberInput(ui, 'Maximum USD per request', 1, 0);
-      config.policy.budget.dailyUsd = await numberInput(ui, 'Maximum USD per UTC day', 5, 0);
-      ui.log('Check these upper prices against your provider rate card before enabling cloud execution.');
-    }
+    model.inputUsdPerMillion = 0; model.outputUsdPerMillion = 0; model.reasoningEfforts = ['off'];
   }
-  if (tier === 'local') { config.models.local.inputUsdPerMillion = 0; config.models.local.outputUsdPerMillion = 0; }
-  config.secrets = Object.fromEntries(Object.entries(config.models).map(([name, model]) => [name, env[model.apiKeyEnv] || undefined])) as Config['secrets'];
+  config.secrets = Object.fromEntries((['fast', 'capable'] as const).map(name => [name, env[config.models[name].apiKeyEnv] || undefined])) as Config['secrets'];
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
   const status = await during(ui, 'Checking model endpoint...', () => modelStatus(config, tier, signal));
   let report: LiveReport | undefined;
-  if (status) { ui.log(`Endpoint ${config.models[tier].baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
-  else if (tier === 'local' || await ui.confirm(`Run paid live checks, bounded by $${config.policy.budget.requestUsd}/request and $${config.policy.budget.dailyUsd}/day?`)) {
+  if (status) { ui.log(`Endpoint ${modelFor(config, tier).baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
+  else if (await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
     report = await during(ui, 'Verifying answers and coding...', () => liveCheck(config, tier, signal, ui.log));
   }
   // Failed or skipped coding validation never advertises a ready coding path.
-  config.models[tier].toolCalling = Boolean(report?.tools);
+  modelFor(config, tier).toolCalling = Boolean(report?.tools);
   config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
   if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
   ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
   const routingReady = config.routingMode === 'direct' || await during(ui, 'Verifying hosted routing...', () => routingCheck(config, ui.confirm, ui.log, signal));
   const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, directory, ui, signal);
-  const selected = config.models[tier];
+  const selected = modelFor(config, tier);
   ui.log('\nReady to save');
   ui.log(`  Execution: ${displayModel ?? selected.id}${hasConfiguration && before.execution !== selected.id ? ` (was ${before.execution})` : ''}`);
   ui.log(`  Endpoint:  ${selected.baseUrl}${hasConfiguration && previousModel.baseUrl !== selected.baseUrl ? ` (was ${previousModel.baseUrl})` : ''}`);
   ui.log(`  Context:   ${selected.contextTokens.toLocaleString('en-US')} tokens${hasConfiguration && previousModel.contextTokens !== selected.contextTokens ? ` (was ${previousModel.contextTokens.toLocaleString('en-US')})` : ''}`);
-  if (tier === 'economy') ui.log(`  Rates:     $${selected.inputUsdPerMillion} input / $${selected.outputUsdPerMillion} output per million tokens`);
-  if (tier === 'economy' || config.routingMode === 'hosted') ui.log(`  Budgets:   $${config.policy.budget.requestUsd}/request · $${config.policy.budget.dailyUsd}/UTC day`);
+  ui.log(`  Budgets:   $${config.policy.budget.requestUsd}/request · $${config.policy.budget.dailyUsd}/UTC day`);
   ui.log(`  Routing:   ${config.routingMode}${config.routingMode === 'hosted' ? ' · may incur charges' : ''}${hasConfiguration ? ` (was ${before.routing})` : ''}`);
   ui.log(`  Search:    ${searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);
   ui.log(`  Checks:    answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'}`);

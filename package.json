@@ -9,7 +9,7 @@
     "dist",
     "config/*.example.json",
     "README.md",
-    "usage/*.md",
+    "docs/*.md",
     "THIRD_PARTY_NOTICES.md",
     "LICENSE"
   ],

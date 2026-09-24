@@ -1,16 +1,19 @@
 # teapilot
 
-a small personal agent host for coding, questions, research, and planning. run local models without API keys, or configure cloud models with spending limits.
+A small personal agent host for coding, questions, research, and planning. Run local models without API keys, or configure cloud models with spending limits.
 
-use `ask` for questions and planning, and `code` to work in a repository. Use `chat` for an ongoing conversation; `ask` and `code` handle one request. Use `ask --web` for research with a configured search service.
+Use:
 
-teapilot is built to be focused, resourceful and batteries included.
+- `ask` for questions and planning
+- `code` to work in a repository
+- `chat` for a multi-turn conversation
+- `ask --web` for research through a configured SearXNG service
 
 ## Quick start
 
-Requires **Node.js 22.19.0 or newer**, npm, and Git. Supported platforms are Windows with PowerShell and Linux with bash.
+TeaPilot requires **Node.js 22.19.0 or newer**, npm, and Git. Windows with PowerShell and Linux with bash are supported.
 
-Until the first npm release is published, install from source. Authenticate Git while the repository is private. These commands work in both shells:
+Until the npm package is published, install from source:
 
 ```sh
 git clone https://github.com/fizzyhex/teapilot.git
@@ -19,42 +22,33 @@ npm install
 npm run setup
 ```
 
-The setup wizard offers local Ollama, an existing local endpoint, or a cloud model. It can install Ollama and download a model with your consent, then check that it works. Local setup needs no API key and keeps cloud fallback disabled. Follow the command printed by setup, replacing `teapilot` with `npm start --` when running from source. Setup saves a personal profile by default; use `npm run setup -- --config-dir .` only when you want checkout-specific settings.
+The setup wizard helps you choose a local Ollama model, an existing local endpoint, or a cloud model. It tests the connection before saving a personal profile. Local setup needs no API key and keeps cloud fallback disabled.
 
-## Use
+Follow the `--config-dir` command printed by setup. When running from source, replace `teapilot` with `npm start --`.
 
-From the source checkout:
+## Try it
 
 ```sh
 npm start -- ask "Help plan the next three workdays"
-npm start -- chat "Help me think through an idea"
 npm start -- code --cwd "path/to/repository" "Fix the failing tests"
+npm start -- chat "Help me think through an idea"
 npm start -- doctor
 ```
 
-Choose the repository root with `--cwd`. `ask` has no repository tools; `code` can read, edit, and run approved commands. `chat` remembers recent turns for the current session and has the same tool access as `ask`. Type `/exit` or `/quit` to leave. There is no personal memory across sessions. Interactive prompts use Enter for newlines, Shift+Enter to send (Alt+Enter is a fallback), and Tab after `@` to complete files from `--cwd`.
+Use the repository root with `--cwd`. `ask` has no repository tools; `code` can read, edit, and run approved commands; `chat` has the same tool access as `ask` and remembers recent turns for the current session only.
 
-After installing the published package, use `teapilot` in place of `npm start --`. See [setup and diagnostics](usage/01-setup.md) for package installation and readiness checks, and [usage](usage/02-commands.md) for more examples and web research.
+After installing the published package, use `teapilot` instead of `npm start --`.
 
-## Permissions and spending
+## Before enabling cloud models
 
-- File tools stay within the selected repository. Arbitrary shell commands require approval unless explicitly trusted; approved commands run with your OS user's permissions.
-- Cloud tiers require explicit configuration. Default spending limits are **$1 per request** and **$5 per UTC day**, using conservative reservations and your configured prices.
-- Failed attempts can escalate to another enabled model. Edits stay in place; there is no automatic rollback.
-
-Read [execution boundaries](usage/04-safety.md) before enabling trusted commands, and [spending and escalation](usage/05-spending.md) before enabling cloud models.
+Cloud tiers require explicit configuration and use request and daily spending limits. Review [Configuration](docs/03-configuration.md) before enabling them. File access and shell approvals are described there as part of the policy configuration. Edits remain on disk if a run stops; TeaPilot does not automatically roll them back.
 
 ## Documentation
 
-1. [Setup and diagnostics](usage/01-setup.md) — installation, model checks, and scripted setup
-2. [Commands](usage/02-commands.md) — requests, routing behavior, exit codes, and web research
-3. [Configuration](usage/03-configuration.md) — profiles, providers, models, and policy
-4. [Permissions and execution boundaries](usage/04-safety.md) — file access, shell approvals, and trusted commands
-5. [Spending and escalation](usage/05-spending.md) — budgets, cost accounting, and model escalation
-6. [Local records](usage/06-records.md) — logs, privacy, and crash recovery
-7. [Docker](usage/07-docker.md) — container setup
-8. [Architecture](usage/08-architecture.md) — upstream integrations and design choices
-9. [Development and validation](usage/09-development.md) — local checks and CI
-10. [Publishing](usage/10-publishing.md) — release setup and package publication
+Start here:
 
-See [project status](https://github.com/fizzyhex/teapilot/blob/main/STATUS.md) for validation and remaining limits.
+1. [Setup](docs/01-setup.md) — install, choose a model, check readiness, and enable optional search
+2. [Commands](docs/02-commands.md) — choose a request mode, use interactive features, and interpret results
+3. [Configuration](docs/03-configuration.md) — profiles, local endpoints, providers, models, and policies
+
+See [project status](https://github.com/fizzyhex/teapilot/blob/main/STATUS.md) for known limits and remaining work.

@@ -1,12 +1,13 @@
 import { readFile, access } from 'node:fs/promises';
-import { createBashTool, createEditTool, createPowerShellTool, createReadTool, createWriteTool, loadProjectContextFiles } from '@earendil-works/pi-coding-agent';
+import { createBashTool, createEditTool, createPowerShellTool, createReadTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { cleanChildEnvironment, type ExecutionPolicy } from '../execution/policy.js';
 import type { Config } from '../config.js';
 import { repositoryTools } from './repository.js';
 
-export function coder(config: Config, policy: ExecutionPolicy): { systemPrompt: string; tools: AgentTool[] } {
+export async function coder(config: Config, policy: ExecutionPolicy): Promise<{ systemPrompt: string; tools: AgentTool[] }> {
   const root = policy.root;
+  policy.requireRead();
   const shellOptions = { exposeSessionEnvironment: false, spawnHook: (context: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({ ...context, env: cleanChildEnvironment() }) };
   const tools = [
     createReadTool(root, { operations: { readFile, access, detectImageMimeType: async () => null } }),
@@ -14,7 +15,13 @@ export function coder(config: Config, policy: ExecutionPolicy): { systemPrompt: 
     process.platform === 'win32' ? createPowerShellTool(root, shellOptions) : createBashTool(root, shellOptions),
   ].map(tool => policy.wrap(tool));
   tools.unshift(...repositoryTools(policy));
-  const instructions = loadProjectContextFiles({ cwd: root, agentDir: config.stateDir });
+  // Instruction files cross the same boundary as tool reads. An upstream context
+  // loader must not read ancestor directories or host state behind that gate.
+  const instructions: Array<{ path: string; content: string }> = [];
+  for (const path of ['AGENTS.md', 'CLAUDE.md']) {
+    try { instructions.push({ path, content: (await readFile(await policy.path(path, false), 'utf8')).slice(0, 12000) }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
   return {
     tools,
     systemPrompt: `You are teapilot, the coding agent :3, using pi's coding tools.

@@ -10,9 +10,7 @@
   "budget": {
     "requestUsd": 1,
     "dailyUsd": 5,
-    "approvalThresholdUsd": 0.1,
-    "strongRequiresApproval": true,
-    "automaticEconomy": true
+    "approvalThresholdUsd": 0.1
   },
   "limits": {
     "maxTurns": 12,
@@ -22,6 +20,6 @@
     "commandTimeoutSeconds": 120,
     "maxPromptChars": 12000
   },
-  "escalation": { "maxEscalations": 2, "consecutiveFailures": 2, "repeatedToolCalls": 3 },
+  "escalation": { "maxEscalations": 3, "consecutiveFailures": 2, "repeatedToolCalls": 3 },
   "execution": { "trustedCommands": [], "largeOverwriteBytes": 65536 }
 }

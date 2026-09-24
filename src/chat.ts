@@ -4,6 +4,7 @@ import type { ChatPromptState } from './composer.js';
 import { permissions, repositoryPermissions, type Mode } from './execution/grants.js';
 import type { Approve } from './execution/policy.js';
 import type { EventSink } from './integration/events.js';
+import type { Tier } from './config.js';
 
 /** A session stays interactive even when an opening prompt was supplied. */
 export async function runSession(options: {
@@ -21,12 +22,14 @@ export async function runSession(options: {
   const grants = options.request.authorization;
   let prompt = options.request.prompt;
   let correction = options.request.correction;
+  let tier: Tier | 'auto' = options.request.tier ?? 'auto';
+  let relatedTier: Tier | undefined = options.request.relatedTier;
   let exitCode = 0;
   let spentUsd = 0;
   let lastModel: string | undefined;
   while (!options.request.signal?.aborted) {
     if (!prompt.trim()) {
-      try { prompt = await options.input({ spentUsd, lastModel, ...(grants ? { mode, grants: grants.list() } : {}) }); }
+      try { prompt = await options.input({ spentUsd, lastModel, tier, ...(grants ? { mode, grants: grants.list() } : {}) }); }
       catch (error) {
         if (error instanceof Error && error.name === 'TerminalClosedError') break;
         throw error;
@@ -41,21 +44,26 @@ export async function runSession(options: {
       else if (command === '/revoke' && !extra && permissions.includes(value as typeof permissions[number])) {
         grants?.revoke(value as typeof permissions[number], options.onEvent);
         options.log?.(`Session access: ${grants?.list().join(', ') || 'none'}`);
+      } else if (command === '/tier' && !extra && ['auto', 'fast', 'normal', 'reasoning', 'deep'].includes(value ?? '')) {
+        tier = value as Tier | 'auto'; options.log?.(`Tier preference: ${tier}`);
+      } else if (command === '/new' && !value) {
+        history = []; correction = undefined; relatedTier = undefined; tier = 'auto'; options.log?.('Started a new task. Session access and spending remain available.');
       } else if (command === '/mode' && !extra && ['chat', 'ask', 'code'].includes(value ?? '')) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,
           async (type, fields) => { options.onEvent?.({ type, ...fields }); });
         if (approved) { mode = value as Mode; options.log?.(`Mode: ${mode}`); }
         else options.log?.('Code access was not approved; mode unchanged.');
-      } else options.log?.('Commands: /mode chat|ask|code, /permissions, /revoke <permission>, /exit, /quit');
+      } else options.log?.('Commands: /mode chat|ask|code, /tier auto|fast|normal|reasoning|deep, /new, /permissions, /revoke <permission>, /exit, /quit');
       prompt = '';
       if (options.once) break;
       continue;
     }
-    const result = await options.run({ ...options.request, prompt, correction,
+    const result = await options.run({ ...options.request, prompt, correction, tier, relatedTier,
       ...(grants ? { mode, workload: undefined, conversational: !options.once } : { workload: 'ask' as const, chat: true }), history });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
+    if (result.tier && result.tier !== 'fast') relatedTier = result.tier;
     if (!result.success) exitCode = 2;
     const user = prompt + (correction ? `\nUser correction:\n${correction}` : '');
     history = prepareConversation('', [], [...history, { user, assistant: result.text }], options.maxPromptChars).history;

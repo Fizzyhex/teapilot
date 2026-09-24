@@ -3,30 +3,55 @@ import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-s
 import { stream as openAIStream } from '@earendil-works/pi-ai/api/openai-completions';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import { createSdkProvider, type JevProvider } from 'jevrouter';
-import type { Config, ModelConfig, Tier } from '../config.js';
+import type { Config, ModelConfig, Tier, PhysicalModel } from '../config.js';
+import { effectiveProfile, modelFor, profileFor, type ExecutionProfile } from '../routing/execution.js';
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 import { estimateInputTokens, MAX_PAYLOAD_BYTES } from './context.js';
 
-export function piModel(config: ModelConfig): Model<'openai-completions'> {
+export function piModel(config: ModelConfig, profile?: ExecutionProfile): Model<'openai-completions'> {
   return {
     id: config.id, name: config.id, api: 'openai-completions', provider: config.provider,
     baseUrl: config.baseUrl, reasoning: false, input: ['text'],
-    contextWindow: config.contextTokens, maxTokens: config.maxOutputTokens,
+    contextWindow: config.contextTokens, maxTokens: profile?.maxOutputTokens ?? config.maxOutputTokens,
     cost: { input: config.inputUsdPerMillion, output: config.outputUsdPerMillion, cacheRead: config.inputUsdPerMillion, cacheWrite: config.inputUsdPerMillion },
     compat: { supportsDeveloperRole: config.supportsDeveloperRole, supportsUsageInStreaming: config.supportsUsage, maxTokensField: 'max_tokens' },
   };
 }
 
-export async function localAvailable(config: Config): Promise<boolean> {
-  if (!config.models.local.enabled) return false;
+export async function localAvailable(config: Config, physical?: PhysicalModel): Promise<boolean> {
+  const selected = physical ? config.models[physical] : config.models.fast.enabled ? config.models.fast : config.models.capable;
+  if (!selected.enabled) return false;
   try {
-    const response = await fetch(`${config.models.local.baseUrl.replace(/\/$/, '')}/models`, {
-      headers: config.secrets.local ? { Authorization: `Bearer ${config.secrets.local}` } : {},
+    const secret = config.secrets[selected.apiKeyEnv === config.models.fast.apiKeyEnv ? 'fast' : 'capable'];
+    const response = await fetch(`${selected.baseUrl.replace(/\/$/, '')}/models`, {
+      headers: secret ? { Authorization: `Bearer ${secret}` } : {},
       signal: AbortSignal.timeout(3000), redirect: 'error',
     });
     return response.ok;
   } catch { return false; }
+}
+
+/** Probe native reasoning metadata without guessing from a model name. */
+export async function discoverNativeReasoning(config: Config, physical: PhysicalModel, signal?: AbortSignal): Promise<readonly ('off' | 'medium' | 'xhigh')[]> {
+  const model = config.models[physical];
+  if (!model.enabled) return [];
+  const base = model.baseUrl.replace(/\/v1\/?$/, '');
+  try {
+    const response = await fetch(`${base}/api/show`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: model.id }), signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(5000)]), redirect: 'error' });
+    if (!response.ok) return model.reasoningEfforts;
+    const body = await response.json() as { thinking?: { values?: unknown[]; default?: unknown } };
+    const values = body.thinking?.values;
+    if (!Array.isArray(values)) return model.reasoningEfforts;
+    const discovered = values.flatMap(value => {
+      if (value === false || value === 'none' || value === 'off') return ['off' as const];
+      if (value === 'medium') return ['medium' as const];
+      if (value === 'xhigh') return ['xhigh' as const];
+      return [];
+    });
+    if (discovered.length) model.reasoningEfforts = [...new Set(discovered)];
+    return model.reasoningEfforts;
+  } catch { signal?.throwIfAborted(); return model.reasoningEfforts; }
 }
 
 // The SDK does not accept a signal. Custom providers may opt in; racing also
@@ -119,9 +144,10 @@ export function guardedStream(
   config: Config, tier: Tier, governor: SpendGovernor, telemetry: Telemetry, state: InferenceState,
   controls?: { toolChoice?: 'auto' | 'required' | 'none'; maxOutputTokens?: number },
 ): StreamFn {
-  const spec = config.models[tier];
-  const model = piModel(spec);
-  const reservedOutputTokens = Math.min(controls?.maxOutputTokens ?? spec.maxOutputTokens, spec.maxOutputTokens);
+  const profile = effectiveProfile(config, tier);
+  const spec = modelFor(config, tier);
+  const model = piModel(spec, profile);
+  const reservedOutputTokens = Math.min(controls?.maxOutputTokens ?? profile.maxOutputTokens, profile.maxOutputTokens);
   return (_model, context, options) => {
     const output = new AssistantMessageEventStream();
     const run = async (): Promise<void> => {
@@ -134,7 +160,7 @@ export function guardedStream(
       const signal = AbortSignal.any([options?.signal ?? new AbortController().signal, AbortSignal.timeout(config.policy.limits.requestTimeoutMs)]);
       try {
         const stream = openAIStream(model, context, {
-          apiKey: config.secrets[tier] || 'local-no-key',
+          apiKey: config.secrets[profile.model] || 'local-no-key',
           signal, maxTokens: reservedOutputTokens, maxRetries: 0,
           toolChoice: controls?.toolChoice,
           temperature: spec.temperature,
@@ -143,16 +169,16 @@ export function guardedStream(
             ...(payload as Record<string, unknown>),
             provider: { require_parameters: true, max_price: { prompt: spec.inputUsdPerMillion, completion: spec.outputUsdPerMillion, request: 0 } },
           } : spec.provider === 'ollama' ? {
-            ...(payload as Record<string, unknown>), reasoning_effort: 'none',
+            ...(payload as Record<string, unknown>), reasoning_effort: profile.effort,
           } : undefined,
           fetch: async (input, init) => {
             const body = typeof init?.body === 'string' ? init.body : '';
             const payloadBytes = Buffer.byteLength(body);
             const estimatedInputTokens = body && payloadBytes <= MAX_PAYLOAD_BYTES ? estimateInputTokens(body) : undefined;
             const rejection = payloadBytes > MAX_PAYLOAD_BYTES ? 'payload_limit'
-              : estimatedInputTokens !== undefined && estimatedInputTokens + reservedOutputTokens > spec.contextTokens ? 'context_limit' : undefined;
+              : estimatedInputTokens !== undefined && estimatedInputTokens + reservedOutputTokens > profile.contextTokens ? 'context_limit' : undefined;
             await telemetry.event('context_admission', { tier, model: spec.id, payloadBytes, estimatedInputTokens,
-              contextTokens: spec.contextTokens, reservedOutputTokens, method: 'conservative-lexical', rejection });
+              contextTokens: profile.contextTokens, reservedOutputTokens, method: 'conservative-lexical', rejection });
             if (rejection) {
               state.stop = rejection; throw new Error('Request exceeds configured admission ceiling');
             }
@@ -180,7 +206,7 @@ export function guardedStream(
           const validUsage = complete && observed.completeUsage && usage;
           // pi's usage.cost is calculated from configured rates, not the invoice.
           const reported = complete ? observed.cost : undefined;
-          const cost = tier === 'local' ? 0 : reported ?? (validUsage ? usage.cost.total : undefined);
+          const cost = reported !== undefined ? reported : 0;
           const basis = reported !== undefined ? 'provider-reported' : validUsage ? 'configured-rates' : 'reserved-maximum';
           const charged = await governor.settle(reservation, cost, basis);
           await telemetry.event('usage', { stage: 'inference', tier, model: spec.id, providerModel: observed.model, usage, chargedUsd: charged, basis });
