@@ -13,7 +13,7 @@ import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
-import { withPrerequisites, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
+import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
 import { capabilityPlanner, readRoutingPlan } from './routing/intent.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 
@@ -172,9 +172,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (decision) receipts.push(await telemetry.receipt(decision));
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
-      // Without a stated workload, an unconfident route continues as least-privileged
-      // dialogue; the agent can still request access mid-run if it proves necessary.
-      const fallbackWorkload = request.workload ?? scope?.workload ?? (decision?.status === 'no_decision' ? 'ask' : undefined);
+      // An unconfident route falls back to the workload the session's mode already
+      // states (coder in Code mode, ask in Ask/Chat) rather than always dialogue,
+      // so Code-mode requests still reach the coder agent.
+      const fallbackWorkload = request.workload ?? scope?.workload ?? (decision?.status === 'no_decision' ? workloadFor(request.mode ?? 'chat') : undefined);
       const fallbackSelection = fallbackWorkload
         ? candidates.find(candidate => candidate.id.startsWith(`${fallbackWorkload}.`) && assessCandidate(config, candidate).allowed)?.id
         : undefined;

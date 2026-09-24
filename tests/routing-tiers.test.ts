@@ -8,7 +8,7 @@ import { inferenceSchema, runInference } from '../src/integration/inference.js';
 import { loadConfig } from '../src/config.js';
 import { runHost } from '../src/host.js';
 import { readRoutingPlan } from '../src/routing/intent.js';
-import { completion, fixture, jev, mockServer } from './helpers.js';
+import { completion, events, fixture, jev, mockServer } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -112,6 +112,47 @@ it('does not expand access for uncertain or contradictory routing answers', () =
   expect(readRoutingPlan({ ...base, answers: { ...base.answers, 'repository.read': answer('unclear') } }, 0.55, 'ask')).toBeUndefined();
   expect(readRoutingPlan({ ...base, answers: { ...base.answers, 'repository.read': answer('no'), 'repository.write': answer('yes') } }, 0.55, 'coder')).toBeUndefined();
   expect(readRoutingPlan({ ...base, answers: { ...base.answers, 'repository.read': answer('yes', 0.2) } }, 0.55, 'coder')).toBeUndefined();
+});
+
+it('falls back to coder.normal, not ask.normal, for a low-confidence Code-mode decision, and the coder agent runs', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  let calls = 0;
+  const server = await mockServer((body, request, response) => {
+    if (request.url === '/jev') { jev(response, 'ask.normal', 0.1); return; }
+    calls++;
+    if (calls === 1) completion(response, { tool: { name: 'request_capabilities', arguments: { permissions: ['repository.write'] } } });
+    else if (calls === 2) {
+      expect(body.tools.map((tool: any) => tool.function.name)).toContain('write');
+      completion(response, { tool: { name: 'write', arguments: { path: 'index.html', content: '<html></html>\n' } } });
+    } else completion(response, { text: 'done' });
+  });
+  cleanups.push(server.close);
+  f.config.router.endpoint = `${server.url}/jev`;
+  f.config.models.fast.baseUrl = server.url;
+  f.config.models.capable.baseUrl = server.url;
+  const grants = await SessionGrants.create(f.cwd, f.config, 'code');
+  const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Write a complete, self-contained Pong game to index.html', mode: 'code', authorization: grants }, { approve: async () => true, localProbe: async () => true });
+  expect(result).toMatchObject({ success: true, capability: 'coder.normal' });
+  expect(await readFile(join(f.cwd, 'index.html'), 'utf8')).toContain('<html>');
+  const log = await events(f.config);
+  expect(log.find(entry => entry.type === 'routing_fallback')).toMatchObject({ capability: 'coder.normal', reason: 'low_confidence' });
+});
+
+it('keeps ask.normal for a low-confidence decision in Ask mode', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  f.config.models.fast.enabled = false;
+  const server = await mockServer((body, request, response) => {
+    if (request.url === '/jev') { jev(response, 'ask.normal', 0.1); return; }
+    completion(response, { text: 'answered' });
+  });
+  cleanups.push(server.close);
+  f.config.router.endpoint = `${server.url}/jev`;
+  f.config.models.capable.baseUrl = server.url;
+  const grants = await SessionGrants.create(f.cwd, f.config, 'ask');
+  const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Explain this topic', mode: 'ask', authorization: grants }, { approve: async () => false, localProbe: async () => true });
+  expect(result).toMatchObject({ success: true, capability: 'ask.normal' });
+  const log = await events(f.config);
+  expect(log.find(entry => entry.type === 'routing_fallback')).toMatchObject({ capability: 'ask.normal', reason: 'low_confidence' });
 });
 
 it('activates direct-mode repository tools in place without restarting the turn', async () => {
