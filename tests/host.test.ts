@@ -176,19 +176,20 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     expect((await events(f.config)).find(e => e.type === 'routing_fallback')).toMatchObject({ capability: 'coder.normal', reason: 'low_confidence' });
   });
 
-  it('low confidence does not guess repository access for a bare hosted prompt', async () => {
-    let inference = 0;
+  it('low confidence continues a bare hosted prompt as dialogue without asking for access', async () => {
+    let inference = 0, approvals = 0;
     const f = await setup((_body, req, res) => {
       if (req.url === '/jev') jev(res, 'coder.normal', 0.1);
       else if (req.url?.endsWith('/models')) res.end('{}');
-      else { inference++; completion(res, {}); }
+      else { inference++; completion(res, { text: 'Hi!' }); }
     });
 
-    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Take a look at this' }, { approve: async () => true });
-    expect(result.success).toBe(false);
-    expect(result.status).toBe('workload_uncertain');
-    expect(result.text).toContain('teapilot ask or teapilot code');
-    expect(inference).toBe(0);
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'hi!' }, { approve: async () => { approvals++; return true; } });
+    expect(result.success).toBe(true);
+    expect(result.capability?.startsWith('ask.')).toBe(true);
+    expect(inference).toBe(1);
+    expect(approvals).toBe(0);
+    expect((await events(f.config)).find(e => e.type === 'routing_fallback')).toMatchObject({ reason: 'low_confidence' });
   });
 
   it('missing permissions prevent execution even when routing is confident', async () => {

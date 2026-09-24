@@ -141,7 +141,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   });
   const redactor = new StreamRedactor([input.config.router.apiKey ?? '', ...Object.values(input.config.secrets).map(value => value ?? '')]);
   agent.subscribe(event => {
-    if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
+    if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_start') {
+      input.onActivity?.({ kind: 'reasoning', label: 'Thinking...' });
+    } else if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_end') {
+      input.onActivity?.({ kind: 'composing', label: 'composing response...' });
+    } else if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
       const text = redactor.push(event.assistantMessageEvent.delta);
       if (text) input.onEvent?.({ type: 'text', text });
     } else if (event.type === 'message_end' && event.message.role === 'assistant') {

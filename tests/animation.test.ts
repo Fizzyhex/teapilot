@@ -6,6 +6,7 @@ import { loadClips, parseClip, Playback } from '../src/art/playback.js';
 import * as assets from '../src/art/playback.js';
 import { TerminalPresentation } from '../src/presentation.js';
 import { terminalUI } from '../src/setup/terminal.js';
+import '../src/prompt.js'; // Loaded lazily by terminalUI; preload so fake timers can drive it.
 import { during, terminalHandoff } from '../src/activity.js';
 
 const originals = new Map<object, Map<string, PropertyDescriptor | undefined>>();
@@ -77,12 +78,75 @@ it('loops typing and holds coffee and paw endpoints with no timer', () => {
   expect(player.frame).toBe(clips.typing.frames[0]);
   vi.advanceTimersByTime(584);
   expect(player.frame).toBe(clips.typing.frames[0]);
-  player.play(clips['coffee-break']); vi.advanceTimersByTime(1100);
-  expect(player.frame).toBe(clips['coffee-break'].frames[12]); expect(vi.getTimerCount()).toBe(0);
+  player.play(clips['tea-break']); vi.advanceTimersByTime(1100);
+  expect(player.frame).toBe(clips['tea-break'].frames[12]); expect(vi.getTimerCount()).toBe(0);
   player.play(clips.pawing, [2, 3]); vi.advanceTimersByTime(100);
   expect(player.frame).toBe(clips.pawing.frames[3]); expect(vi.getTimerCount()).toBe(0);
   player.play(clips.pawing, [4, 5, 6]); vi.advanceTimersByTime(200);
   expect(player.frame).toBe(clips.pawing.frames[6]); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('ends non-looping sequences once and never ends loops', () => {
+  const clips = loadClips()!;
+  const onEnd = vi.fn(); const player = new Playback(vi.fn());
+  player.play(clips['tea-break'], undefined, false, 0, onEnd); vi.advanceTimersByTime(2000);
+  expect(onEnd).toHaveBeenCalledTimes(1);
+  player.play(clips.typing, undefined, true, 0, onEnd); vi.advanceTimersByTime(2000); player.stop();
+  expect(onEnd).toHaveBeenCalledTimes(1);
+});
+
+const artRow = (frame: string) => frame.split('\n').find(row => /[@#]/.test(row))!.trimEnd();
+
+it('draws the typing block above a streamed response and collapses it at turn end', async () => {
+  const clips = loadClips()!;
+  const p = present(); p.setActivity({ kind: 'composing', label: 'Composing response' });
+  p.event({ type: 'text', text: 'Hello there\nsecond line\n' });
+  const during = (await screen()).split('\n').map(line => line.trimEnd());
+  const art = during.findIndex(line => clips.typing.frames.some(frame => line === artRow(frame)));
+  expect(art).toBeGreaterThanOrEqual(0);
+  expect(art).toBeLessThan(during.indexOf('Response'));
+  expect(during).toContain('Composing response');
+  p.event({ type: 'message_end' }); p.event({ type: 'request_end' });
+  const after = await screen();
+  expect(after).toContain('Response\nHello there\nsecond line');
+  expect(after).not.toContain('Composing response'); expect(after).not.toMatch(/[@#]{3}/);
+  p.close(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('freezes the block in scrollback once a long response pushes it off-screen', async () => {
+  const p = present(); p.setActivity({ kind: 'composing', label: 'Composing response' });
+  const source = Array.from({ length: 30 }, (_, index) => `line ${index}`).join('\n') + '\n';
+  p.event({ type: 'text', text: source });
+  expect(vi.getTimerCount()).toBe(0);
+  p.event({ type: 'message_end' }); p.answer(source); p.close();
+  const visible = await screen();
+  expect(visible).toContain(source.trimEnd());
+  expect(visible).not.toContain('Composing response');
+});
+
+it.each([[0.2, 1], [0.8, 0]])('reasoning with random %d picks typing or a tea break', (random, timers) => {
+  const p = new TerminalPresentation(false, false, () => random); presentations.push(p);
+  p.setActivity({ kind: 'reasoning', label: 'Thinking...' }); vi.advanceTimersByTime(2000);
+  expect(vi.getTimerCount()).toBe(timers);
+});
+
+it('sips tea then opens paws above the chat composer, and collapses it on submit', async () => {
+  const clips = loadClips()!;
+  const p = present(); const ui = terminalUI(new AbortController().signal, p); uis.push(ui);
+  const message = ui.prompt('>', process.cwd(), { spentUsd: 0, routingMode: 'hosted', mode: 'chat', grants: [] });
+  await vi.advanceTimersByTimeAsync(1500);
+  const idle = (await screen()).split('\n').map(line => line.trimEnd());
+  const status = idle.findIndex(line => line.includes('Session: $'));
+  const paws = idle.indexOf(artRow(clips.pawing.frames[3]!));
+  expect(paws).toBeGreaterThanOrEqual(0);
+  expect(paws).toBeLessThan(status); expect(status - paws).toBeLessThan(19);
+  input.emit('data', Buffer.from('hi'));
+  const count = chunks.length; vi.advanceTimersByTime(500); expect(chunks).toHaveLength(count);
+  input.emit('data', Buffer.from('\x1b\r')); expect(await message).toBe('hi');
+  await vi.advanceTimersByTimeAsync(500);
+  const submitted = await screen();
+  expect(submitted).toContain('│ hi'); expect(submitted).not.toMatch(/[@#]{3}/);
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it('delays short operations and changes waiting labels without replaying coffee', () => {

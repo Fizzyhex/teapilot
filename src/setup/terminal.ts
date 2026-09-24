@@ -106,7 +106,8 @@ export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentat
       terminal.pause();
       process.stdin.removeListener('data', forward);
       presentation?.pause();
-      try { return await promptInput(message, cwd, signal, context); }
+      const art = presentation && context ? { begin: presentation.beginComposer.bind(presentation), end: presentation.endPrompt.bind(presentation) } : undefined;
+      try { return await promptInput(message, cwd, signal, context, art); }
       finally { process.stdin.on('data', forward); }
     },
     close: () => { process.stdin.removeListener('data', forward); input.destroy(); process.stdin.pause(); process.stdin.removeListener('data', touch); process.stderr.removeListener('resize', resize); terminal.close(); },

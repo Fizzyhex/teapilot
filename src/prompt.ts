@@ -67,14 +67,21 @@ export function promptFrame(label: string, text: string, cursor: number, width: 
   };
 }
 
+/** Artwork above the composer, positioned relative to its live cursor. */
+export interface ComposerArt {
+  begin(cursor: () => { rows: number; cols: number }): void;
+  end(submitted: boolean, occupiedRows: number): void;
+}
+
 /** A prompt editor owns raw input only while awaiting a user message. */
-export async function promptInput(label: string, cwd: string, signal: AbortSignal, context?: ComposerContext): Promise<string> {
+export async function promptInput(label: string, cwd: string, signal: AbortSignal, context?: ComposerContext, art?: ComposerArt): Promise<string> {
   signal.throwIfAborted();
   const input = new PassThrough();
   emitKeypressEvents(input);
   let text = '', cursor = 0, row = 0, finished = false, revision = 0;
   let pasted = false;
   let frameRows = 1;
+  let cursorCols = 0;
   let activeNotice = '';
   let frameWidths: number[] = [];
   let frameColumns = process.stderr.columns || 80;
@@ -95,7 +102,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
       frameRows = frame.rows;
       const distance = frame.rows - 1 - frame.cursor.rows;
       write('\r' + (distance > 0 ? `\x1b[${distance}A` : '') + (frame.cursor.cols ? `\x1b[${frame.cursor.cols}C` : ''));
-      row = frame.cursor.rows;
+      row = frame.cursor.rows; cursorCols = frame.cursor.cols;
       return;
     }
     const frame = promptFrame(label, text, cursor, process.stderr.columns || 80);
@@ -114,7 +121,8 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
     row = Math.min(row, Math.max(0, (process.stderr.rows || 24) - 1));
     render(activeNotice);
   };
-  if (context) write('\r\n');
+  // The spacer row separates the composer from any artwork above it.
+  if (context) { art?.begin(() => ({ rows: 1 + row, cols: cursorCols })); write('\r\n'); }
   else write('\n\x1b[2mShift+Enter: send · Ctrl+D: exit\x1b[0m\n');
   // Kitty disambiguation and bracketed paste; pop the keyboard mode on exit.
   write('\x1b[>1u\x1b[?2004h');
@@ -134,6 +142,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
         render();
         if (context && frameRows - 1 > row) write(`\x1b[${frameRows - 1 - row}B`);
         write('\r\n');
+        if (context) art?.end(!error, 1 + frameRows);
         if (error) reject(error); else done(text.trim());
       };
       const eof = () => { const error = new Error('Terminal closed'); error.name = 'TerminalClosedError'; finish(error); };

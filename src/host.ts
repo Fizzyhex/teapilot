@@ -172,7 +172,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (decision) receipts.push(await telemetry.receipt(decision));
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
-      const fallbackWorkload = request.workload ?? scope?.workload;
+      // Without a stated workload, an unconfident route continues as least-privileged
+      // dialogue; the agent can still request access mid-run if it proves necessary.
+      const fallbackWorkload = request.workload ?? scope?.workload ?? (decision?.status === 'no_decision' ? 'ask' : undefined);
       const fallbackSelection = fallbackWorkload
         ? candidates.find(candidate => candidate.id.startsWith(`${fallbackWorkload}.`) && assessCandidate(config, candidate).allowed)?.id
         : undefined;
@@ -180,9 +182,6 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const directSelectionTier = scope?.tier ?? directTier(fallbackWorkload ?? 'ask', request.tier && request.tier !== 'auto' ? request.tier : undefined, basePrompt, request.relatedTier, Boolean(request.web));
       selected = routedSelection ?? (decision ? fallbackSelection : candidates.find(c => c.id === `${fallbackWorkload ?? 'ask'}.${directSelectionTier}` && assessCandidate(config, c).allowed)?.id);
 
-      if (decision?.status === 'no_decision' && !fallbackWorkload) {
-        return await finish(false, 'workload_uncertain', `JevRouter could not confidently determine whether this request needs repository access (${decision.fallback.type ?? 'manual_review'}). Use teapilot ask or teapilot code to state the intended workload.`);
-      }
       if (!selected) {
         return await finish(false, 'unavailable', decision
           ? `JevRouter returned no usable route (${decision.fallback.type ?? 'manual_review'}), and no host-approved fallback capability was available.`
@@ -198,9 +197,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       let assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
       if (!candidate || !assessCandidate(config, candidate).allowed || (decision && !usedRoutingFallback && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
       const selectedWorkload = selected!.split('.')[0]!;
-      if (request.authorization && decision) {
-        const plan = readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload);
-        if (!plan) return await finish(false, 'intent_uncertain', 'Please clarify whether this request needs repository reading, file edits, command execution, or live web research. No additional access was granted.');
+      // Only a confident access plan earns an upfront grant prompt. An unconfident one
+      // continues with current access; the agent requests more mid-run if needed.
+      const plan = request.authorization && decision && !usedRoutingFallback ? readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload) : undefined;
+      if (plan) {
         if ((!request.tier || request.tier === 'auto') && plan.tier && plan.tier !== 'auto') {
           const preferred = candidates.find(candidate => candidate.id === `${selectedWorkload}.${plan.tier}`);
           const preferredAssessment = preferred && decision?.decision.candidates.find(c => c.id === preferred.id);

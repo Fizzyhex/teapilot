@@ -1,7 +1,7 @@
 import type { HostEvent } from './integration/events.js';
 import { stripVTControlCharacters } from 'node:util';
 import type { Activity, ActivityUI } from './activity.js';
-import { loadClips, Playback } from './art/playback.js';
+import { loadClips, Playback, type Clips } from './art/playback.js';
 
 const ACTIVITY_COLOUR = '38;2;186;187;241'; // #babbf1
 // this is catpuccin lavender :3
@@ -55,7 +55,7 @@ export function terminalRows(text: string, columns: number): number | undefined 
 export class TerminalPresentation implements ActivityUI {
   private readonly colour = terminalColour(process.stderr.isTTY && process.stdout.isTTY);
   private readonly stream = Boolean(process.stdout.isTTY && process.stderr.isTTY && process.env.TERM !== 'dumb');
-  private readonly markdown = new MarkdownOutput(text => process.stdout.write(text), terminalColour(process.stdout.isTTY));
+  private readonly markdown = new MarkdownOutput(text => this.output(text), terminalColour(process.stdout.isTTY));
   private readonly playback = new Playback(() => this.draw());
   private current?: Activity;
   private scopes: Array<{ activity: Activity }> = [];
@@ -65,8 +65,14 @@ export class TerminalPresentation implements ActivityUI {
   private messageOpen = false;
   private literal = false;
   private previewRows = 0;
+  // The activity block sits above the output it describes. Output below it is
+  // counted so frames can be redrawn relative to the cursor.
   private artRows: string[] = [];
-  private prompt?: { touched: boolean; safe: boolean; cursor: () => { rows: number; cols: number } };
+  private belowRows = 0;
+  private tail = '';
+  private fresh = false;
+  private settling = false;
+  private prompt?: { touched: boolean; safe: boolean; label?: string; cursor: () => { rows: number; cols: number } };
   private contextRows = 0;
   private suppressed = false;
   private suspended = 0;
@@ -80,7 +86,7 @@ export class TerminalPresentation implements ActivityUI {
       this.suppressed = false; this.update(); return;
     }
     // Reflow has already happened: never move up using pre-resize coordinates.
-    this.playback.stop(); this.artRows = []; this.previewRows = 0;
+    this.playback.stop(); this.forget(); this.previewRows = 0;
     this.suppressed = true;
     if (this.prompt) { this.prompt.touched = true; this.prompt.safe = false; }
     else {
@@ -91,7 +97,7 @@ export class TerminalPresentation implements ActivityUI {
     }
   };
   private readonly drain = () => { if (!this.closed) this.draw(); };
-  constructor(private readonly json: boolean, private readonly noMotion: boolean) { }
+  constructor(private readonly json: boolean, private readonly noMotion: boolean, private readonly random = Math.random) { }
 
   private eligible(): boolean {
     return !this.closed && !this.json && !this.noMotion && this.stream && Boolean(process.stdin.isTTY)
@@ -119,50 +125,94 @@ export class TerminalPresentation implements ActivityUI {
     if (!rows) return;
     process.stderr.write(`\r\x1b[${rows}A` + Array.from({ length: rows }, () => '\x1b[2K\x1b[1B').join('') + `\x1b[${rows}A`);
   }
+  /** Erase the unfinished-line preview; the activity block stays in place. */
   clear(): void {
     if (this.prompt) return;
-    this.eraseRows(this.previewRows + this.artRows.length);
-    this.previewRows = 0; this.artRows = [];
+    this.eraseRows(this.previewRows);
+    this.belowRows = Math.max(0, this.belowRows - this.previewRows);
+    this.previewRows = 0;
+  }
+  private forget(): void { this.artRows = []; this.belowRows = 0; this.tail = ''; this.fresh = false; this.settling = false; }
+  /** Delete the block while it is on-screen, moving later output up intact. */
+  private collapse(): void {
+    this.playback.stop();
+    if (this.prompt) return;
+    this.clear();
+    const rows = this.artRows.length;
+    if (rows && !this.tail && this.belowRows + rows < (process.stderr.rows || 0)) {
+      process.stderr.write(`\r\x1b[${this.belowRows + rows}A\x1b[${rows}M` + (this.belowRows ? `\x1b[${this.belowRows}B` : ''));
+    }
+    this.forget();
+  }
+  /** Leave the block in scrollback once relative redraws can no longer reach it. */
+  private freeze(): void {
+    // Its status label would be stale there; the artwork itself may remain.
+    if (!this.tail) process.stderr.write(`\r\x1b[${this.belowRows + 1}A\x1b[2K\r\x1b[${this.belowRows + 1}B`);
+    this.playback.stop(); this.forget();
+  }
+  /** Write output below the block, tracking the rows it occupies. */
+  private output(text: string, target: 'stdout' | 'stderr' = 'stdout'): void {
+    if (this.artRows.length && !this.prompt) {
+      const columns = process.stderr.columns || 0;
+      const lines = (this.tail + stripVTControlCharacters(text)).split('\n');
+      const tail = lines.pop()!;
+      let below: number | undefined = this.belowRows;
+      for (const line of lines) { const rows = terminalRows(line, columns); below = below === undefined || rows === undefined ? undefined : below + rows; }
+      const tailRows = terminalRows(tail, columns);
+      // Collapse before an unmeasurable write, while coordinates remain valid.
+      if (below === undefined || tailRows === undefined) this.collapse();
+      else if (below + tailRows - 1 + this.artRows.length >= (process.stderr.rows || 0)) this.freeze();
+      else { this.belowRows = below; this.tail = tail; }
+    }
+    process[target].write(text);
   }
   private draw(): void {
     if (this.closed || this.suspended || !this.writable()) return;
     if (this.prompt) { this.drawPrompt(); return; }
     if (!this.eligible() || (this.messageOpen && this.literal)) return;
     const frame = this.playback.frame;
-    if (!frame || !this.current) return;
+    if (!frame || !this.current || this.tail) return;
     const rows = [...frame.split('\n'), this.label().slice(0, process.stderr.columns - 1)];
-    // The answer preview is stable between text events. Change only artwork rows.
-    if (this.artRows.length === rows.length) {
+    if (!this.artRows.length) {
+      // A block is allocated only when a clip starts, never inside a response.
+      if (!this.fresh || this.messageOpen) return;
+      process.stderr.write(paint(rows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n');
+      this.fresh = false; this.belowRows = 0; this.tail = '';
+    } else if (this.artRows.length === rows.length) {
+      // Output below is stable between events. Change only artwork rows.
       let update = '';
       rows.forEach((row, index) => {
         if (row !== this.artRows[index]) {
-          const distance = rows.length - index;
+          const distance = this.belowRows + rows.length - index;
           update += `\r\x1b[${distance}A\x1b[2K${paint(row, ACTIVITY_COLOUR, this.colour)}\r\x1b[${distance}B`;
         }
       });
       if (update) process.stderr.write(update);
-    } else {
-      process.stderr.write(
-        paint(rows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n'
-      );
-    }
+    } else return;
     this.artRows = rows;
+  }
+  private startClip(clips: Clips, delay: number): void {
+    const kind = this.current!.kind;
+    // Reasoning alternates between working and a tea break, chosen per episode.
+    const typing = kind === 'composing' || (kind === 'reasoning' && this.random() < 0.5);
+    this.clipKind = kind; this.fresh = !this.artRows.length;
+    this.playback.play(typing ? clips.typing : clips['tea-break'], undefined, typing, delay);
   }
   private update(): void {
     const next = this.scopes.at(-1)?.activity ?? this.base;
     const sameKind = next?.kind === this.clipKind;
     this.current = next;
     if (this.prompt || this.suspended || this.closed) return;
-    if (!next) { this.playback.stop(); this.clipKind = undefined; this.clear(); this.showPreview(); this.lastLabel = ''; return; }
+    // Received-input paws finish first; their end continues with this activity.
+    if (this.settling && next) { this.draw(); return; }
+    if (!next) { this.clipKind = undefined; this.collapse(); this.showPreview(); this.lastLabel = ''; return; }
     if (!this.json && !this.noMotion && this.stream && process.env.TEAPILOT_NO_MOTION === undefined && !process.env.CI) this.listen();
     const clips = this.eligible() ? loadClips() : undefined;
-    if (!clips) { this.playback.stop(); this.clipKind = undefined; this.clear(); this.showPreview(); this.textStatus(); return; }
+    if (!clips) { this.clipKind = undefined; this.collapse(); this.showPreview(); this.textStatus(); return; }
     this.listen();
     if (sameKind) { this.draw(); return; }
-    this.clear();
-    this.clipKind = next.kind;
-    this.playback.play(next.kind === 'composing' ? clips.typing : clips['coffee-break'], undefined, next.kind === 'composing', 250);
-    this.showPreview();
+    // Short operations never allocate a block; an existing block switches at once.
+    this.startClip(clips, this.artRows.length ? 0 : 250);
   }
   setActivity = (activity: Activity | undefined): void => { this.base = activity; this.update(); };
   activity = (activity: Activity): (() => void) => {
@@ -174,32 +224,32 @@ export class TerminalPresentation implements ActivityUI {
     };
   };
   start(): void { this.setActivity({ kind: 'waiting', label: 'Preparing request...' }); }
-  pause(): void { this.base = undefined; this.scopes = []; this.current = undefined; this.clipKind = undefined; this.playback.stop(); this.clear(); }
+  pause(): void { this.base = undefined; this.scopes = []; this.current = undefined; this.clipKind = undefined; this.collapse(); }
   suspend = (): (() => void) => {
-    this.playback.stop(); this.clear(); this.suspended++;
+    this.collapse(); this.suspended++;
     let resumed = false;
     return () => { if (!resumed) { resumed = true; this.suspended--; this.clipKind = undefined; this.playback.frame = undefined; this.update(); } };
   };
   write(text: string, target: 'stdout' | 'stderr' = 'stderr'): void {
     if (this.messageOpen) { this.deferred.push({ text, target }); return; }
     this.clear();
-    process[target].write(text);
+    this.output(text, target);
     this.contextRows += terminalRows(text, process.stderr.columns || 80) ?? process.stderr.rows ?? 36;
     this.draw();
   }
   log(text: string): void { this.write(`${paint(text, '32', this.colour && !this.json)}\n`); }
   approval(text: string): void {
-    this.playback.stop(); this.clear(); this.endMessage(); this.contextRows = 0;
+    this.endMessage(); this.clipKind = undefined; this.collapse(); this.contextRows = 0;
     this.write(`${paint('Approval', '1;33', this.colour && !this.json)}\n${text}\n`);
   }
 
   /** Start before readline.question, then paint only while its input is untouched. */
   beginPrompt(label: string, cursor: () => { rows: number; cols: number }): void {
-    this.playback.stop(); this.clipKind = undefined; this.clear(); this.endMessage();
+    this.endMessage(); this.clipKind = undefined; this.collapse();
     this.suppressed = false;
     const rows = terminalRows(label, process.stderr.columns || 0);
     const clips = this.eligible() && rows !== undefined && this.contextRows + rows + 19 < process.stderr.rows ? loadClips() : undefined;
-    this.prompt = { touched: false, safe: Boolean(clips), cursor };
+    this.prompt = { touched: false, safe: Boolean(clips), label: 'Waiting for your input...', cursor };
     if (clips) {
       this.listen();
       // Allocate above the prompt before readline writes it. Subsequent frames
@@ -211,6 +261,21 @@ export class TerminalPresentation implements ActivityUI {
       this.playback.play(clips.pawing, [2, 3]);
     }
   }
+  /** Above the chat composer: a sip of tea after the last turn, then open paws. */
+  beginComposer(cursor: () => { rows: number; cols: number }): void {
+    this.endMessage(); this.clipKind = undefined; this.collapse();
+    this.suppressed = false;
+    // Room for the art, a spacer, and the composer's initial three rows.
+    const clips = this.eligible() && this.contextRows + 22 < process.stderr.rows ? loadClips() : undefined;
+    this.prompt = { touched: false, safe: Boolean(clips), cursor };
+    if (clips) {
+      this.listen();
+      const sip = clips['tea-break'];
+      this.artRows = sip.frames[0]!.split('\n');
+      process.stderr.write(paint(this.artRows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n');
+      this.playback.play(sip, undefined, false, 0, () => this.playback.play(clips.pawing, [2, 3]));
+    }
+  }
   touchPrompt = (): void => {
     if (!this.prompt || this.prompt.touched) return;
     this.prompt.touched = true; this.playback.stop();
@@ -219,7 +284,7 @@ export class TerminalPresentation implements ActivityUI {
     const prompt = this.prompt;
     if (!prompt?.safe || prompt.touched || !this.playback.frame || !this.artRows.length) return;
     const position = prompt.cursor();
-    const rows = [...this.playback.frame.split('\n'), 'Waiting for your input...'];
+    const rows = [...this.playback.frame.split('\n'), ...prompt.label ? [prompt.label] : []];
     if (rows.every((row, index) => row === this.artRows[index])) return;
     const distance = rows.length + position.rows;
     process.stderr.write(
@@ -241,18 +306,19 @@ export class TerminalPresentation implements ActivityUI {
       process.stderr.write(`\r\x1b[${distance}A\x1b[${this.artRows.length}M`
         + (occupiedRows ? `\x1b[${occupiedRows}B` : ''));
     }
-    this.prompt = undefined; this.artRows = []; this.contextRows = 0;
+    this.prompt = undefined; this.forget(); this.contextRows = 0; this.clipKind = undefined;
     this.suppressed = !prompt?.safe && this.suppressed;
-    if (submitted && reclaim && this.eligible()) {
-      // A fresh, owned area below the accepted prompt avoids rewriting input.
-      const clips = loadClips();
-      if (clips) {
-        this.current = { kind: 'waiting', label: 'Input received' };
-        this.playback.play(clips.pawing, [4, 5, 6]);
-      }
-    } else this.playback.frame = undefined;
-    // The caller runs immediately. Its next activity/question interrupts closing.
-    if (this.scopes.length || this.base) { this.clipKind = undefined; this.playback.frame = undefined; this.update(); }
+    const clips = submitted && reclaim && this.eligible() ? loadClips() : undefined;
+    if (clips) {
+      // A fresh, owned block below the accepted prompt avoids rewriting input.
+      // It closes the paws, then becomes the block for whatever runs next.
+      this.current = this.scopes.at(-1)?.activity ?? this.base ?? { kind: 'waiting', label: 'Input received' };
+      this.fresh = true; this.settling = true;
+      this.playback.play(clips.pawing, [4, 5, 6], false, 0, () => { this.settling = false; this.clipKind = undefined; this.update(); });
+    } else {
+      this.playback.frame = undefined;
+      if (this.scopes.length || this.base) this.update();
+    }
   }
 
   private showPreview(): void {
@@ -260,9 +326,9 @@ export class TerminalPresentation implements ActivityUI {
     if (!text || this.literal) return;
     const rows = terminalRows(text, process.stderr.columns || 0);
     if (!this.eligible() || !this.writable() || rows === undefined || rows + 19 >= process.stderr.rows) {
-      this.playback.stop(); this.clipKind = undefined; this.literal = true; this.markdown.finish(); return;
+      this.collapse(); this.literal = true; this.markdown.finish(); return;
     }
-    process.stdout.write(text + '\n'); this.previewRows = rows;
+    this.output(text + '\n'); this.previewRows = rows;
   }
   event(event: HostEvent): void {
     if (this.json) return;
@@ -270,18 +336,23 @@ export class TerminalPresentation implements ActivityUI {
       if (!this.stream) return;
       this.clear();
       if (!this.messageOpen) {
-        process.stdout.write(paint('\nResponse\n', '1', terminalColour(process.stdout.isTTY)));
-        this.messageOpen = true; this.message = ''; this.literal = !this.eligible() || !loadClips();
+        const clips = this.eligible() ? loadClips() : undefined;
+        this.literal = !clips;
+        if (!clips) this.collapse();
+        // Allocate the block above the response before its first line.
+        else if (!this.artRows.length && this.current && !this.settling) this.startClip(clips, 0);
+        this.output(paint('\nResponse\n', '1', terminalColour(process.stdout.isTTY)));
+        this.messageOpen = true; this.message = '';
       }
       this.message += event.text;
       if (!this.literal) {
         const pending = (this.markdown.preview + event.text).split('\n').at(-1)!;
         const rows = terminalRows(pending, process.stderr.columns || 0);
         if (!this.writable() || rows === undefined || rows + 19 >= process.stderr.rows || pending.length > 4096) {
-          this.playback.stop(); this.clipKind = undefined; this.literal = true; this.markdown.finish();
+          this.collapse(); this.literal = true; this.markdown.finish();
         }
       }
-      if (this.literal) process.stdout.write(event.text);
+      if (this.literal) this.output(event.text);
       else { this.markdown.push(event.text); this.showPreview(); this.draw(); }
     } else if (event.type === 'message_end') { this.clear(); this.endMessage(); this.draw(); }
     else if (event.type === 'tool_execution_start') this.setActivity({ kind: 'waiting', label: `Running ${String(event.tool)}...` });
@@ -291,7 +362,7 @@ export class TerminalPresentation implements ActivityUI {
     if (!this.messageOpen) return;
     this.clear();
     if (!this.literal) this.markdown.finish();
-    if (!this.message.endsWith('\n')) process.stdout.write('\n');
+    if (!this.message.endsWith('\n')) this.output('\n');
     this.lastMessage = this.message; this.messageOpen = false; this.literal = false;
     for (const output of this.deferred.splice(0)) this.write(output.text, output.target);
   }

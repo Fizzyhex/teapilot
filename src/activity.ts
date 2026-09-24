@@ -1,5 +1,5 @@
 /** Optional, local presentation hooks. Never serialized into the service protocol. */
-export interface Activity { kind: 'waiting' | 'composing'; label: string }
+export interface Activity { kind: 'waiting' | 'reasoning' | 'composing'; label: string }
 export type ActivitySink = (activity: Activity | undefined) => void;
 export interface ActivityUI {
   activity?(activity: Activity): () => void;
