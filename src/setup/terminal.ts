@@ -3,6 +3,7 @@ import { PassThrough, Writable } from 'node:stream';
 import { stripVTControlCharacters, styleText } from 'node:util';
 import { terminalColour, terminalRows, type TerminalPresentation } from '../presentation.js';
 import type { ActivityUI } from '../activity.js';
+import type { ComposerContext } from '../composer.js';
 
 export interface SetupUI extends ActivityUI {
   input(message: string, fallback?: string, secret?: boolean, signal?: AbortSignal): Promise<string>;
@@ -24,7 +25,7 @@ export async function chooseMany(ui: SetupUI, message: string, choices: string[]
   }
 }
 
-export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentation): SetupUI & { close(): void; prompt(message: string, cwd: string): Promise<string> } {
+export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentation): SetupUI & { close(): void; prompt(message: string, cwd: string, context?: ComposerContext): Promise<string> } {
   const colour = terminalColour(process.stderr.isTTY) && !process.env.NODE_DISABLE_COLORS;
   const paint = (format: Parameters<typeof styleText>[0], text: string) => colour ? styleText(format, text, { validateStream: false }) : text;
   let hidden = false;
@@ -100,12 +101,12 @@ export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentat
       try { let r = (await ui.input(`${message} Type yes to confirm`, 'no', false, extraSignal)); return r === 'yes' || r === "ya"; }
       catch (error) { if (signal.aborted || extraSignal?.aborted) return false; throw error; }
     },
-    prompt: async (message: string, cwd: string) => {
+    prompt: async (message: string, cwd: string, context?: ComposerContext) => {
       const { promptInput } = await import('../prompt.js');
       terminal.pause();
       process.stdin.removeListener('data', forward);
       presentation?.pause();
-      try { return await promptInput(message, cwd, signal); }
+      try { return await promptInput(message, cwd, signal, context); }
       finally { process.stdin.on('data', forward); }
     },
     close: () => { process.stdin.removeListener('data', forward); input.destroy(); process.stdin.pause(); process.stdin.removeListener('data', touch); process.stderr.removeListener('resize', resize); terminal.close(); },

@@ -4,6 +4,8 @@ import { emitKeypressEvents, type Key } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { stripVTControlCharacters } from 'node:util';
+import { cellWidth, composerFrame, graphemes, type ComposerContext } from './composer.js';
+import { terminalColour } from './presentation.js';
 
 export async function completeMention(text: string, cursor: number, cwd: string) {
   const match = /(?:^|\s)@("[^"\n]*|[^\s"@]*)$/.exec(text.slice(0, cursor));
@@ -31,39 +33,95 @@ export function isPromptSubmit(key: Key): boolean {
   return key.sequence === '\x1b[13;2u' || key.sequence === '\x1b[27;2;13~' || key.sequence === '\x1b\r' || Boolean(key.shift && key.name === 'return');
 }
 
+const COMPOSER_COLOUR = '\x1b[48;2;232;234;246m\x1b[38;2;35;38;52m';
+const RESET_COLOUR = '\x1b[0m';
+
+/** Build the editable prompt and its cursor position in terminal cells. */
+export function promptFrame(label: string, text: string, cursor: number, width: number) {
+  const columns = Math.max(1, width);
+  if (!text.includes('\n')) {
+    const prefix = label === '>' ? '> ' : `${label}: `;
+    const before = prefix + text.slice(0, cursor);
+    return {
+      output: prefix + text,
+      cursor: { rows: Math.floor(before.length / columns), cols: before.length % columns },
+    };
+  }
+
+  // A multiline entry becomes a full-width composer. Explicitly paint every
+  // cell so the background is consistent across short and wrapped lines.
+  const physical: string[] = [];
+  for (const line of text.split('\n')) {
+    // Keep an empty physical row when the cursor lands exactly at the wrap.
+    const count = Math.floor(line.length / columns) + 1;
+    for (let index = 0; index < count; index++) physical.push(line.slice(index * columns, (index + 1) * columns).padEnd(columns));
+  }
+  const before = text.slice(0, cursor).split('\n');
+  const cursorRow = 1 + before.slice(0, -1).reduce((total, line) => total + Math.floor(line.length / columns) + 1, 0)
+    + Math.floor(before.at(-1)!.length / columns);
+  const cursorCol = before.at(-1)!.length % columns;
+  const blank = ' '.repeat(columns);
+  return {
+    output: [blank, ...physical, blank].map(line => COMPOSER_COLOUR + line + RESET_COLOUR).join('\r\n'),
+    cursor: { rows: cursorRow, cols: cursorCol },
+  };
+}
+
 /** A prompt editor owns raw input only while awaiting a user message. */
-export async function promptInput(label: string, cwd: string, signal: AbortSignal): Promise<string> {
+export async function promptInput(label: string, cwd: string, signal: AbortSignal, context?: ComposerContext): Promise<string> {
   signal.throwIfAborted();
   const input = new PassThrough();
   emitKeypressEvents(input);
   let text = '', cursor = 0, row = 0, finished = false, revision = 0;
   let pasted = false;
+  let frameRows = 1;
+  let activeNotice = '';
+  let frameWidths: number[] = [];
+  let frameColumns = process.stderr.columns || 80;
+  const colour = terminalColour(process.stderr.isTTY) && !process.env.NODE_DISABLE_COLORS;
   const write = (value: string) => { process.stderr.write(value); };
-  const position = (value: string) => {
-    let rows = 0, cols = 0;
-    const width = process.stderr.columns || 80;
-    for (const char of value) {
-      if (char === '\n') { rows++; cols = 0; }
-      else { cols++; if (cols >= width) { rows++; cols = 0; } }
-    }
-    return { rows, cols };
-  };
   const render = (notice = '') => {
+    activeNotice = notice;
     write('\r' + (row ? `\x1b[${row}A` : '') + '\x1b[J');
-    const prefix = label === '>' ? '> ' : `${label}: `;
-    const full = prefix + text;
-    const target = position(prefix + text.slice(0, cursor));
-    write(full.replaceAll('\n', '\r\n') + (notice ? '\r\n' + notice.replaceAll('\n', '\r\n') : '') + ' ');
-    const actualEnd = position(full + (notice ? '\n' + notice : '') + ' ');
-    write('\r' + (actualEnd.rows > target.rows ? `\x1b[${actualEnd.rows - target.rows}A` : '') + (target.cols ? `\x1b[${target.cols}C` : ''));
-    row = target.rows;
+    if (context) {
+      const frame = composerFrame(text, cursor, process.stderr.columns || 80, process.stderr.rows || 24, cwd, context, colour, notice);
+      // Explicit physical rows avoid delayed autowrap at full-width edges.
+      // Erase to the edge in the active background colour. Literal padding
+      // spaces would reflow into extra blank lines when a terminal narrows.
+      const physical = frame.output.split('\r\n').map(line => line.replace(/ +(\x1b\[0m)?$/, '\x1b[K$1'));
+      frameWidths = physical.map(line => cellWidth(stripVTControlCharacters(line)));
+      frameColumns = process.stderr.columns || 80;
+      write(physical.join('\r\n'));
+      frameRows = frame.rows;
+      const distance = frame.rows - 1 - frame.cursor.rows;
+      write('\r' + (distance > 0 ? `\x1b[${distance}A` : '') + (frame.cursor.cols ? `\x1b[${frame.cursor.cols}C` : ''));
+      row = frame.cursor.rows;
+      return;
+    }
+    const frame = promptFrame(label, text, cursor, process.stderr.columns || 80);
+    const noticeText = notice ? '\r\n' + notice.replaceAll('\n', '\r\n') : '';
+    write(frame.output.replaceAll(/(?<!\r)\n/g, '\r\n') + noticeText + ' ');
+    const renderedRows = frame.output.split(/\r?\n/).length - 1 + (notice ? notice.split('\n').length : 0);
+    const distance = renderedRows - frame.cursor.rows;
+    write('\r' + (distance > 0 ? `\x1b[${distance}A` : '') + (frame.cursor.cols ? `\x1b[${frame.cursor.cols}C` : ''));
+    row = frame.cursor.rows;
   };
-  write('\n\x1b[2mShift+Enter: send · Ctrl+D: exit\x1b[0m\n');
+  const resize = () => {
+    const columns = process.stderr.columns || 80;
+    if (columns < frameColumns) {
+      row = frameWidths.slice(0, row).reduce((total, width) => total + Math.max(1, Math.ceil(width / columns)), 0);
+    }
+    row = Math.min(row, Math.max(0, (process.stderr.rows || 24) - 1));
+    render(activeNotice);
+  };
+  if (context) write('\r\n');
+  else write('\n\x1b[2mShift+Enter: send · Ctrl+D: exit\x1b[0m\n');
   // Kitty disambiguation and bracketed paste; pop the keyboard mode on exit.
   write('\x1b[>1u\x1b[?2004h');
   const raw = process.stdin.isRaw;
   process.stdin.setRawMode(true);
   render();
+  if (context) process.stderr.on('resize', resize);
   try {
     return await new Promise<string>((done, reject) => {
       const finish = (error?: Error) => {
@@ -74,6 +132,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
         signal.removeEventListener('abort', abort);
         cursor = text.length;
         render();
+        if (context && frameRows - 1 > row) write(`\x1b[${frameRows - 1 - row}B`);
         write('\r\n');
         if (error) reject(error); else done(text.trim());
       };
@@ -110,12 +169,15 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
           return;
         }
         revision++;
-        if (!pasted && key.name === 'left') cursor = Math.max(0, cursor - 1);
-        else if (!pasted && key.name === 'right') cursor = Math.min(text.length, cursor + 1);
-        else if (!pasted && key.name === 'home') cursor = text.lastIndexOf('\n', cursor - 1) + 1;
+        const boundaries = graphemes(text).map(part => part.index);
+        const previous = boundaries.findLast(index => index < cursor) ?? 0;
+        const next = boundaries.find(index => index > cursor) ?? text.length;
+        if (!pasted && key.name === 'left') cursor = previous;
+        else if (!pasted && key.name === 'right') cursor = next;
+        else if (!pasted && key.name === 'home') cursor = cursor ? text.lastIndexOf('\n', cursor - 1) + 1 : 0;
         else if (!pasted && key.name === 'end') { const end = text.indexOf('\n', cursor); cursor = end < 0 ? text.length : end; }
-        else if (!pasted && key.name === 'backspace') { if (cursor) { text = text.slice(0, cursor - 1) + text.slice(cursor); cursor--; } }
-        else if (!pasted && key.name === 'delete') text = text.slice(0, cursor) + text.slice(cursor + 1);
+        else if (!pasted && key.name === 'backspace') { if (cursor) { text = text.slice(0, previous) + text.slice(cursor); cursor = previous; } }
+        else if (!pasted && key.name === 'delete') text = text.slice(0, cursor) + text.slice(next);
         else {
           const inserted = key.name === 'return' || key.name === 'enter' ? '\n' : value && !key.ctrl && !key.meta ? stripVTControlCharacters(value).replace(/[\x00-\x1f\x7f]/g, '') : '';
           text = text.slice(0, cursor) + inserted + text.slice(cursor); cursor += inserted.length;
@@ -129,6 +191,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
       if (signal.aborted) abort();
     });
   } finally {
+    process.stderr.removeListener('resize', resize);
     write('\x1b[<u\x1b[?2004l');
     process.stdin.setRawMode(raw ?? false);
     process.stdin.pause();

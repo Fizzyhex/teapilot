@@ -127,7 +127,7 @@ async function main(): Promise<void> {
     };
     if (command === 'chat') {
       presentation.log('Chat started. Type /exit or /quit to leave.');
-      process.exitCode = await runChat({ request, maxPromptChars: config.policy.limits.maxPromptChars, input: () => ui!.prompt('>', resolve(values.cwd)), run: execute });
+      process.exitCode = await runChat({ request, maxPromptChars: config.policy.limits.maxPromptChars, input: state => ui!.prompt('>', resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted' }), run: execute });
     } else {
       const result = await execute(request);
       process.exitCode = result.success ? 0 : 2;

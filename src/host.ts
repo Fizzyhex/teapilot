@@ -13,8 +13,10 @@ import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
+import type { Mode, SessionGrants, Permission } from './execution/grants.js';
+import { capabilityPlanner, readCapabilityPlan } from './routing/intent.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; chat?: boolean; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[] }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; chat?: boolean; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
@@ -27,20 +29,22 @@ export interface HostDependencies {
   localProbe?: () => Promise<boolean>;
   onProgress?: (message: string) => void;
   onEvent?: EventSink; beforeMutation?: BeforeMutation;
+  continueWithoutSearch?: (message: string) => Promise<boolean>;
 }
 
 export async function runHost(config: Config, request: HostRequest, dependencies: HostDependencies): Promise<HostResult> {
-  if (config.routingMode === 'direct' && !request.workload) throw new Error('Direct routing requires teapilot ask or teapilot code.');
+  if (config.routingMode === 'direct' && !request.workload && !request.authorization) throw new Error('Direct routing requires teapilot ask or teapilot code.');
   const prompt = request.prompt.trim();
   if (!prompt || prompt.length + (request.correction?.length ?? 0) > config.policy.limits.maxPromptChars) throw new Error(`Prompt must contain 1–${config.policy.limits.maxPromptChars} characters`);
   dependencies.onActivity?.({ kind: 'waiting', label: 'Checking request availability...' });
   const cwd = await realpath(request.cwd);
+  if (request.authorization && request.authorization.root !== cwd) throw new Error('Session grants belong to a different repository.');
   if (!(await stat(cwd)).isDirectory()) throw new Error('Working directory is not a directory');
   const contextPolicy = new ExecutionPolicy(cwd, config, dependencies.approve);
   for (const context of request.context ?? []) if (context.path) await contextPolicy.path(context.path, false);
   const conversation = prepareConversation(prompt + (request.correction ? `\nUser correction:\n${request.correction}` : ''), request.context ?? [], request.history ?? [], config.policy.limits.maxPromptChars);
   if (conversation.omitted) dependencies.onEvent?.({ type: 'history_omitted', turns: conversation.omitted });
-  if (request.web) {
+  if (request.web && !request.authorization) {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Checking web search...' });
     await checkSearch(config, request.signal);
   }
@@ -55,6 +59,36 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   const models: string[] = [];
   const changedFiles = new Set<string>();
   let shellRan = false;
+  const activePermissions: Permission[] = ['inference'];
+  let searchDisabled = false;
+  let searchUnverified = false;
+  let accessFailure: string | undefined;
+  const activate = async (required: Permission[], reason: string, signal = request.signal): Promise<boolean> => {
+    if (!request.authorization) return true;
+    if (accessFailure) return false;
+    if (required.some(permission => !config.policy.permissions.includes(permission))) {
+      accessFailure = `Required access is disabled by configuration: ${required.filter(permission => !config.policy.permissions.includes(permission)).join(', ')}.`;
+      return false;
+    }
+    if (!await request.authorization.request(required, reason, dependencies.approve, signal,
+      (type, fields) => telemetry.event(type, fields))) {
+      accessFailure = `Required session access was not approved: ${required.join(', ')}. Grant access interactively to continue.`;
+      return false;
+    }
+    if (required.includes('web.search') && !activePermissions.includes('web.search') && !searchDisabled) {
+      try { await checkSearch(config, signal); }
+      catch (error) {
+        signal?.throwIfAborted();
+        if (!await dependencies.continueWithoutSearch?.(error instanceof Error ? error.message : 'Web search is unavailable.')) {
+          accessFailure = 'Web search is unavailable. Repair search before retrying.';
+          return false;
+        }
+        searchDisabled = true; searchUnverified = true;
+      }
+    }
+    for (const permission of required) if (!activePermissions.includes(permission) && !(permission === 'web.search' && searchDisabled)) activePermissions.push(permission);
+    return true;
+  };
   const incomplete = (attempt: AttemptResult, fallback?: string) => {
     const stop = attempt.stopped ?? attempt.reason ?? 'incomplete';
     const actions: Record<string, string> = {
@@ -79,7 +113,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   };
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
-    const result = { requestId, success, status, text: telemetry.redact(text), capability: selected, spentUsd: budget.spent().request, receipts, attempts, check, models };
+    const result = { requestId, success, status, text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, spentUsd: budget.spent().request, receipts, attempts, check, models };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
   };
@@ -87,7 +121,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     await budget.load();
     await mkdir(config.stateDir, { recursive: true });
     await telemetry.event('request_start', { correction: Boolean(request.correction), web: Boolean(request.web) });
-    const router = config.routingMode === 'direct' ? undefined : new JevRouter(budgetedJev(config, budget, telemetry, dependencies.provider, request.signal), { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false });
+    if (request.authorization && !request.authorization.allows('inference')) return await finish(false, 'blocked', 'Inference access is not granted. Start a new session to restore it.');
+    if (request.authorization && request.web && !await activate(['web.search'], 'You requested web research with --web.')) return await finish(false, 'approval_denied', accessFailure!);
+    const provider = budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
+    const router = config.routingMode === 'direct' ? undefined : new JevRouter(request.authorization ? capabilityPlanner(provider) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false });
     const localOnline = await (dependencies.localProbe ?? (() => localAvailable(config)))();
     let scope: { workload: Workload; tier: Tier } | undefined;
     let previous: AttemptResult | undefined;
@@ -97,6 +134,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const candidates = capabilities(config, budget, localOnline, scope);
       if (request.workload) for (const candidate of candidates) {
         if (!candidate.id.startsWith(`${request.workload}.`)) candidate.availability = { available: false, reason: 'Outside requested workload' };
+      }
+      if (!router && request.authorization && !scope) for (const candidate of candidates) {
+        if (!candidate.id.startsWith('ask.')) candidate.availability = { available: false, reason: 'Start with dialogue; activate repository tools only when needed' };
       }
       if (request.web) for (const candidate of candidates) {
         const tier = candidate.id.split('.')[1] as Tier;
@@ -108,7 +148,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const decision = router ? await router.route({
         request: basePrompt,
         context: {
-          preference: 'Prefer local inference when suitable. Use economy cloud when local is unavailable or unsuitable. Difficulty alone is not evidence of failure. coder operates in the repository; ask has no filesystem or shell.',
+          preference: 'Prefer local inference when suitable. Use economy cloud when local is unavailable or unsuitable. Difficulty alone is not evidence of failure. Choose coder only when the user request needs repository access; ordinary questions use ask, including in Code mode.',
+          mode: request.mode,
+          granted_access: request.authorization?.list(),
           web_enabled: Boolean(request.web),
           history: conversation.history,
           ...(scope ? { escalation: { ...scope, evidence: previous?.reason } } : {}),
@@ -143,6 +185,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const candidate = candidates.find(c => c.id === selected);
       const assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
       if (!candidate || !assessCandidate(config, candidate).allowed || (decision && !usedRoutingFallback && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
+      if (request.authorization && decision) {
+        const required = readCapabilityPlan(decision.raw_jev, config.policy.router.min_confidence, selected.split('.')[0]!);
+        if (!required) return await finish(false, 'intent_uncertain', 'Please clarify whether this request needs repository reading, file edits, command execution, or live web research. No additional access was granted.');
+        if (!await activate(required, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
+      }
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
       if (assessCandidate(config, candidate).confirmation || (!usedRoutingFallback && (decision?.status === 'needs_confirmation' || assessment?.router.requires_confirmation))) {
@@ -157,7 +204,20 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       models.push(config.models[tier].id);
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: config.models[tier].id, tier });
       previous = await runAttempt({
-        config, workload, tier, cwd, web: Boolean(request.web), chat: request.chat, budget, telemetry,
+        config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), chat: request.chat, budget, telemetry,
+        mode: request.mode, conversational: request.conversational, authorization: request.authorization,
+        activePermissions: request.authorization ? activePermissions : undefined,
+        requestCapabilities: request.authorization ? async (required, reason, signal) => {
+          if (required.some(permission => permission.startsWith('repository.'))) {
+            const repository = capabilities(config, budget, localOnline, { workload: 'coder', tier }).find(value => value.id === `coder.${tier}`)!;
+            const admission = assessCandidate(config, repository);
+            if (!admission.allowed) { accessFailure = admission.reason ?? 'Repository capability unavailable'; return false; }
+            if (admission.confirmation && workload !== 'coder' && !activePermissions.includes('repository.read')) {
+              if (!await dependencies.approve({ kind: 'route', summary: `Use repository tools with ${config.models[tier].id}?`, details: reason, signal })) return false;
+            }
+          }
+          return activate(required, reason, signal);
+        } : undefined,
         unresolvedChecks: previous?.unresolvedChecks,
         history: conversation.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
@@ -171,6 +231,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       check = previous.check;
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
       shellRan ||= Boolean(previous.shellRan);
+      if (accessFailure) return await finish(false, 'approval_denied', incomplete(previous, accessFailure));
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check });
       if (previous.success) return await finish(true, 'completed', previous.text);
       if (!previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit', 'search_unavailable'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {

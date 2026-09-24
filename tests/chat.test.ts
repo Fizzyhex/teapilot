@@ -8,6 +8,25 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 const result: HostResult = { requestId: 'test', success: true, status: 'completed', text: 'What matters most to you?', spentUsd: 0, receipts: [], attempts: 1 };
 
+it('reports session costs and last attempted models including unsuccessful and model-free turns', async () => {
+  const input = vi.fn().mockResolvedValueOnce('next').mockResolvedValueOnce('again').mockResolvedValueOnce('/exit');
+  const run = vi.fn().mockResolvedValueOnce({ ...result, spentUsd: 0.1, models: ['local', 'economy'] })
+    .mockResolvedValueOnce({ ...result, success: false, spentUsd: 0.2, models: ['strong'] })
+    .mockResolvedValueOnce({ ...result, spentUsd: 0.05, models: [] });
+  expect(await runChat({ request: { prompt: 'opening', cwd: '.' }, maxPromptChars: 2000, input, run })).toBe(2);
+  expect(input.mock.calls[0]![0]).toEqual({ spentUsd: 0.1, lastModel: 'economy' });
+  expect(input.mock.calls[1]![0].spentUsd).toBeCloseTo(0.3);
+  expect(input.mock.calls[1]![0].lastModel).toBe('strong');
+  expect(input.mock.calls[2]![0].spentUsd).toBeCloseTo(0.35);
+  expect(input.mock.calls[2]![0].lastModel).toBe('strong');
+});
+
+it('starts the composer with zero cost and no model', async () => {
+  const input = vi.fn().mockResolvedValue('/exit');
+  await runChat({ request: { prompt: '', cwd: '.' }, maxPromptChars: 2000, input, run: vi.fn() });
+  expect(input).toHaveBeenCalledWith({ spentUsd: 0, lastModel: undefined });
+});
+
 it('continues after an opening prompt and carries the conversation and correction forward', async () => {
   const input = vi.fn().mockResolvedValueOnce('Cost').mockResolvedValueOnce('/exit');
   const run = vi.fn(async (_request: HostRequest) => result);

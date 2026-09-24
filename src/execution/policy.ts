@@ -2,8 +2,9 @@ import { lstat, realpath, readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config } from '../config.js';
+import type { Permission } from './grants.js';
 
-export interface Approval { kind: 'route' | 'shell' | 'overwrite'; summary: string; details?: string; signal?: AbortSignal }
+export interface Approval { kind: 'route' | 'shell' | 'overwrite' | 'capability'; summary: string; details?: string; signal?: AbortSignal; permissions?: Permission[]; cwd?: string; duration?: 'session' }
 export type Approve = (approval: Approval) => Promise<boolean>;
 export type BeforeMutation = (action: { tool: string; path?: string }, signal?: AbortSignal) => Promise<void>;
 export class PolicyDenied extends Error {}

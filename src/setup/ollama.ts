@@ -11,7 +11,7 @@ import { chooseMany, type SetupUI } from './terminal.js';
 export const ollamaURL = 'http://127.0.0.1:11434';
 export const presets = [
   { label: 'Default - Qwen3.5-9B abliterated', id: 'huihui_ai/qwen3.5-abliterated:9b', bytes: 6_600_000_000, memoryGiB: 12, context: 16384 },
-  { label: 'Hard task fallback - Qwen3.5-35B-A3B abliterated Q4_K_M', id: 'huihui_ai/qwen3.5-abliterated:35b-a3b-q4_K', bytes: 24_000_000_000, memoryGiB: 32, context: 16384 },
+  { label: 'Hard task fallback - Qwen3.6-35B-A3B (Unrestricted)', id: 'llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-GGUF', bytes: 24_000_000_000, memoryGiB: 32, context: 32768 },
   { label: 'Cheap & Fast - mradermacher/Qwen3.5-4B-Uncensored-GGUF Q8_0', id: 'hf.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF:Q8_0', bytes: 4_700_000_000, memoryGiB: 8, context: 16384 },
 ];
 export interface OllamaModel { name: string; size: number; remote_model?: string }

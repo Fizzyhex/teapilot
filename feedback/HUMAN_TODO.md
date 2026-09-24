@@ -1,6 +1,6 @@
-- [ ] improve teapilot inline terminal UX
-    - [ ] Require shift + enter to submit the prompt rather than enter
-    - [ ] Pressing tab after typing `@` should match and autofill with a file from the CWD. If there are multiple candidates as matches, display them so the user can narrow it down.
+- [x] improve teapilot inline terminal UX
+    - [x] Require shift + enter to submit the prompt rather than enter
+    - [x] Pressing tab after typing `@` should match and autofill with a file from the CWD. If there are multiple candidates as matches, display them so the user can narrow it down.
 - [ ] ascii art animation improvements
   - [ ] move ascii art placement to above text as it is typed, rather than below
     - [ ] after typing a response, teapilot should "take a sip of tea" (play coffee-break anim). if the task is complete, the ascii art should be replaced with whitespace at this point. otherwise, teapilot should open it paws.
