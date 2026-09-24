@@ -9,6 +9,7 @@ import { ExecutionPolicy, type Approve, type BeforeMutation } from '../execution
 import { StreamRedactor, type EventSink, type ConversationTurn } from '../integration/events.js';
 import type { SpendGovernor } from '../inference/budget.js';
 import { guardedStream, piModel, type InferenceState } from '../inference/providers.js';
+import { compactAgentContext, formatCompactionSummary } from '../inference/compaction.js';
 import { Evidence, type EscalationReason } from '../routing/escalation.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 import { ask } from './ask.js';
@@ -17,7 +18,7 @@ import { coder } from './coder.js';
 export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
   budget: SpendGovernor; telemetry: Telemetry; approve: Approve; signal?: AbortSignal;
-  history?: ConversationTurn[]; onEvent?: EventSink; onActivity?: ActivitySink; beforeMutation?: BeforeMutation;
+  history?: ConversationTurn[]; summary?: string; onEvent?: EventSink; onActivity?: ActivitySink; beforeMutation?: BeforeMutation;
   mode?: Mode; conversational?: boolean; authorization?: import('../execution/grants.js').SessionGrants;
   activePermissions?: Permission[];
   requestCapabilities?: (required: Permission[], reason: string, signal?: AbortSignal) => Promise<boolean>;
@@ -107,10 +108,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   });
   const setup = await compose();
   if (!model.toolCalling && setup.tools.length) throw new Error('Selected model cannot use the required tools');
-  const history: Message[] = (input.history ?? []).flatMap(turn => [
+  const history: Message[] = [
+    ...(input.summary ? [{ role: 'user' as const, content: formatCompactionSummary(input.summary), timestamp: Date.now() }] : []),
+    ...(input.history ?? []).flatMap(turn => [
     { role: 'user' as const, content: turn.user, timestamp: Date.now() },
     { role: 'assistant' as const, content: [{ type: 'text' as const, text: turn.assistant }], api: 'openai-completions' as const, provider: model.provider, model: model.id, timestamp: Date.now(), usage: emptyUsage(), stopReason: 'stop' as const },
-  ]);
+  ]),
+  ];
   const stream = guardedStream(config, tier, input.budget, telemetry, inference);
   const agent = new Agent({
     initialState: { model: piModel(model, profile), systemPrompt: setup.systemPrompt, tools: setup.tools, thinkingLevel: profile.thinking, messages: history },
@@ -120,10 +124,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     toolExecution: 'sequential',
     prepareNextTurnWithContext: async ({ context }) => {
-      if (!toolsChanged) return undefined;
+      const compacted = await compactAgentContext({ config, tier, messages: context.messages, budget: input.budget, telemetry, signal: input.signal, onActivity: input.onActivity });
+      if (!toolsChanged && !compacted.compacted) return undefined;
+      if (!toolsChanged) return { context: { ...context, messages: compacted.messages } };
       toolsChanged = false;
       const next = await compose();
-      return { context: { ...context, tools: next.tools }, messages: [{ role: 'system', content: `Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
+      return { context: { ...context, messages: compacted.messages, tools: next.tools }, messages: [{ role: 'system', content: `Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
     },
     beforeToolCall: async () => {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) return { block: true, terminate: true, reason: 'Attempt stopped' };
