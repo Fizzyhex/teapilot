@@ -8,6 +8,7 @@ hi, teapilot is a small personal agent for coding and questions.
 - `code` to work in a repository
 - `chat` for a multi-turn conversation
 - `ask --web` for research through a configured SearXNG service
+- optional: chat with it from Discord (`teapilot discord setup`)
 
 ---
 
@@ -59,5 +60,6 @@ TeaPilot uses Qwen3.5-9B for cheap standalone work and one persistent Qwen3.8-27
 1. [Setup](docs/01-setup.md) — install, choose a model, check readiness, and enable optional search
 2. [Commands](docs/02-commands.md) — choose a request mode, use interactive features, and interpret results
 3. [Configuration](docs/03-configuration.md) — profiles, local endpoints, providers, models, and policies
+4. [Discord](docs/04-discord.md) — optional: use teapilot from Discord DMs or a channel
 
 See [project status](https://github.com/fizzyhex/teapilot/blob/main/STATUS.md) for known limits and remaining work.

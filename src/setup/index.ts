@@ -46,31 +46,45 @@ export async function pruneGenerations(directory: string): Promise<void> {
   } catch { /* pruning never blocks a committed save */ }
 }
 
+function checkEnvironment(env: Record<string, string>): void {
+  for (const [key, value] of Object.entries(env)) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\r\n\0"\\]/.test(value)) throw new Error('Configuration values must be single-line strings without double quotes or backslashes.');
+  }
+}
+
+async function commitEnvironment(directory: string, revision: string, values: Record<string, string>, signal: AbortSignal): Promise<void> {
+  const pending = resolve(directory, `.env-${revision}.tmp`);
+  try {
+    await privateWrite(pending, Object.entries(values).map(([key, value]) => `${key}="${value}"`).join('\n') + '\n', signal);
+    signal.throwIfAborted();
+    await rename(pending, resolve(directory, '.env'));
+  } finally { await rm(pending, { force: true }); }
+}
+
+/** Atomically replace only the private .env, leaving the active model and policy generation in place. */
+export async function saveEnvironment(directory: string, env: Record<string, string>, signal: AbortSignal): Promise<void> {
+  checkEnvironment(env);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await commitEnvironment(directory, randomUUID(), env, signal);
+}
+
 export async function saveConfiguration(directory: string, config: Config, env: Record<string, string>, signal: AbortSignal): Promise<void> {
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
   env = { ...env };
   for (const key of ['TEAPILOT_MODELS_FILE', 'TEAPILOT_POLICY_FILE', 'TEAPILOT_STATE_DIR']) {
     if (env[key]) env[key] = env[key].replace(/\\/g, '/');
   }
-  for (const [key, value] of Object.entries(env)) {
-    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\r\n\0"\\]/.test(value)) throw new Error('Configuration values must be single-line strings without double quotes or backslashes.');
-  }
+  checkEnvironment(env);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const revision = randomUUID();
   const modelFile = `models-${revision}.json`, policyFile = `policy-${revision}.json`;
-  const pending = resolve(directory, `.env-${revision}.tmp`);
   // Commit a complete generation by atomically replacing just its pointer. A
   // cancelled write leaves the previous config usable; after a commit the
   // newest previous generation is kept for rollback and older ones are pruned.
-  try {
-    await privateWrite(resolve(directory, modelFile), `${JSON.stringify(config.models, null, 2)}\n`, signal);
-    await privateWrite(resolve(directory, policyFile), `${JSON.stringify(config.policy, null, 2)}\n`, signal);
-    const values = { ...env, TEAPILOT_MODELS_FILE: modelFile, TEAPILOT_POLICY_FILE: policyFile, TEAPILOT_ROUTING_MODE: config.routingMode ?? 'hosted' };
-    await privateWrite(pending, Object.entries(values).map(([key, value]) => `${key}="${value}"`).join('\n') + '\n', signal);
-    signal.throwIfAborted();
-    await rename(pending, resolve(directory, '.env'));
-    await pruneGenerations(directory);
-  } finally { await rm(pending, { force: true }); }
+  await privateWrite(resolve(directory, modelFile), `${JSON.stringify(config.models, null, 2)}\n`, signal);
+  await privateWrite(resolve(directory, policyFile), `${JSON.stringify(config.policy, null, 2)}\n`, signal);
+  await commitEnvironment(directory, revision, { ...env, TEAPILOT_MODELS_FILE: modelFile, TEAPILOT_POLICY_FILE: policyFile, TEAPILOT_ROUTING_MODE: config.routingMode ?? 'hosted' }, signal);
+  await pruneGenerations(directory);
 }
 
 async function numberInput(ui: SetupUI, label: string, fallback: number | undefined, minimum: number): Promise<number> {

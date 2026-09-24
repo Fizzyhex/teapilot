@@ -23,6 +23,7 @@ teapilot code --cwd <repository> ["Fix the failing tests"]
 teapilot --prompt "Summarise this idea"   (one-shot, no session)
 teapilot doctor [--live]
 teapilot search status|start|stop|remove
+teapilot discord setup|start|status|remove   (optional; chat from Discord)
 teapilot serve --stdio
 
   Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json  --once  --tier auto|fast|normal|reasoning|deep
@@ -50,7 +51,7 @@ async function main(): Promise<void> {
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
-  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search', 'discord'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
   if (command === 'serve') { if (!values.stdio) throw new Error('serve requires --stdio'); await serve(); return; }
   if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
@@ -80,6 +81,15 @@ async function main(): Promise<void> {
       if (positionals.length) throw new Error('Use teapilot search status|start|stop|remove.');
       const serviceUI = ui ?? { log: (text: string) => console.error(text), confirm: async () => { throw new Error('Starting or removing search requires an interactive terminal.'); }, input: async () => '', choose: async () => 0 };
       process.exitCode = await new ManagedSearch(directory, controller.signal).manage(action, serviceUI) ? 0 : 2;
+      return;
+    }
+    if (command === 'discord') {
+      const action = positionals.shift() ?? 'status';
+      if (positionals.length) throw new Error('Use teapilot discord setup|start|status|remove.');
+      if (!ui && ['setup', 'remove'].includes(action)) throw new Error(`teapilot discord ${action} requires an interactive terminal.`);
+      const { discord } = await import('./discord/index.js');
+      const discordUI = ui ?? { log: (text: string) => console.error(text), confirm: async () => false, input: async () => '', choose: async () => 0 };
+      process.exitCode = await discord(action, { directory, cwd: resolve(values.cwd), ui: discordUI, signal: controller.signal }) ? 0 : 2;
       return;
     }
     let config;

@@ -46,6 +46,10 @@ teapilot ask --web "Research current information and cite sources"
 
 Only that request receives search. Search returns bounded snippets and does not fetch arbitrary pages. Noninteractive requests fail if search is unavailable rather than silently answering without it.
 
+## Discord
+
+Optional and separate from `teapilot setup`: `teapilot discord setup|start|status|remove` lets allowlisted Discord users run sessions on this computer while `teapilot discord start` is open. See [Discord](04-discord.md).
+
 ## Output and status
 
 Use `--json` when stdout must be machine-readable. Set `NO_COLOR` to disable colour and `--no-motion` (or `TEAPILOT_NO_MOTION=1`) to disable the activity indicator.
