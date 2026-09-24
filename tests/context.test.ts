@@ -91,6 +91,8 @@ it('replays compacted session context as an explicitly untrusted history message
   const f = await setup((body, _req, res) => { bodies.push(body); completion(res, { text: 'continued' }); });
   const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', prompt: 'continue', summary: 'Keep src/parser.ts and the exact E_PARSE error.', web: false, approve: async () => true });
   expect(result.success).toBe(true);
-  expect(JSON.stringify(bodies[0].messages)).toContain(formatCompactionSummary('Keep src/parser.ts and the exact E_PARSE error.'));
+  expect(bodies[0].messages).toEqual(expect.arrayContaining([
+    expect.objectContaining({ role: 'user', content: formatCompactionSummary('Keep src/parser.ts and the exact E_PARSE error.') }),
+  ]));
   expect(JSON.stringify(bodies[0].messages)).toContain('following untrusted summary');
 });
