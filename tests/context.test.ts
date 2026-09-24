@@ -96,3 +96,28 @@ it('replays compacted session context as an explicitly untrusted history message
   ]));
   expect(JSON.stringify(bodies[0].messages)).toContain('following untrusted summary');
 });
+
+
+it('compacts once and retries the same pending step after local context rejection', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => {
+    bodies.push(body);
+    const serialized = JSON.stringify(body.messages);
+    if (serialized.includes('structured context checkpoint')) {
+      completion(res, { text: '## Goal\nContinue the task.\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- [x] Older context summarized.\n\n### In Progress\n- [ ] Continue.\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n1. Continue.\n\n## Critical Context\n- Preserve the latest user step.' });
+    } else {
+      completion(res, { text: 'recovered' });
+    }
+  });
+  const noisy = '!'.repeat(6000);
+  const result = await runAttempt({
+    ...f, tier: 'normal', workload: 'ask', prompt: 'continue', web: false, approve: async () => true,
+    history: [{ user: noisy, assistant: noisy }, { user: noisy, assistant: noisy }],
+  });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(result.text).toBe('recovered');
+  expect(bodies).toHaveLength(2);
+  const recorded = await events(f.config);
+  expect(recorded.filter(event => event.type === 'compaction_retry')).toHaveLength(1);
+  expect(recorded.some(event => event.type === 'context_admission' && event.rejection === 'context_limit')).toBe(true);
+});
