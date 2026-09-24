@@ -31,6 +31,34 @@ it('lists and searches without approval, respecting ignore rules and file bounda
   await expect(run(0, {})).rejects.toThrow('Missing repository.read');
 });
 
+it('summarises a root with many subdirectories instead of a depth-first dump', async () => {
+  const f = await setup();
+  for (let i = 0; i < 15; i++) {
+    const dir = join(f.cwd, `repo-${i}`);
+    await mkdir(dir);
+    for (let j = 0; j < 30; j++) await writeFile(join(dir, `file-${j}.ts`), 'x'.repeat(50));
+  }
+  const tools = repositoryTools(new ExecutionPolicy(f.cwd, f.config, async () => { throw new Error('Unexpected approval'); }));
+  const run = async (args: unknown) => JSON.parse((await tools[0]!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join(''));
+  const listing = await run({});
+  expect(JSON.stringify(listing.results).length).toBeLessThan(4096);
+  expect(listing.truncated).toBe(true);
+  expect(listing.note).toMatch(/subdirector/i);
+  expect(listing.results).toHaveLength(15);
+  expect(listing.results).toContain('repo-0/ (30 files)');
+});
+
+it('lists an empty child directory instead of omitting it', async () => {
+  const f = await setup();
+  await mkdir(join(f.cwd, 'self-contained-pong-v2'));
+  await writeFile(join(f.cwd, 'readme.md'), 'hi');
+  const tools = repositoryTools(new ExecutionPolicy(f.cwd, f.config, async () => { throw new Error('Unexpected approval'); }));
+  const run = async (args: unknown) => JSON.parse((await tools[0]!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join(''));
+  const listing = await run({});
+  expect(listing.results).toContain('self-contained-pong-v2/ (empty)');
+  expect(listing.results).toContain('readme.md');
+});
+
 it('gives repeated equivalent inspection one recovery opportunity and invalidates checks on edits', () => {
   const evidence = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
   evidence.observe('repo_list', {}, false, 'empty');
