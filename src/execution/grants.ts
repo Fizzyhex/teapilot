@@ -1,9 +1,14 @@
 import { realpath } from 'node:fs/promises';
-import type { Config } from '../config.js';
+import type { Config, Workload } from '../config.js';
 import type { EventSink } from '../integration/events.js';
 import type { Approve } from './policy.js';
 
-export type Mode = 'chat' | 'ask' | 'code';
+export const modes = ['chat', 'ask', 'code'] as const;
+export type Mode = typeof modes[number];
+export const isMode = (value: unknown): value is Mode => modes.includes(value as Mode);
+/** Modes are the user-facing session shape; workloads are the routed capability family. */
+export const workloadFor = (mode: Mode): Workload => mode === 'code' ? 'coder' : 'ask';
+export const modeFor = (workload?: Workload): Mode => workload === 'coder' ? 'code' : 'ask';
 export type Permission = Config['policy']['permissions'][number];
 export const permissions: Permission[] = ['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search'];
 export const repositoryPermissions: Permission[] = ['repository.read', 'repository.write', 'repository.shell'];

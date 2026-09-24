@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
-import { configDirectory, loadConfig, type Workload } from './config.js';
+import { configDirectory, isTierPreference, loadConfig, tierPreferences, type Workload } from './config.js';
 import { runHost, type HostRequest } from './host.js';
-import { runChat } from './chat.js';
+import { runSession } from './chat.js';
 import { doctor } from './diagnostics.js';
 import { setup } from './setup/index.js';
 import { ManagedSearch } from './setup/searxng.js';
@@ -12,22 +12,23 @@ import type { Approve } from './execution/policy.js';
 import { serve } from './integration/service.js';
 import { SearchSetupError } from './search.js';
 import { TerminalPresentation } from './presentation.js';
-import { SessionGrants, type Mode } from './execution/grants.js';
+import { isMode, SessionGrants } from './execution/grants.js';
 
 const help = `teapilot — local and hosted personal agent
 
 teapilot setup
-teapilot ask "Explain dependency injection"
+teapilot ask ["Explain dependency injection"]
 teapilot chat ["Help me think through an idea"]
-teapilot code --cwd <repository> "Fix the failing tests"
+teapilot code --cwd <repository> ["Fix the failing tests"]
+teapilot --prompt "Summarise this idea"   (one-shot, no session)
 teapilot doctor [--live]
 teapilot search status|start|stop|remove
 teapilot serve --stdio
 
   Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json  --once  --tier auto|fast|normal|reasoning|deep
          --correction TEXT  --no-motion  --verbose (setup progress)  --help
-Hosted routing also accepts a bare prompt. Direct routing uses ask/chat/code.
-Interactive ask/chat/code sessions use /exit or /quit to leave; --once stops after one turn.
+A bare prompt (positional or --prompt) runs once; direct routing asks for a workload first.
+ask/chat/code share one session interface: the opening prompt is optional, /exit or /quit leaves, --once stops after one turn.
 Approvals require an interactive terminal. Local setup needs no API key.
 
 Unattended setup (existing local endpoint, new config only):
@@ -98,18 +99,18 @@ async function main(): Promise<void> {
       process.exitCode = await doctor(config, values.cwd, { live: values.live, signal: controller.signal, consent: async message => ui ? ui.confirm(redact(message)) : false, activity: presentation.activity, log: text => presentation.write(redact(text) + '\n', 'stdout') }) ? 0 : 1;
       return;
     }
-    let workload: Workload | undefined = command === 'code' ? 'coder' : (command === 'ask' || command === 'chat') ? 'ask' : undefined;
-    if (config.routingMode === 'direct' && !workload) {
+    // ask, chat and code share one session interface; only their starting mode differs.
+    const mode = isMode(command) ? command : undefined;
+    let workload: Workload | undefined;
+    if (config.routingMode === 'direct' && !mode) {
       if (!ui) throw new Error('Direct routing requires teapilot ask or teapilot code.');
       workload = await ui.choose('What would you like to do?', ['Ask a question (no repository tools)', 'Work on code in the selected repository']) === 0 ? 'ask' : 'coder';
     }
-    const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui && command !== 'chat' ? await ui.prompt('teapilot', resolve(values.cwd)) : '');
+    const prompt = values.prompt ?? (positionals.length ? positionals.join(' ') : ui && !mode ? await ui.prompt('teapilot', resolve(values.cwd)) : '');
     if (!prompt.trim() && !interactive) throw new Error('Supply a prompt; use teapilot setup for first use or --help for examples.');
-    const tier = values.tier === undefined ? undefined : ['auto', 'fast', 'normal', 'reasoning', 'deep'].includes(values.tier) ? values.tier as HostRequest['tier'] : (() => { throw new Error('--tier must be auto, fast, normal, reasoning, or deep.'); })();
-    const request = { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, tier, signal: controller.signal };
-    const sessionMode: Mode = command === 'code' ? 'code' : command === 'ask' ? 'ask' : 'chat';
-    const authorization = ['ask', 'chat', 'code'].includes(command ?? '') ? await SessionGrants.create(request.cwd, config, sessionMode, Boolean(values.web)) : undefined;
-    const sessionRequest = authorization ? { ...request, authorization, mode: sessionMode, conversational: command === 'chat' } : request;
+    if (values.tier !== undefined && !isTierPreference(values.tier)) throw new Error(`--tier must be ${tierPreferences.join(', ')}.`);
+    const tier = values.tier;
+    const request: HostRequest = { prompt, workload, cwd: resolve(values.cwd), web: values.web, correction: values.correction, tier, signal: controller.signal };
     const dependencies = { approve, onActivity: presentation.setActivity, onProgress: (message: string) => presentation.log(redact(message)), onEvent: (event: import('./integration/events.js').HostEvent) => presentation.event(event) };
     const execute = async (request: HostRequest) => {
       let result;
@@ -129,13 +130,14 @@ async function main(): Promise<void> {
       if (!values.json) presentation.log(`\nResult: ${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
       return result;
     };
-    if (['ask', 'chat', 'code'].includes(command ?? '')) {
-      if (interactive && !values.json && !values.once) presentation.log(`${sessionMode[0]!.toUpperCase()}${sessionMode.slice(1)} session started. Type /exit or /quit to leave.`);
-      process.exitCode = await runChat({ request: sessionRequest, maxPromptChars: config.policy.limits.maxPromptChars,
+    if (mode) {
+      const authorization = await SessionGrants.create(request.cwd, config, mode, Boolean(values.web));
+      if (interactive && !values.json && !values.once) presentation.log(`${mode[0]!.toUpperCase()}${mode.slice(1)} session started. Type /exit or /quit to leave.`);
+      process.exitCode = await runSession({ request: { ...request, authorization, mode }, maxPromptChars: config.policy.limits.maxPromptChars,
         input: state => ui ? ui.prompt('>', resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted' }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
         run: execute, once: Boolean(values.once || values.json || !interactive), approve, log: message => presentation.log(message), onEvent: dependencies.onEvent });
     } else {
-      const result = await execute(sessionRequest);
+      const result = await execute(request);
       process.exitCode = result.success ? 0 : 2;
     }
   } finally { presentation.close(); ui?.close(); process.removeListener('SIGINT', onInterrupt); }

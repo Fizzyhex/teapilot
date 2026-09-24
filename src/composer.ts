@@ -2,14 +2,14 @@ import { homedir } from 'node:os';
 import { isAbsolute, relative, sep } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import type { Mode, Permission } from './execution/grants.js';
-import type { Tier } from './config.js';
+import type { TierPreference } from './config.js';
 
 export interface ChatPromptState {
   spentUsd: number;
   lastModel?: string;
   mode?: Mode;
   grants?: Permission[];
-  tier?: Tier | 'auto';
+  tier?: TierPreference;
 }
 
 export interface ComposerContext extends ChatPromptState {

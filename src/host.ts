@@ -4,7 +4,7 @@ import { mkdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import { runAttempt, type AttemptResult } from './agents/run.js';
-import { tiers, type Config, type Tier, type Workload } from './config.js';
+import { tiers, type Config, type Tier, type TierPreference, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
 import { prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
 import { lockState, SpendGovernor } from './inference/budget.js';
@@ -17,7 +17,7 @@ import { withPrerequisites, type Mode, type SessionGrants, type Permission } fro
 import { capabilityPlanner, readRoutingPlan } from './routing/intent.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; chat?: boolean; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; tier?: Tier | 'auto'; relatedTier?: Tier; sessionId?: string; taskId?: string }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
@@ -222,7 +222,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       models.push(modelFor(config, tier).id);
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
       previous = await runAttempt({
-        config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), chat: request.chat, budget, telemetry,
+        config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
         mode: request.mode, conversational: request.conversational, authorization: request.authorization,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {

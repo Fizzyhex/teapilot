@@ -22,7 +22,9 @@ Use the repository root with `--cwd`. Paths containing spaces work in PowerShell
 
 ## Interactive use
 
-Ask, Chat, and Code are conversational in an interactive terminal. An opening prompt runs immediately and the composer remains available. Use `--once` for one turn; `--json` and noninteractive input are automatically one-shot. Type `/exit` or `/quit` to leave; Ctrl+D exits at an empty prompt, and Ctrl+C cancels.
+Ask, Chat, and Code share one session interface and differ only in their starting mode and default access. The opening prompt is optional: when supplied it runs immediately, and the composer remains available either way. Use `--once` for one turn; `--json` and noninteractive input are automatically one-shot. Type `/exit` or `/quit` to leave; Ctrl+D exits at an empty prompt, and Ctrl+C cancels.
+
+For a single request without a session, omit the command: `teapilot --prompt "..."` (or `teapilot "..."`) runs once and exits. With direct routing in a terminal, TeaPilot first asks whether the request is a question or code work.
 
 Session commands preserve spending and grants unless stated otherwise:
 

@@ -1,12 +1,18 @@
 import type { HostRequest, HostResult } from './host.js';
 import { prepareConversation, type ConversationTurn } from './integration/events.js';
 import type { ChatPromptState } from './composer.js';
-import { permissions, repositoryPermissions, type Mode } from './execution/grants.js';
+import { isMode, modes, permissions, repositoryPermissions, workloadFor, type Mode } from './execution/grants.js';
 import type { Approve } from './execution/policy.js';
 import type { EventSink } from './integration/events.js';
-import type { Tier } from './config.js';
+import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
-/** A session stays interactive even when an opening prompt was supplied. */
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /permissions, /revoke <permission>, /exit, /quit`;
+
+/**
+ * One session loop for every mode (chat, ask, code). The mode selects instructions
+ * and default access; history, tiers, grants and commands behave identically.
+ * A session stays interactive even when an opening prompt was supplied.
+ */
 export async function runSession(options: {
   request: HostRequest;
   maxPromptChars: number;
@@ -22,7 +28,7 @@ export async function runSession(options: {
   const grants = options.request.authorization;
   let prompt = options.request.prompt;
   let correction = options.request.correction;
-  let tier: Tier | 'auto' = options.request.tier ?? 'auto';
+  let tier: TierPreference = options.request.tier ?? 'auto';
   let relatedTier: Tier | undefined = options.request.relatedTier;
   let exitCode = 0;
   let spentUsd = 0;
@@ -44,23 +50,25 @@ export async function runSession(options: {
       else if (command === '/revoke' && !extra && permissions.includes(value as typeof permissions[number])) {
         grants?.revoke(value as typeof permissions[number], options.onEvent);
         options.log?.(`Session access: ${grants?.list().join(', ') || 'none'}`);
-      } else if (command === '/tier' && !extra && ['auto', 'fast', 'normal', 'reasoning', 'deep'].includes(value ?? '')) {
-        tier = value as Tier | 'auto'; options.log?.(`Tier preference: ${tier}`);
+      } else if (command === '/tier' && !extra && isTierPreference(value)) {
+        tier = value; options.log?.(`Tier preference: ${tier}`);
       } else if (command === '/new' && !value) {
         history = []; correction = undefined; relatedTier = undefined; tier = 'auto'; options.log?.('Started a new task. Session access and spending remain available.');
-      } else if (command === '/mode' && !extra && ['chat', 'ask', 'code'].includes(value ?? '')) {
+      } else if (command === '/mode' && !extra && isMode(value)) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,
           async (type, fields) => { options.onEvent?.({ type, ...fields }); });
-        if (approved) { mode = value as Mode; options.log?.(`Mode: ${mode}`); }
+        if (approved) { mode = value; options.log?.(`Mode: ${mode}`); }
         else options.log?.('Code access was not approved; mode unchanged.');
-      } else options.log?.('Commands: /mode chat|ask|code, /tier auto|fast|normal|reasoning|deep, /new, /permissions, /revoke <permission>, /exit, /quit');
+      } else options.log?.(sessionHelp);
       prompt = '';
       if (options.once) break;
       continue;
     }
-    const result = await options.run({ ...options.request, prompt, correction, tier, relatedTier,
-      ...(grants ? { mode, workload: undefined, conversational: !options.once } : { workload: 'ask' as const, chat: true }), history });
+    // With session grants the host routes by mode and activates access on demand;
+    // without them the mode's workload is fixed for the turn.
+    const result = await options.run({ ...options.request, prompt, correction, tier, relatedTier, history,
+      mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode) });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;
@@ -74,5 +82,5 @@ export async function runSession(options: {
   return exitCode;
 }
 
-// Compatibility for existing embedders; CLI modes all use runSession.
+// Compatibility for existing embedders; CLI ask/chat/code all use runSession.
 export const runChat = runSession;

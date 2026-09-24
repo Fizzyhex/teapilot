@@ -22,6 +22,9 @@ const modelSchema = z.object({
 
 export const tiers = ['fast', 'normal', 'reasoning', 'deep'] as const;
 export type Tier = typeof tiers[number];
+export const tierPreferences = ['auto', ...tiers] as const;
+export type TierPreference = typeof tierPreferences[number];
+export const isTierPreference = (value: unknown): value is TierPreference => tierPreferences.includes(value as TierPreference);
 export const physicalModels = ['fast', 'capable'] as const;
 export type PhysicalModel = typeof physicalModels[number];
 export type Workload = 'coder' | 'ask';

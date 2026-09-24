@@ -4,7 +4,7 @@ import { Type, type Message } from '@earendil-works/pi-ai';
 import { emptyUsage } from '../integration/inference.js';
 import type { Config, Tier, Workload } from '../config.js';
 import { modelFor, effectiveProfile } from '../routing/execution.js';
-import { withPrerequisites, type Mode, type Permission } from '../execution/grants.js';
+import { modeFor, withPrerequisites, type Mode, type Permission } from '../execution/grants.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from '../execution/policy.js';
 import { StreamRedactor, type EventSink, type ConversationTurn } from '../integration/events.js';
 import type { SpendGovernor } from '../inference/budget.js';
@@ -18,7 +18,6 @@ export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
   budget: SpendGovernor; telemetry: Telemetry; approve: Approve; signal?: AbortSignal;
   history?: ConversationTurn[]; onEvent?: EventSink; onActivity?: ActivitySink; beforeMutation?: BeforeMutation;
-  chat?: boolean;
   mode?: Mode; conversational?: boolean; authorization?: import('../execution/grants.js').SessionGrants;
   activePermissions?: Permission[];
   requestCapabilities?: (required: Permission[], reason: string, signal?: AbortSignal) => Promise<boolean>;
@@ -65,7 +64,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         ['write', 'edit'].includes(tool.name) ? 'repository.write' : ['bash', 'powershell'].includes(tool.name) ? 'repository.shell' : 'repository.read')));
       setup.systemPrompt += '\n' + repositorySetup.systemPrompt;
     }
-    const mode = input.mode ?? (input.chat ? 'chat' : input.workload === 'coder' ? 'code' : 'ask');
+    const mode = input.mode ?? modeFor(input.workload);
     setup.systemPrompt += mode === 'chat'
       ? '\nChat mode: this is an ongoing back-and-forth conversation. Build on previous turns and explore the user’s goals. Ask clarifying questions when useful.'
       : mode === 'ask' ? '\nAsk mode: give focused answers, research, and plans. Ask questions only when needed to answer accurately.'

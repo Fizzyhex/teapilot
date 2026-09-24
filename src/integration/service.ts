@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { z } from 'zod';
 import { parse } from 'dotenv';
-import { loadConfig, userConfigDir, type Config } from '../config.js';
+import { loadConfig, tierPreferences, userConfigDir, type Config } from '../config.js';
 import { runHost } from '../host.js';
 import { doctor } from '../diagnostics.js';
 import { setup } from '../setup/index.js';
@@ -18,7 +18,7 @@ import { Review, cleanReviews, readReview, readReviewText } from './review.js';
 export const PROTOCOL_VERSION = 1;
 const id = z.string().min(1).max(100);
 const envelope = z.object({ version: z.literal(PROTOCOL_VERSION), id, method: z.string(), params: z.unknown().optional() }).strict();
-const runSchema = z.object({ prompt: z.string().min(1).max(20_000), cwd: z.string().min(1), workload: z.enum(['ask', 'coder']), tier: z.enum(['auto', 'fast', 'normal', 'reasoning', 'deep']).optional(), sessionId: id.optional(), taskId: id.optional(), web: z.boolean().optional(), context: contextSchema.optional(), history: historySchema.optional(), review: z.boolean().optional() }).strict();
+const runSchema = z.object({ prompt: z.string().min(1).max(20_000), cwd: z.string().min(1), workload: z.enum(['ask', 'coder']), tier: z.enum(tierPreferences).optional(), sessionId: id.optional(), taskId: id.optional(), web: z.boolean().optional(), context: contextSchema.optional(), history: historySchema.optional(), review: z.boolean().optional() }).strict();
 const initSchema = z.object({ configDir: z.string().optional(), secrets: z.record(z.string().regex(/^[A-Z][A-Z0-9_]*$/), z.string()).default({}), managed: z.boolean().default(false) }).strict();
 const reviewSchema = z.object({ id: z.string(), index: z.number().int().nonnegative().optional(), side: z.enum(['before', 'after']).optional() }).strict();
 
