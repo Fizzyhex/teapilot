@@ -66,3 +66,53 @@ it('stops the queue on cancellation without starting subsequent downloads', asyn
   await expect(selectOllamaModel(prompts, controller.signal)).rejects.toThrow();
   expect(operations.filter(op => op.path === '/api/pull')).toEqual([]);
 });
+
+it('prunes stale generations after successful save, keeping active plus one previous', async () => {
+  const { pruneGenerations } = await import('../src/setup/index.js');
+  const { join } = await import('node:path');
+  const { mkdtemp, writeFile, readdir, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+
+  const tmpDir = await mkdtemp(join(tmpdir(), 'prune-'));
+  try {
+    // Create 4 old generations with staggered mtimes (using old UUIDs)
+    const oldUuids = ['uuid-1111-1111-1111-111111111111', 'uuid-2222-2222-2222-222222222222', 'uuid-3333-3333-3333-333333333333', 'uuid-4444-4444-4444-444444444444'];
+    for (let i = 0; i < oldUuids.length; i++) {
+      const uuid = oldUuids[i];
+      await writeFile(join(tmpDir, `models-${uuid}.json`), '{}');
+      await writeFile(join(tmpDir, `policy-${uuid}.json`), '{}');
+      if (i < 3) await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    // Create .env pointing to the most recent old generation
+    const activeUuid = oldUuids[3];
+    const envContent = `TEAPILOT_MODELS_FILE="models-${activeUuid}.json"\nTEAPIPOLT_POLICY_FILE="policy-${activeUuid}.json"\n`;
+    await writeFile(join(tmpDir, '.env'), envContent);
+
+    // Call pruneGenerations which should keep active + 1 previous and delete the rest
+    await pruneGenerations(tmpDir);
+
+    // Check what generations remain
+    const files = await readdir(tmpDir);
+    const generationFiles = files.filter(f => /^(models|policy)-.*\.json$/.test(f));
+
+    // Should have 2 pairs (4 files total): the active + 1 most recent previous
+    expect(generationFiles).toHaveLength(4);
+
+    // Verify the active generation still exists
+    expect(files).toContain(`models-${oldUuids[3]}.json`);
+    expect(files).toContain(`policy-${oldUuids[3]}.json`);
+
+    // Verify the most recent previous generation still exists
+    expect(files).toContain(`models-${oldUuids[2]}.json`);
+    expect(files).toContain(`policy-${oldUuids[2]}.json`);
+
+    // Verify older generations are deleted
+    expect(files).not.toContain(`models-${oldUuids[0]}.json`);
+    expect(files).not.toContain(`policy-${oldUuids[0]}.json`);
+    expect(files).not.toContain(`models-${oldUuids[1]}.json`);
+    expect(files).not.toContain(`policy-${oldUuids[1]}.json`);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});

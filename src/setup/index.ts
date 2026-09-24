@@ -1,6 +1,6 @@
 import { during } from '../activity.js';
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, rm } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
 import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config, type Tier } from '../config.js';
@@ -29,6 +29,60 @@ async function privateWrite(path: string, contents: string, signal: AbortSignal)
   } finally { await handle.close(); }
 }
 
+export async function pruneGenerations(directory: string): Promise<void> {
+  try {
+    // Read active generation filenames from .env
+    const envPath = resolve(directory, '.env');
+    const envContent = await readFile(envPath, 'utf8');
+    const envVars = parse(envContent);
+    const activeModelsFile = envVars.TEAPILOT_MODELS_FILE;
+    const activePolicyFile = envVars.TEAPILOT_POLICY_FILE;
+
+    // Extract active generation UUID
+    const activeUuid = activeModelsFile?.match(/^models-(.+?)\.json$/)?.[1];
+    if (!activeUuid) return;
+
+    // List all generation files
+    const files = await readdir(directory);
+    const generationRegex = /^(models|policy)-(.+?)\.json$/;
+    const generations = new Map<string, { models: string; policy: string; mtime?: number }>();
+
+    for (const file of files) {
+      const match = file.match(generationRegex);
+      if (!match || !match[1] || !match[2]) continue;
+      const type = match[1]!, uuid = match[2]!;
+      if (!generations.has(uuid)) generations.set(uuid, { models: '', policy: '' });
+      const gen = generations.get(uuid)!;
+      if (type === 'models') gen.models = file;
+      else if (type === 'policy') gen.policy = file;
+    }
+
+    // Get mtimes for sorting (skip errors)
+    for (const [uuid, gen] of generations) {
+      try {
+        const stats = await stat(resolve(directory, gen.models));
+        gen.mtime = stats.mtime?.getTime() ?? 0;
+      } catch { }
+    }
+
+    // Identify generations to delete: keep active + 1 most recent previous
+    const toDelete = new Set<string>();
+    const otherUuids = Array.from(generations.keys())
+      .filter(uuid => uuid !== activeUuid)
+      .sort((a, b) => (generations.get(b)?.mtime ?? 0) - (generations.get(a)?.mtime ?? 0));
+
+    // Delete all except first (most recent)
+    for (const uuid of otherUuids.slice(1)) toDelete.add(uuid);
+
+    // Delete files
+    for (const uuid of toDelete) {
+      const gen = generations.get(uuid)!;
+      try { await rm(resolve(directory, gen.models), { force: true }); } catch { }
+      try { await rm(resolve(directory, gen.policy), { force: true }); } catch { }
+    }
+  } catch { }
+}
+
 export async function saveConfiguration(directory: string, config: Config, env: Record<string, string>, signal: AbortSignal): Promise<void> {
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
   env = { ...env };
@@ -51,6 +105,7 @@ export async function saveConfiguration(directory: string, config: Config, env: 
     await privateWrite(pending, Object.entries(values).map(([key, value]) => `${key}="${value}"`).join('\n') + '\n', signal);
     signal.throwIfAborted();
     await rename(pending, resolve(directory, '.env'));
+    await pruneGenerations(directory);
   } finally { await rm(pending, { force: true }); }
 }
 
