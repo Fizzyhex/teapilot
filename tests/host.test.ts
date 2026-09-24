@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFile, writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runHost } from '../src/host.js';
+import { SessionGrants } from '../src/execution/grants.js';
 import { completion, events, fixture, jev, mockServer, type Handler } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -347,6 +348,44 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Research current facts', web: true }, { approve: async () => false });
     expect(result.success).toBe(true);
     expect(searches).toBe(2);
+  });
+
+  it('lists observed file edits with their size even when the workload label never becomes coder.*', async () => {
+    // Mirrors the reviewed session: JevRouter's low-confidence fallback keeps the
+    // workload at ask.normal, but a mid-run capability grant still writes a file.
+    let calls = 0;
+    const f = await fixture(); cleanups.push(f.cleanup);
+    const server = await mockServer((_body, _req, res) => {
+      calls++;
+      if (calls === 1) completion(res, { tool: { name: 'request_capabilities', arguments: { permissions: ['repository.write'] } } });
+      else if (calls === 2) completion(res, { tool: { name: 'write', arguments: { path: 'granted.txt', content: 'approved\n' } } });
+      else completion(res, { tool: { name: 'read', arguments: { path: 'granted.txt' } } });
+    });
+    cleanups.push(server.close);
+    f.config.routingMode = 'direct';
+    f.config.models.capable.baseUrl = server.url;
+    f.config.policy.limits.maxToolCalls = 2;
+    const grants = await SessionGrants.create(f.cwd, f.config, 'chat');
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Create granted.txt', mode: 'chat', authorization: grants }, {
+      localProbe: async () => true,
+      approve: async approval => approval.kind === 'capability',
+    });
+    expect(result.capability).toBe('ask.normal');
+    expect(result.status).toBe('tool_limit');
+    expect(result.text).toContain(`Observed file edits: granted.txt (${Buffer.byteLength('approved\n')} B).`);
+    expect(result.text).not.toContain('none recorded');
+    expect(await readFile(join(f.cwd, 'granted.txt'), 'utf8')).toBe('approved\n');
+  });
+
+  it('offers concrete next steps on a context-limit stop', async () => {
+    const f = await setup((_body, req, res) => {
+      if (req.url === '/jev') jev(res, 'ask.normal');
+      else if (req.url?.endsWith('/models')) res.end('{}');
+      else completion(res, { text: 'unused' });
+    });
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'x!'.repeat(6000) }, { approve: async () => false });
+    expect(result.status).toBe('context_limit');
+    expect(result.text).toContain('Next: Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.');
   });
 
   it('does not retry an interrupted local request or expose provider errors', async () => {

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { MarkdownOutput, TerminalPresentation, terminalColour } from '../src/presentation.js';
+import { describeTool, MarkdownOutput, TerminalPresentation, terminalColour } from '../src/presentation.js';
 
 const ttyDescriptors = [process.stdout, process.stderr].map(stream => Object.getOwnPropertyDescriptor(stream, 'isTTY'));
 afterEach(() => {
@@ -30,6 +30,29 @@ it('keeps redirected, no-colour, and dumb terminal formatting plain', () => {
   let output = '';
   const markdown = new MarkdownOutput(text => output += text, false);
   markdown.push('**bold**'); markdown.finish(); expect(output).toBe('**bold**');
+});
+it('describes a completed tool call for the progress trail', () => {
+  expect(describeTool({ type: 'tool_execution_end', tool: 'write', path: 'index.html', size: 13312 })).toBe('write index.html (13 KB)');
+  expect(describeTool({ type: 'tool_execution_end', tool: 'edit', path: 'index.html', size: 200 })).toBe('edit index.html (200 B)');
+  expect(describeTool({ type: 'tool_execution_end', tool: 'read', path: 'index.html' })).toBe('read index.html');
+  expect(describeTool({ type: 'tool_execution_end', tool: 'powershell', command: 'mkdir x', isError: true })).toBe('shell: mkdir x — failed');
+  expect(describeTool({ type: 'tool_execution_end', tool: 'bash', command: 'npm test' })).toBe('shell: npm test');
+  expect(describeTool({ type: 'tool_execution_end', tool: 'repo_list' })).toBe('repo_list');
+});
+it('prints one progress line per finished tool call, plain without colour, none under --json', () => {
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
+  Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: true });
+  const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  new TerminalPresentation(false, true).event({ type: 'tool_execution_end', tool: 'write', path: 'index.html', size: 13312 });
+  expect(strip(write.mock.calls.map(call => String(call[0])).join(''))).toContain('write index.html (13 KB)\n');
+  expect(write.mock.calls.some(call => String(call[0]).includes('\x1b['))).toBe(true);
+  write.mockClear();
+  vi.stubEnv('NO_COLOR', '');
+  new TerminalPresentation(false, true).event({ type: 'tool_execution_end', tool: 'read', path: 'input.txt' });
+  expect(write.mock.calls.join('')).toBe('read input.txt\n');
+  write.mockClear();
+  new TerminalPresentation(true, true).event({ type: 'tool_execution_end', tool: 'write', path: 'index.html', size: 13312 });
+  expect(write).not.toHaveBeenCalled();
 });
 it('clears activity for approvals and cancellation and honours no-motion and JSON', () => {
   vi.useFakeTimers();
