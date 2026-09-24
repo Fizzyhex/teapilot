@@ -2,6 +2,7 @@ import type { HostEvent } from './integration/events.js';
 import { stripVTControlCharacters } from 'node:util';
 import type { Activity, ActivityUI } from './activity.js';
 import { loadClips, Playback, type Clips } from './art/playback.js';
+import { cellWidth, graphemes } from './composer.js';
 
 const ACTIVITY_COLOUR = '38;2;186;187;241'; // #babbf1
 // this is catpuccin lavender :3
@@ -50,6 +51,29 @@ export function terminalRows(text: string, columns: number): number | undefined 
   const plain = stripVTControlCharacters(text);
   if (/[^\x20-\x7e\n\u00a0-\u024f\u2010-\u2027]/u.test(plain)) return undefined;
   return plain.split('\n').reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / columns)), 0);
+}
+
+/** Rows occupied when wrapping is certain however the terminal sizes emoji,
+ * East Asian text or tabs: the narrowest and widest readings must agree. */
+export function certainRows(text: string, columns: number): number | undefined {
+  if (!columns) return undefined;
+  const plain = stripVTControlCharacters(text).replace(/\r(?=\n)/g, '');
+  if (/[\x00-\x08\x0b-\x1f\x7f]/.test(plain)) return undefined;
+  let total = 0;
+  for (const line of plain.split('\n')) {
+    let least = 0, most = 0;
+    if (/^[\x20-\x7e -ɏ‐-‧]*$/u.test(line)) least = most = line.length;
+    else for (const { segment } of graphemes(line)) {
+      if (segment === '\t') { least += 1; most += 8; }
+      else if (/^[\x20-\x7e -ɏ‐-‧]$/u.test(segment)) { least++; most++; }
+      // A cluster may render as one cell, or as two cells per code point.
+      else { least += Math.min(1, cellWidth(segment)); most += 2 * [...segment].length; }
+    }
+    const rows = Math.max(1, Math.ceil(least / columns));
+    if (rows !== Math.max(1, Math.ceil(most / columns))) return undefined;
+    total += rows;
+  }
+  return total;
 }
 
 export class TerminalPresentation implements ActivityUI {
@@ -150,6 +174,11 @@ export class TerminalPresentation implements ActivityUI {
     if (!this.tail) process.stderr.write(`\r\x1b[${this.belowRows + 1}A\x1b[2K\r\x1b[${this.belowRows + 1}B`);
     this.playback.stop(); this.forget();
   }
+  /** Literal output is untracked: keep the block, but stop redrawing it. */
+  private stopTracking(): void {
+    this.clear();
+    if (this.artRows.length && !this.prompt) this.freeze(); else this.playback.stop();
+  }
   /** Write output below the block, tracking the rows it occupies. */
   private output(text: string, target: 'stdout' | 'stderr' = 'stdout'): void {
     if (this.artRows.length && !this.prompt) {
@@ -157,11 +186,11 @@ export class TerminalPresentation implements ActivityUI {
       const lines = (this.tail + stripVTControlCharacters(text)).split('\n');
       const tail = lines.pop()!;
       let below: number | undefined = this.belowRows;
-      for (const line of lines) { const rows = terminalRows(line, columns); below = below === undefined || rows === undefined ? undefined : below + rows; }
-      const tailRows = terminalRows(tail, columns);
-      // Collapse before an unmeasurable write, while coordinates remain valid.
-      if (below === undefined || tailRows === undefined) this.collapse();
-      else if (below + tailRows - 1 + this.artRows.length >= (process.stderr.rows || 0)) this.freeze();
+      for (const line of lines) { const rows = certainRows(line, columns); below = below === undefined || rows === undefined ? undefined : below + rows; }
+      const tailRows = certainRows(tail, columns);
+      // Freeze before a write that is unmeasurable or would scroll the block away.
+      if (below === undefined || tailRows === undefined
+        || below + tailRows - 1 + this.artRows.length >= (process.stderr.rows || 0)) this.freeze();
       else { this.belowRows = below; this.tail = tail; }
     }
     process[target].write(text);
@@ -324,9 +353,9 @@ export class TerminalPresentation implements ActivityUI {
   private showPreview(): void {
     const text = this.markdown.preview;
     if (!text || this.literal) return;
-    const rows = terminalRows(text, process.stderr.columns || 0);
+    const rows = certainRows(text, process.stderr.columns || 0);
     if (!this.eligible() || !this.writable() || rows === undefined || rows + 19 >= process.stderr.rows) {
-      this.collapse(); this.literal = true; this.markdown.finish(); return;
+      this.stopTracking(); this.literal = true; this.markdown.finish(); return;
     }
     this.output(text + '\n'); this.previewRows = rows;
   }
@@ -347,9 +376,9 @@ export class TerminalPresentation implements ActivityUI {
       this.message += event.text;
       if (!this.literal) {
         const pending = (this.markdown.preview + event.text).split('\n').at(-1)!;
-        const rows = terminalRows(pending, process.stderr.columns || 0);
+        const rows = certainRows(pending, process.stderr.columns || 0);
         if (!this.writable() || rows === undefined || rows + 19 >= process.stderr.rows || pending.length > 4096) {
-          this.collapse(); this.literal = true; this.markdown.finish();
+          this.stopTracking(); this.literal = true; this.markdown.finish();
         }
       }
       if (this.literal) this.output(event.text);

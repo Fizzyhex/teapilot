@@ -4,7 +4,7 @@ import { PassThrough } from 'node:stream';
 import { Terminal } from '@xterm/headless';
 import { loadClips, parseClip, Playback } from '../src/art/playback.js';
 import * as assets from '../src/art/playback.js';
-import { TerminalPresentation } from '../src/presentation.js';
+import { certainRows, TerminalPresentation } from '../src/presentation.js';
 import { terminalUI } from '../src/setup/terminal.js';
 import '../src/prompt.js'; // Loaded lazily by terminalUI; preload so fake timers can drive it.
 import { during, terminalHandoff } from '../src/activity.js';
@@ -111,6 +111,27 @@ it('draws the typing block above a streamed response and collapses it at turn en
   expect(after).toContain('Response\nHello there\nsecond line');
   expect(after).not.toContain('Composing response'); expect(after).not.toMatch(/[@#]{3}/);
   p.close(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps animating above emoji, East Asian text and tabs, then collapses', async () => {
+  const p = present(); p.setActivity({ kind: 'composing', label: 'Composing response' });
+  p.event({ type: 'text', text: 'Done 🎉\n中文 text\n\tindented\n' });
+  expect(vi.getTimerCount()).toBe(1);
+  expect(await screen()).toContain('Composing response');
+  p.event({ type: 'message_end' }); p.event({ type: 'request_end' });
+  const after = await screen();
+  expect(after).toContain('Done 🎉'); expect(after).not.toMatch(/[@#]{3}/);
+  p.close();
+});
+
+it('measures rows only when every width reading agrees', () => {
+  expect(certainRows('plain\ntext', 80)).toBe(2);
+  expect(certainRows('🎉 party\n中文\n\tx', 80)).toBe(3);
+  expect(certainRows('中'.repeat(45), 80)).toBeUndefined();
+  expect(certainRows('中'.repeat(100), 80)).toBeUndefined();
+  expect(certainRows('中'.repeat(20), 80)).toBe(1);
+  expect(certainRows('a\rb', 80)).toBeUndefined();
+  expect(certainRows('line\r\n', 80)).toBe(2);
 });
 
 it('freezes the block in scrollback once a long response pushes it off-screen', async () => {
