@@ -123,7 +123,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
   };
   // The spacer row separates the composer from any artwork above it.
   if (context) { art?.begin(() => ({ rows: 1 + row, cols: cursorCols })); write('\r\n'); }
-  else write('\n\x1b[2mShift+Enter: send · Ctrl+D: exit\x1b[0m\n');
+  else write('\n\x1b[2mShift+Enter or Alt+Enter: send · Ctrl+D: exit\x1b[0m\n');
   // Kitty disambiguation and bracketed paste; pop the keyboard mode on exit.
   write('\x1b[>1u\x1b[?2004h');
   const raw = process.stdin.isRaw;

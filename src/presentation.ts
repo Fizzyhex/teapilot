@@ -99,6 +99,7 @@ export class TerminalPresentation implements ActivityUI {
   private prompt?: { touched: boolean; safe: boolean; label?: string; cursor: () => { rows: number; cols: number } };
   private contextRows = 0;
   private suppressed = false;
+  private pendingApproval = false;
   private suspended = 0;
   private closed = false;
   private lastLabel = '';
@@ -170,8 +171,16 @@ export class TerminalPresentation implements ActivityUI {
   }
   /** Leave the block in scrollback once relative redraws can no longer reach it. */
   private freeze(): void {
-    // Its status label would be stale there; the artwork itself may remain.
-    if (!this.tail) process.stderr.write(`\r\x1b[${this.belowRows + 1}A\x1b[2K\r\x1b[${this.belowRows + 1}B`);
+    // The block's own position is still known even when the write that
+    // triggered this is not: delete every row it drew while that is safe,
+    // rather than leaving a stray frame line behind. Only fall back to
+    // clearing the status label alone once the block may have scrolled off.
+    const rows = this.artRows.length;
+    if (!this.tail) {
+      if (rows && this.belowRows + rows < (process.stderr.rows || 0)) {
+        process.stderr.write(`\r\x1b[${this.belowRows + rows}A\x1b[${rows}M` + (this.belowRows ? `\x1b[${this.belowRows}B` : ''));
+      } else process.stderr.write(`\r\x1b[${this.belowRows + 1}A\x1b[2K\r\x1b[${this.belowRows + 1}B`);
+    }
     this.playback.stop(); this.forget();
   }
   /** Literal output is untracked: keep the block, but stop redrawing it. */
@@ -270,14 +279,18 @@ export class TerminalPresentation implements ActivityUI {
   approval(text: string): void {
     this.endMessage(); this.clipKind = undefined; this.collapse(); this.contextRows = 0;
     this.write(`${paint('Approval', '1;33', this.colour && !this.json)}\n${text}\n`);
+    // The next prompt is the confirmation for this approval: keep the command
+    // and "Approve this action?" adjacent, with no artwork drawn between them.
+    this.pendingApproval = true;
   }
 
   /** Start before readline.question, then paint only while its input is untouched. */
   beginPrompt(label: string, cursor: () => { rows: number; cols: number }): void {
     this.endMessage(); this.clipKind = undefined; this.collapse();
     this.suppressed = false;
+    const pendingApproval = this.pendingApproval; this.pendingApproval = false;
     const rows = terminalRows(label, process.stderr.columns || 0);
-    const clips = this.eligible() && rows !== undefined && this.contextRows + rows + 19 < process.stderr.rows ? loadClips() : undefined;
+    const clips = !pendingApproval && this.eligible() && rows !== undefined && this.contextRows + rows + 19 < process.stderr.rows ? loadClips() : undefined;
     this.prompt = { touched: false, safe: Boolean(clips), label: 'Waiting for your input...', cursor };
     if (clips) {
       this.listen();

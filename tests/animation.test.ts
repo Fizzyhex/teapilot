@@ -113,6 +113,24 @@ it('draws the typing block above a streamed response and collapses it at turn en
   p.close(); expect(vi.getTimerCount()).toBe(0);
 });
 
+it('fully erases every row of a frozen block before result text prints, leaving no stray frame line', async () => {
+  const clips = loadClips()!;
+  const p = present(); p.setActivity({ kind: 'composing', label: 'Composing response' });
+  vi.advanceTimersByTime(300);
+  // An unmeasurable write (wide/ambiguous cell width) forces the block to
+  // freeze mid-stream, while it is still fully within the visible viewport.
+  p.event({ type: 'text', text: '中'.repeat(45) });
+  expect(vi.getTimerCount()).toBe(0);
+  p.event({ type: 'message_end' }); p.event({ type: 'request_end' });
+  p.log('Result: completed');
+  p.close();
+  const visible = await screen();
+  expect(visible).not.toContain('Composing response');
+  // None of the mascot's rows should remain in front of the result line.
+  for (const frame of clips.typing.frames) expect(visible).not.toContain(artRow(frame));
+  expect(visible).toContain('Result: completed');
+});
+
 it('keeps animating above emoji, East Asian text and tabs, then collapses', async () => {
   const p = present(); p.setActivity({ kind: 'composing', label: 'Composing response' });
   p.event({ type: 'text', text: 'Done 🎉\n中文 text\n\tindented\n' });
@@ -292,5 +310,40 @@ it('suppresses artwork for long approvals and cancels a prompt without leaving t
   const question = ui.confirm('Approve?');
   expect(chunks.join('')).not.toContain('Waiting for your input');
   controller.abort(); expect(await question).toBe(false);
+  p.close(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps the command adjacent to a short approval, with no mascot drawn between them', async () => {
+  const p = present();
+  p.approval('Run powershell?\nmkdir self-contained-pong-v2 && cd self-contained-pong-v2');
+  const controller = new AbortController(); const ui = terminalUI(controller.signal, p); uis.push(ui);
+  const question = ui.confirm('Approve this action?');
+  // Plenty of room is available (80x40), so without the fix this would draw
+  // the paws clip; the approval must suppress it regardless of room.
+  expect(chunks.join('')).not.toContain('Waiting for your input');
+  expect(chunks.join('')).not.toMatch(/[@#]{3}/);
+  const visible = await screen();
+  const approvalRow = visible.split('\n').findIndex(line => line.includes('mkdir self-contained-pong-v2'));
+  const questionRow = visible.split('\n').findIndex(line => line.includes('Approve this action?'));
+  expect(approvalRow).toBeGreaterThanOrEqual(0);
+  expect(questionRow).toBe(approvalRow + 1);
+  input.emit('data', Buffer.from('yes\r'));
+  expect(await question).toBe(true);
+  controller.abort(); p.close(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('does not draw a mascot for an ordinary confirm question that immediately follows an approval', async () => {
+  // A stale pendingApproval flag must not leak into an unrelated later prompt.
+  const p = present();
+  p.approval('Run powershell?\nsomething');
+  const controller = new AbortController(); const ui = terminalUI(controller.signal, p); uis.push(ui);
+  const first = ui.confirm('Approve this action?');
+  input.emit('data', Buffer.from('yes\r')); expect(await first).toBe(true);
+  chunks = [];
+  const second = ui.input('Unrelated question');
+  await vi.advanceTimersByTimeAsync(300);
+  // Once the approval is consumed, ordinary prompts may draw art again when eligible.
+  expect(chunks.join('')).toContain('Waiting for your input');
+  input.emit('data', Buffer.from('answer\r')); expect(await second).toBe('answer');
   p.close(); expect(vi.getTimerCount()).toBe(0);
 });
