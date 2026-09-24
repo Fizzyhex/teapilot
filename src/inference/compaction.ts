@@ -240,7 +240,7 @@ function agentCut(messages: AgentMessage[], keepRecentTokens: number, force = fa
   for (let index = messages.length - 1; index >= 0; index--) {
     kept += estimateTokens(messages[index]!);
     if (kept < keepRecentTokens) continue;
-    const cut = candidates.find(candidate => candidate >= index) ?? candidates.at(-1)!;
+    const cut = [...candidates].reverse().find(candidate => candidate <= index) ?? candidates[0]!;
     if (cut > candidates[0]!) return cut;
     break;
   }
