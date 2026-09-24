@@ -168,6 +168,25 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   try {
     input.signal?.throwIfAborted();
     await agent.prompt(input.prompt);
+    if (inference.stop === 'context_limit' && !input.signal?.aborted) {
+      const failed = agent.state.messages.at(-1);
+      const retryBase = failed?.role === 'assistant' && failed.stopReason === 'error'
+        ? agent.state.messages.slice(0, -1)
+        : agent.state.messages;
+      const compacted = await compactAgentContext({
+        config, tier, messages: retryBase, budget: input.budget, telemetry,
+        signal: input.signal, onActivity: input.onActivity, force: true, trigger: 'overflow',
+      });
+      if (compacted.compacted) {
+        // Admission rejected before provider execution, so it should not consume
+        // an agent turn. Retry exactly once from the same pending user/tool step.
+        inference.stop = undefined;
+        inference.turns = Math.max(0, inference.turns - 1);
+        agent.state.messages = compacted.messages;
+        await telemetry.event('compaction_retry', { tier, tokensBefore: compacted.tokensBefore, estimatedTokensAfter: compacted.estimatedTokensAfter });
+        await agent.continue();
+      }
+    }
   } finally {
     clearTimeout(timer);
     input.signal?.removeEventListener('abort', cancel);
