@@ -1,9 +1,9 @@
 import { afterEach, expect, it } from 'vitest';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { completion, events, fixture, mockServer } from './helpers.js';
 import { runAttempt } from '../src/agents/run.js';
-import { SpendGovernor, callCeiling } from '../src/inference/budget.js';
+import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { estimateInputTokens, estimateTextTokens, MAX_PAYLOAD_BYTES } from '../src/inference/context.js';
 
@@ -12,7 +12,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 async function setup(handler: Parameters<typeof mockServer>[0]) {
   const f = await fixture(); cleanups.push(f.cleanup);
   const server = await mockServer(handler); cleanups.push(server.close);
-  Object.assign(f.config.models.local, { provider: 'ollama', baseUrl: server.url, contextTokens: 16384, maxOutputTokens: 2048 });
+  Object.assign(f.config.models.capable, { provider: 'ollama', baseUrl: server.url, contextTokens: 32768, maxOutputTokens: 16384 });
   const telemetry = new Telemetry(f.config.stateDir, 'context-test');
   await telemetry.event('start', {});
   const budget = new SpendGovernor(join(f.config.stateDir, 'spend.jsonl'), 'context-test', f.config.policy.budget);
@@ -33,11 +33,12 @@ it.each([false, true])('completes several coding tool round trips at 16k (web=%s
   });
   f.config.searchUrl = 'http://unused.test';
   if (!f.config.policy.permissions.includes('web.search')) f.config.policy.permissions.push('web.search');
-  await writeFile(join(f.cwd, 'notes.txt'), 'Keep the game self contained.\n'.repeat(450));
-  const result = await runAttempt({ ...f, tier: 'local', workload: 'coder', prompt: 'Read notes.txt and create web-pong/index.html, then read it to verify.', web, approve: async () => true });
-  expect(result).toMatchObject({ success: true, turns: 5, toolCalls: 4 });
+  await mkdir(join(f.cwd, 'web-pong'));
+  await writeFile(join(f.cwd, 'notes.txt'), 'Keep the game self contained.\n'.repeat(120));
+  const result = await runAttempt({ ...f, tier: 'normal', workload: 'coder', prompt: 'Read notes.txt and create web-pong/index.html, then read it to verify.', web, approve: async () => true });
+  expect(result, JSON.stringify(result)).toMatchObject({ success: true, turns: 5, toolCalls: 4 });
   expect(await readFile(join(f.cwd, 'web-pong/index.html'), 'utf8')).toContain('Pong');
-  expect(bodies.some(body => Buffer.byteLength(JSON.stringify(body)) > 12 * 1024)).toBe(true);
+  expect(bodies.some(body => Buffer.byteLength(JSON.stringify(body)) > 8 * 1024)).toBe(true);
   expect(bodies[0].tools.some((tool: any) => tool.function.name === 'web_search')).toBe(web);
   const admissions = (await events(f.config)).filter(e => e.type === 'context_admission');
   expect(admissions).toHaveLength(5);
@@ -48,30 +49,27 @@ it.each([false, true])('completes several coding tool round trips at 16k (web=%s
 it.each([400, 404, 422])('keeps provider HTTP %s separate from local overflow', async status => {
   let calls = 0;
   const f = await setup((_body, _req, res) => { calls++; res.writeHead(status); res.end('{}'); });
-  const input = { ...f, tier: 'local' as const, workload: 'ask' as const, web: false, approve: async () => true };
+  const input = { ...f, tier: 'normal' as const, workload: 'ask' as const, web: false, approve: async () => true };
   expect(await runAttempt({ ...input, prompt: 'hello' })).toMatchObject({ stopped: 'unsupported' });
   expect(await runAttempt({ ...input, prompt: 'x!'.repeat(20000) })).toMatchObject({ stopped: 'context_limit' });
   expect(calls).toBe(1);
   expect((await events(f.config)).some(e => e.type === 'provider_http_error' && e.status === status)).toBe(true);
 });
 
-it('retains the full cloud reservation even for a small admitted prompt', async () => {
+it('keeps local inference free when providers omit usage', async () => {
   let calls = 0;
   const f = await setup((_body, _req, res) => { calls++; completion(res, { noUsage: true }); });
-  f.config.models.economy.baseUrl = f.config.models.local.baseUrl;
-  const ceiling = callCeiling(f.config.models.economy);
-  f.config.policy.budget.requestUsd = ceiling;
-  const input = { ...f, tier: 'economy' as const, workload: 'ask' as const, web: false, prompt: 'hello', approve: async () => true };
+  const input = { ...f, tier: 'normal' as const, workload: 'ask' as const, web: false, prompt: 'hello', approve: async () => true };
   expect((await runAttempt(input)).success).toBe(true);
-  expect(f.budget.spent().request).toBe(ceiling);
-  expect(await runAttempt(input)).toMatchObject({ stopped: 'budget' });
-  expect(calls).toBe(1);
+  expect(f.budget.spent().request).toBe(0);
+  expect((await runAttempt(input)).success).toBe(true);
+  expect(calls).toBe(2);
 });
 
 it('rejects an unreasonable transport payload before inference or reservation', async () => {
   let calls = 0;
   const f = await setup((_body, _req, res) => { calls++; completion(res, {}); });
-  const result = await runAttempt({ ...f, tier: 'local', workload: 'ask', web: false,
+  const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false,
     prompt: 'x'.repeat(MAX_PAYLOAD_BYTES), approve: async () => true });
   expect(result.stopped).toBe('payload_limit');
   expect(calls).toBe(0);

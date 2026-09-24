@@ -6,9 +6,9 @@ For a source checkout, replace `teapilot` with `npm start --`.
 
 | Command | Use it for |
 | --- | --- |
-| `ask` | Questions, explanations, and planning; no repository tools |
-| `code` | Inspecting, editing, or checking a repository |
-| `chat` | A multi-turn planning conversation; no filesystem or shell tools |
+| `ask` | Focused questions, research, and planning; starts without repository tools |
+| `code` | Repository work; starts with configured repository access |
+| `chat` | Exploratory dialogue; starts without repository tools |
 
 ```sh
 teapilot ask "Explain dependency injection"
@@ -22,9 +22,16 @@ Use the repository root with `--cwd`. Paths containing spaces work in PowerShell
 
 ## Interactive use
 
-Run `chat` with an optional opening prompt, or start it without one. Type `/exit` or `/quit` to leave; Ctrl+D exits at an empty prompt, and Ctrl+C cancels. Enter inserts a newline and Shift+Enter submits. Type `@` followed by a path prefix and press Tab to complete a file or directory inside `--cwd`.
+Ask, Chat, and Code are conversational in an interactive terminal. An opening prompt runs immediately and the composer remains available. Use `--once` for one turn; `--json` and noninteractive input are automatically one-shot. Type `/exit` or `/quit` to leave; Ctrl+D exits at an empty prompt, and Ctrl+C cancels.
 
-TeaPilot keeps recent complete turns in memory for the current chat only. It does not automatically remember earlier sessions.
+Session commands preserve spending and grants unless stated otherwise:
+
+- `/mode chat|ask|code` changes the visible mode and keeps history. Entering Code requests its configured repository defaults.
+- `/tier auto|fast|normal|reasoning|deep` sets a profile preference.
+- `/new` clears task history and the capable-model lock while retaining grants and spending.
+- `/permissions` displays current grants; `/revoke <permission>` removes one. Revoking repository read also removes write and shell.
+
+TeaPilot keeps bounded complete turns, access grants, and model stickiness in memory for the current session only.
 
 ## Web research
 

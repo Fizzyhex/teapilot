@@ -29,6 +29,7 @@ export async function serve(input: NodeJS.ReadableStream = process.stdin, output
   let secretEnv: Record<string, string> = {};
   let managed = false;
   const connectionSessionId = randomUUID();
+  const routingSessions = new Map<string, { taskId: string; relatedTier?: 'normal' | 'reasoning' | 'deep' }>();
   let active: { id: string; controller: AbortController; done: Promise<void> } | undefined;
   const interactions = new Map<string, { owner: string; resolve: (value: unknown) => void }>();
   let redact = (text: string) => text;
@@ -111,15 +112,20 @@ export async function serve(input: NodeJS.ReadableStream = process.stdin, output
     }
     if (method === 'run') {
       const request = runSchema.parse(params);
+      const sessionId = request.sessionId ?? connectionSessionId;
+      const taskId = request.taskId ?? randomUUID();
+      const session = routingSessions.get(sessionId);
+      const relatedTier = session?.taskId === taskId ? session.relatedTier : undefined;
       await cleanReviews(config.stateDir);
       const review = request.workload === 'coder' && request.review ? new Review(request.cwd, config) : undefined;
       await review?.start();
       try {
-        const result = await runHost(config, { ...request, sessionId: request.sessionId ?? connectionSessionId, taskId: request.taskId ?? randomUUID(), signal }, { approve, onEvent, onProgress: log, beforeMutation: async (action, actionSignal) => {
+        const result = await runHost(config, { ...request, sessionId, taskId, relatedTier, signal }, { approve, onEvent, onProgress: log, beforeMutation: async (action, actionSignal) => {
           const combined = actionSignal ? AbortSignal.any([signal, actionSignal]) : signal;
           if (await ask(owner, combined, 'checkpoint', { ...action, cwd: request.cwd }) !== true) throw new PolicyDenied('Editor has unsaved changes or the run was cancelled');
           if (action.path) await review?.capture(action.path);
         } });
+        routingSessions.set(sessionId, { taskId, relatedTier: result.tier && result.tier !== 'fast' ? result.tier : relatedTier });
         return result;
       } finally {
         if (review) {

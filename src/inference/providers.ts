@@ -205,7 +205,10 @@ export function guardedStream(
           const complete = completed && !['error', 'aborted', 'pending'].includes(completed.stopReason);
           const validUsage = complete && observed.completeUsage && usage;
           // pi's usage.cost is calculated from configured rates, not the invoice.
-          const reported = complete ? observed.cost : undefined;
+          // Execution backends are local-only. Some OpenAI-compatible servers
+          // emit synthetic cost fields; they cannot turn a zero-cost local
+          // deployment into a billed execution candidate.
+          const reported = complete && callCeiling(spec) > 0 ? observed.cost : undefined;
           const cost = reported !== undefined ? reported : 0;
           const basis = reported !== undefined ? 'provider-reported' : validUsage ? 'configured-rates' : 'reserved-maximum';
           const charged = await governor.settle(reservation, cost, basis);

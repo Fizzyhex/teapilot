@@ -26,6 +26,7 @@ export function capabilityPlanner(provider: JevProvider): JevProvider {
 
 export interface RoutingPlan { permissions: Permission[]; tier?: Tier | 'auto'; relatedness?: 'new' | 'related' | 'unknown' }
 export function readRoutingPlan(raw: JevRawResponse | null | undefined, threshold: number, workload: string): RoutingPlan | undefined {
+  if (!raw) return undefined;
   const permissions = readCapabilityPlan(raw, threshold, workload); if (!permissions) return undefined;
   try {
     const tierAnswer = getChoiceAnswer(raw, 'execution_tier'); const relatedAnswer = getChoiceAnswer(raw, 'relatedness');

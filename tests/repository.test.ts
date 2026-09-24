@@ -56,7 +56,7 @@ it('empty-repository coding can inspect and write without a shell approval', asy
     else if (calls === 2) completion(res, { tool: { name: 'write', arguments: { path: 'index.html', content: '<canvas id="pong"></canvas>' } } });
     else completion(res, { text: 'Created the canvas; gameplay is not implemented.' });
   }); cleanup.push(server.close);
-  f.config.routingMode = 'direct'; f.config.models.local.baseUrl = server.url;
+  f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Create a Pong canvas' }, { approve: async () => { approvals++; return false; } });
   expect(result.success).toBe(true);
   expect(approvals).toBe(0);
@@ -69,10 +69,10 @@ it('a local inspection loop preserves same-tier recovery and reports its final f
     if (req.url?.endsWith('/models')) res.end('{}');
     else completion(res, { tool: { name: 'repo_list', arguments: {} } });
   }); cleanup.push(server.close);
-  f.config.routingMode = 'direct'; f.config.models.local.baseUrl = server.url;
-  f.config.models.economy.enabled = false; f.config.models.strong.enabled = false;
+  f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url;
+  f.config.models.fast.enabled = false;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Create Pong' }, { approve: async () => false });
-  expect(result).toMatchObject({ success: false, status: 'ineffective_calls', attempts: 3 });
+  expect(result).toMatchObject({ success: false, status: 'ineffective_calls', attempts: 4 });
   expect(result.text).toContain('ineffective calls');
   expect(result.text).toContain('configured escalation limit reached');
   expect(result.text).toContain('Checks after latest observed edit: not run');
@@ -85,7 +85,7 @@ it('does not claim a denied shell command executed or changed files', async () =
     if (req.url?.endsWith('/models')) res.end('{}');
     else completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command: 'echo denied' } } });
   }); cleanup.push(server.close);
-  f.config.routingMode = 'direct'; f.config.models.local.baseUrl = server.url;
+  f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Run a command' }, { approve: async () => false });
   expect(result.status).toBe('approval_denied');
   expect(result.text).not.toContain('Shell commands ran');

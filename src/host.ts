@@ -8,7 +8,7 @@ import { tiers, type Config, type Tier, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
 import { prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
 import { lockState, SpendGovernor } from './inference/budget.js';
-import { budgetedJev, discoverNativeReasoning, localAvailable, type CancellableJevProvider } from './inference/providers.js';
+import { budgetedJev, localAvailable, type CancellableJevProvider } from './inference/providers.js';
 import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
@@ -44,7 +44,12 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   if (!(await stat(cwd)).isDirectory()) throw new Error('Working directory is not a directory');
   const contextPolicy = new ExecutionPolicy(cwd, config, dependencies.approve);
   for (const context of request.context ?? []) if (context.path) await contextPolicy.path(context.path, false);
-  const conversation = prepareConversation(prompt + (request.correction ? `\nUser correction:\n${request.correction}` : ''), request.context ?? [], request.history ?? [], config.policy.limits.maxPromptChars);
+  const currentPrompt = prompt + (request.correction ? `\nUser correction:\n${request.correction}` : '');
+  // Leave room for system instructions and tool schemas while retaining whole,
+  // recent turns. The inference boundary remains the final exact admission check.
+  const currentLength = currentPrompt.length + (request.context?.length ? JSON.stringify(request.context).length + 64 : 0);
+  const historyLimit = Math.max(currentLength, Math.min(config.policy.limits.maxPromptChars, 8_000));
+  const conversation = prepareConversation(currentPrompt, request.context ?? [], request.history ?? [], historyLimit);
   if (conversation.omitted) dependencies.onEvent?.({ type: 'history_omitted', turns: conversation.omitted });
   if (request.web && !request.authorization) {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Checking web search...' });
@@ -125,16 +130,18 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     await telemetry.event('request_start', { correction: Boolean(request.correction), web: Boolean(request.web) });
     if (request.authorization && !request.authorization.allows('inference')) return await finish(false, 'blocked', 'Inference access is not granted. Start a new session to restore it.');
     if (request.authorization && request.web && !await activate(['web.search'], 'You requested web research with --web.')) return await finish(false, 'approval_denied', accessFailure!);
-    const provider = budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
-    const router = config.routingMode === 'direct' ? undefined : new JevRouter(request.authorization ? capabilityPlanner(provider) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false });
-    const localOnline = await (dependencies.localProbe ?? (() => localAvailable(config)))();
-    for (const physical of ['fast', 'capable'] as const) if (config.models[physical].provider === 'ollama') await discoverNativeReasoning(config, physical, request.signal);
+    const provider = config.routingMode === 'direct' ? undefined : budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
+    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
+    const physicalOnline = dependencies.localProbe
+      ? { fast: await dependencies.localProbe(), capable: await dependencies.localProbe() }
+      : { fast: await localAvailable(config, 'fast'), capable: await localAvailable(config, 'capable') };
+    const localOnline = physicalOnline.fast || physicalOnline.capable;
     let scope: { workload: Workload; tier: Tier } | undefined;
     let previous: AttemptResult | undefined;
     const basePrompt = conversation.current;
     for (let index = 0; index <= config.policy.escalation.maxEscalations; index++) {
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
-      const candidates = capabilities(config, budget, localOnline, scope, { explicitTier: request.tier && request.tier !== 'auto' ? request.tier : undefined, relatedLock: request.relatedTier });
+      const candidates = capabilities(config, budget, localOnline, scope, { physicalOnline, explicitTier: request.tier && request.tier !== 'auto' ? request.tier : undefined, relatedLock: request.relatedTier });
       if (request.tier && request.tier !== 'auto') for (const candidate of candidates) if (!candidate.id.endsWith(`.${request.tier}`)) candidate.availability = { available: false, reason: 'Outside explicit tier preference' };
       if (request.workload) for (const candidate of candidates) {
         if (!candidate.id.startsWith(`${request.workload}.`)) candidate.availability = { available: false, reason: 'Outside requested workload' };
@@ -170,7 +177,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         ? candidates.find(candidate => candidate.id.startsWith(`${fallbackWorkload}.`) && assessCandidate(config, candidate).allowed)?.id
         : undefined;
       const usedRoutingFallback = Boolean(decision?.status === 'no_decision' && fallbackSelection);
-      selected = routedSelection ?? (decision ? fallbackSelection : candidates.find(c => c.id === `${fallbackWorkload ?? 'ask'}.${directTier(fallbackWorkload ?? 'ask', request.tier && request.tier !== 'auto' ? request.tier : undefined))` && assessCandidate(config, c).allowed)?.id);
+      const directSelectionTier = scope?.tier ?? directTier(fallbackWorkload ?? 'ask', request.tier && request.tier !== 'auto' ? request.tier : undefined, basePrompt, request.relatedTier, Boolean(request.web));
+      selected = routedSelection ?? (decision ? fallbackSelection : candidates.find(c => c.id === `${fallbackWorkload ?? 'ask'}.${directSelectionTier}` && assessCandidate(config, c).allowed)?.id);
 
       if (decision?.status === 'no_decision' && !fallbackWorkload) {
         return await finish(false, 'workload_uncertain', `JevRouter could not confidently determine whether this request needs repository access (${decision.fallback.type ?? 'manual_review'}). Use teapilot ask or teapilot code to state the intended workload.`);
@@ -189,11 +197,12 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       let candidate = candidates.find(c => c.id === selected);
       let assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
       if (!candidate || !assessCandidate(config, candidate).allowed || (decision && !usedRoutingFallback && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
+      const selectedWorkload = selected!.split('.')[0]!;
       if (request.authorization && decision) {
-        const plan = readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selected.split('.')[0]!);
+        const plan = readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload);
         if (!plan) return await finish(false, 'intent_uncertain', 'Please clarify whether this request needs repository reading, file edits, command execution, or live web research. No additional access was granted.');
-        if (!request.tier && plan.tier && plan.tier !== 'auto') {
-          const preferred = candidates.find(candidate => candidate.id === `${selected.split('.')[0]}.${plan.tier}`);
+        if ((!request.tier || request.tier === 'auto') && plan.tier && plan.tier !== 'auto') {
+          const preferred = candidates.find(candidate => candidate.id === `${selectedWorkload}.${plan.tier}`);
           const preferredAssessment = preferred && decision?.decision.candidates.find(c => c.id === preferred.id);
           if (preferred && preferredAssessment && assessCandidate(config, preferred).allowed && preferredAssessment.router.allowed && !preferredAssessment.router.filtered) { selected = preferred.id; candidate = preferred; assessment = preferredAssessment; }
         }
@@ -218,7 +227,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {
-            const repository = capabilities(config, budget, localOnline, { workload: 'coder', tier }, { explicitTier: tier }).find(value => value.id === `coder.${tier}`)!;
+            const repository = capabilities(config, budget, localOnline, { workload: 'coder', tier }, { physicalOnline, explicitTier: tier }).find(value => value.id === `coder.${tier}`)!;
             const admission = assessCandidate(config, repository);
             if (!admission.allowed) { accessFailure = admission.reason ?? 'Repository capability unavailable'; return false; }
             if (admission.confirmation && workload !== 'coder' && !activePermissions.includes('repository.read')) {
@@ -247,7 +256,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));
       }
       const fallback = tiers.slice(tiers.indexOf(tier) + 1).map(nextTier => {
-        const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }, { relatedLock: request.relatedTier }).find(c => c.id === `${workload}.${nextTier}`)!;
+        const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }, { physicalOnline, relatedLock: request.relatedTier }).find(c => c.id === `${workload}.${nextTier}`)!;
         if (request.web && !modelFor(config, nextTier).toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
         return { tier: nextTier, assessment: assessCandidate(config, candidate) };
       });

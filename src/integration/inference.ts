@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { normalizeContext, Type, type Message } from '@earendil-works/pi-ai';
 import { defaultPolicy, JevRouter, validateManifest } from 'jevrouter';
 import { tiers, type Config, type Tier } from '../config.js';
-import { budgetedJev, discoverNativeReasoning, guardedStream, piModel, type InferenceState } from '../inference/providers.js';
+import { budgetedJev, guardedStream, piModel, type InferenceState } from '../inference/providers.js';
 import { callCeiling, lockState, SpendGovernor } from '../inference/budget.js';
 import { assessCandidate } from '../routing/selection.js';
 import { directTier, effectiveProfile, modelFor, profileAvailable, profileFor } from '../routing/execution.js';
@@ -79,7 +79,6 @@ export async function runInference(config: Config, request: InferenceRequest, de
   let emitted = false;
   try {
     await budget.load();
-    for (const physical of ['fast', 'capable'] as const) if (config.models[physical].provider === 'ollama') await discoverNativeReasoning(config, physical, signal);
     const advertised = modelInformation(config).find(m => m.id === request.model);
     if (!advertised) throw new Error('Model is disabled or lacks credentials. Open TeaPilot: Manage Models.');
     for (let attempt = 0; attempt <= config.policy.escalation.maxEscalations; attempt++) {
@@ -94,8 +93,10 @@ export async function runInference(config: Config, request: InferenceRequest, de
           && budget.permits(callCeiling(spec) + routingCost);
         return validateManifest({ id: `inference.${tier}`, name: spec.id, type: 'subagent', description: `Supply ${tier} text inference${spec.toolCalling ? ' and tool calls' : ''}; caller executes tools.`, verification: { status: 'verified', source: 'teapilot:built-in' }, permissions: ['inference'], risk: { level: 'low', categories: [] }, availability: { available }, policy: { requires_confirmation: callCeiling(spec) >= config.policy.budget.approvalThresholdUsd }, execution: { mode: 'subagent', target: 'inference' }, metadata: { model: spec.id, tier, effort: profile.thinking, context_tokens: profile.contextTokens } });
       });
-      const preferredTier = directTier('ask', request.model === 'auto' ? undefined : request.model);
+      const latestText = request.messages.at(-1)?.content.filter(part => part.type === 'text').map(part => part.text).join(' ') ?? '';
+      const preferredTier = directTier('ask', request.model === 'auto' ? undefined : request.model, latestText, undefined, Boolean(request.tools.length));
       let chosen = candidates.find(candidate => candidate.id === `inference.${preferredTier}` && assessCandidate(config, candidate).allowed);
+      if (!chosen && request.model === 'auto') chosen = candidates.find(candidate => assessCandidate(config, candidate).allowed);
       let routeConfirmation = false;
       if (!chosen) throw new Error('No enabled model fits this context, tool requirements, and remaining budget.');
       if (routingCost) {

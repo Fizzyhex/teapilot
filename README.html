@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>teapilot</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <span id="markdown-mermaid" aria-hidden="true" data-config="{&quot;darkModeTheme&quot;:&quot;vscode&quot;,&quot;lightModeTheme&quot;:&quot;vscode&quot;,&quot;maxTextSize&quot;:50000,&quot;clickDrag&quot;:&quot;alt&quot;,&quot;showControls&quot;:&quot;onHoverOrFocus&quot;,&quot;resizable&quot;:true,&quot;maxHeight&quot;:&quot;&quot;}"></span>
+				<h1 id="teapilot">teapilot</h1>
+<p>hi, teapilot is a small personal agent for coding and questions. local first!</p>
+<p>capabilities:</p>
+<ul>
+<li><code>ask</code> for questions and planning</li>
+<li><code>code</code> to work in a repository</li>
+<li><code>chat</code> for a multi-turn conversation</li>
+<li><code>ask --web</code> for research through a configured SearXNG service</li>
+</ul>
+<hr>
+<h2 id="quick-start">Quick start</h2>
+<p>You'll need <strong>Node.js 22.19.0 or newer</strong>, npm, and Git.</p>
+<p>The npm package is wip. For now, install from source:</p>
+<pre><code class="language-sh">git <span class="hljs-built_in">clone</span> https://github.com/fizzyhex/teapilot.git
+<span class="hljs-built_in">cd</span> teapilot
+npm install --global
+teapilot setup
+</code></pre>
+<div class="markdown-alert markdown-alert-note"><p class="markdown-alert-title"><svg class="octicon octicon-info mr-2" viewBox="0 0 16 16" version="1.1" width="16" height="16" aria-hidden="true"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p><p>Global installation is a convenience thing! If you'd rather not, this works too:
+npm install
+npm run setup</p>
+<p><code>npm start --</code> will work in place of <code>teapilot</code> throughout setup.</p>
+</div>
+<p>The setup wizard will walk you through model installation, and if you plan on using Jev, you can get the API key ready while the download is running.</p>
+<p><em>For advanced config, follow the <code>--config-dir</code> command printed by setup.</em></p>
+<h2 id="try-it">Try it</h2>
+<pre><code class="language-sh">teapilot ask --web <span class="hljs-string">&quot;what are the hardware specs of the steam frame?&quot;</span>
+teapilot code --cwd <span class="hljs-string">&quot;path/to/repository&quot;</span> <span class="hljs-string">&quot;Fix the failing tests&quot;</span>
+teapilot chat <span class="hljs-string">&quot;Help me think through an idea&quot;</span>
+<span class="hljs-comment"># having problems?</span>
+teapilot doctor
+</code></pre>
+<p>Use the repository root with <code>--cwd</code>. <code>ask</code> has no repository tools; <code>code</code> can read, edit, and run approved commands; <code>chat</code> has the same tool access as <code>ask</code> and remembers recent turns for the current session only.</p>
+<p>After installing the published package, use <code>teapilot</code> instead of <code>npm start --</code>.</p>
+<h2 id="before-enabling-cloud-models">Before enabling cloud models</h2>
+<p>Cloud tiers require explicit configuration and use request and daily spending limits. Review <a href="docs/03-configuration.html">Configuration</a> before enabling them. File access and shell approvals are described there as part of the policy configuration. Edits remain on disk if a run stops; TeaPilot does not automatically roll them back.</p>
+<h2 id="documentation">Documentation</h2>
+<ol>
+<li><a href="docs/01-setup.html">Setup</a> — install, choose a model, check readiness, and enable optional search</li>
+<li><a href="docs/02-commands.html">Commands</a> — choose a request mode, use interactive features, and interpret results</li>
+<li><a href="docs/03-configuration.html">Configuration</a> — profiles, local endpoints, providers, models, and policies</li>
+</ol>
+<p>See <a href="https://github.com/fizzyhex/teapilot/blob/main/STATUS.md">project status</a> for known limits and remaining work.</p>
+
+            
+            
+        </body>
+        </html>

@@ -32,4 +32,20 @@ export function tierSupportsWorkload(tier: Tier, workload: Workload, explicit = 
   return workload === 'ask' || explicit;
 }
 export function nextTier(tier: Tier): Tier | undefined { return escalationOrder[escalationOrder.indexOf(tier) + 1]; }
-export function directTier(workload: Workload, explicit?: Tier): Tier { return explicit ?? 'normal'; }
+const deepSignals = /\b(architecture|repository[- ]wide|root cause across|long[- ]horizon|complex debugging|migration strategy)\b/i;
+const reasoningSignals = /\b(debug|diagnos|plan|ambigu|trade[- ]?off|investigat|coordinate|several dependent|substantial context)\b/i;
+const fastSignals = /^(?:\s*)(?:define|classify|translate|rewrite|summarize|convert|what is|who is|when is|list\b|explain briefly|fix (?:this )?(?:typo|spelling))\b/i;
+
+/** Conservative local selection shared by the CLI host and service inference. */
+export function directTier(workload: Workload, explicit?: Tier, request = '', relatedLock?: Tier, hasTools = false): Tier {
+  if (explicit) return explicit;
+  if (relatedLock && relatedLock !== 'fast') {
+    if (deepSignals.test(request)) return 'deep';
+    if (reasoningSignals.test(request)) return 'reasoning';
+    return 'normal';
+  }
+  if (deepSignals.test(request)) return 'deep';
+  if (reasoningSignals.test(request)) return 'reasoning';
+  if (workload === 'ask' && !hasTools && request.length <= 500 && fastSignals.test(request)) return 'fast';
+  return 'normal';
+}

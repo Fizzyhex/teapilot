@@ -33,7 +33,7 @@ it('a search outage during execution cannot produce a successful unverified answ
     } else if (req.url?.endsWith('/models')) res.end('{}');
     else { inference++; completion(res, { tool: { name: 'web_search', arguments: { query: 'current facts' } } }); }
   }); cleanup.push(server.close);
-  f.config.routingMode = 'direct'; f.config.models.local.baseUrl = server.url; f.config.searchUrl = server.url;
+  f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url; f.config.searchUrl = server.url;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'ask', web: true, prompt: 'Research current facts' }, { approve: async () => false });
   expect(result).toMatchObject({ success: false, status: 'search_unavailable', attempts: 1 });
   expect(inference).toBe(1);

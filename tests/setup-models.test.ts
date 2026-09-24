@@ -43,15 +43,15 @@ it('downloads and prepares queued models sequentially, retries in place and sele
   expect(operations.filter(op => op.path === '/api/pull').map(op => op.model)).toEqual([presets[0]!.id, presets[0]!.id, presets[1]!.id]);
   expect(operations.map(op => op.path)).toEqual(['/api/tags', '/api/pull', '/api/pull', '/api/show', '/api/create', '/api/pull', '/api/show', '/api/create']);
   expect(model.source).toBe(presets[1]!.id);
-  expect(model.context).toBe(16384);
+  expect(model.context).toBe(32768);
   expect(prompts.choose).toHaveBeenCalledWith('Active execution model', [presets[0]!.id, presets[1]!.id], 0);
 });
 
-it('reuses installed models and pulls the Q8_0 preset without a conversion prompt', async () => {
+it('reuses the fast model and pulls the capable preset without a conversion prompt', async () => {
   const operations = ollama([presets[0]!.id]);
-  const prompts = ui(['1,3']);
+  const prompts = ui(['1,2']);
   await selectOllamaModel(prompts, new AbortController().signal);
-  expect(operations.filter(op => op.path === '/api/pull').map(op => op.model)).toEqual(['hf.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF:Q8_0']);
+  expect(operations.filter(op => op.path === '/api/pull').map(op => op.model)).toEqual([presets[1]!.id]);
   expect(prompts.input).toHaveBeenCalledTimes(3);
 });
 

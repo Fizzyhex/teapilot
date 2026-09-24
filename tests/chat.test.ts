@@ -14,7 +14,7 @@ it('reports session costs and last attempted models including unsuccessful and m
     .mockResolvedValueOnce({ ...result, success: false, spentUsd: 0.2, models: ['strong'] })
     .mockResolvedValueOnce({ ...result, spentUsd: 0.05, models: [] });
   expect(await runChat({ request: { prompt: 'opening', cwd: '.' }, maxPromptChars: 2000, input, run })).toBe(2);
-  expect(input.mock.calls[0]![0]).toEqual({ spentUsd: 0.1, lastModel: 'economy' });
+  expect(input.mock.calls[0]![0]).toEqual({ spentUsd: 0.1, lastModel: 'economy', tier: 'auto' });
   expect(input.mock.calls[1]![0].spentUsd).toBeCloseTo(0.3);
   expect(input.mock.calls[1]![0].lastModel).toBe('strong');
   expect(input.mock.calls[2]![0].spentUsd).toBeCloseTo(0.35);
@@ -24,7 +24,7 @@ it('reports session costs and last attempted models including unsuccessful and m
 it('starts the composer with zero cost and no model', async () => {
   const input = vi.fn().mockResolvedValue('/exit');
   await runChat({ request: { prompt: '', cwd: '.' }, maxPromptChars: 2000, input, run: vi.fn() });
-  expect(input).toHaveBeenCalledWith({ spentUsd: 0, lastModel: undefined });
+  expect(input).toHaveBeenCalledWith({ spentUsd: 0, lastModel: undefined, tier: 'auto' });
 });
 
 it('continues after an opening prompt and carries the conversation and correction forward', async () => {
@@ -57,7 +57,7 @@ it('sends conversational instructions and prior turns to the ask model without r
   const server = await mockServer((body, _request, response) => { payloads.push(body); completion(response, { text: 'What matters most?' }); });
   cleanups.push(server.close);
   f.config.routingMode = 'direct';
-  f.config.models.local.baseUrl = `${server.url}/v1`;
+  f.config.models.capable.baseUrl = `${server.url}/v1`;
   const input = vi.fn().mockResolvedValueOnce('Cost').mockResolvedValueOnce('/exit');
   const code = await runChat({
     request: { prompt: 'Help plan', cwd: f.cwd }, maxPromptChars: f.config.policy.limits.maxPromptChars, input,

@@ -7,26 +7,22 @@ npm install -g teapilot
 teapilot setup
 ```
 
-From a source checkout, follow the [README quick start](../README.md#quick-start) and replace `teapilot` with `npm start --`.
+From a source checkout without `--global`, follow the [README quick start](../README.md#quick-start) and replace `teapilot` with `npm start --`.
 
 ## Choose a model
 
-The setup wizard tests the connection and a real edit in a disposable directory. It supports local Ollama, an existing local endpoint, or a cloud model. If using a cloud model, review its provider pricing and configure conservative limits in [Configuration](03-configuration.md).
+The setup wizard walks through local model setup with Ollama and tests the selected model. The built-in presets are Qwen3.5-9B Heretic Q4_K_M for Fast and Qwen3.8-27B Heretic Q4_K_M for the capable profiles. Hosted Jev routing is optional and has separate spending limits; execution remains local.
 
-For Ollama, the menu includes a default model, a larger fallback for harder tasks, and a smaller fast model. The wizard shows download sizes. You may select several models; they are downloaded in order, but the labels do not create automatic fallback routing.
-
-If Ollama is not running, start it and run setup again. On Linux it may need `sudo` or `systemd`; use the official [Windows](https://docs.ollama.com/windows) or [Linux](https://docs.ollama.com/linux) instructions if needed.
-
-When setup finishes, use the `--config-dir` command it prints so the next request uses the profile you just tested.
+Teapilot should launch Ollama for you, but open it up manually if not!
 
 ## Make your first request
 
 ```sh
-teapilot ask "Explain dependency injection"
-teapilot code --cwd ./my-project "Fix the failing tests"
+teapilot ask "explain dependency injection"
+teapilot code --cwd ./my-project "which tests are failing?"
 ```
 
-`ask` has no repository tools. `code` can inspect and edit the repository selected by `--cwd`. See [commands](02-commands.md) for the other modes.
+Ask starts without repository tools. Code starts with repository access allowed by policy. Interactive sessions can approve, inspect, and revoke additional access. See [commands](02-commands.md) for all modes.
 
 ## Check readiness
 
@@ -35,17 +31,17 @@ teapilot doctor
 teapilot doctor --live
 ```
 
-The first checks the selected model and state access. The second performs a real inference and tool check. Live hosted checks ask for consent and use the normal spending ledger. If setup reports partial readiness, coding stays disabled until you verify the profile again.
+The first command checks the model and configuration. Running `--live` will spin up a directory temporarily to see how teapilot is doing.
 
 ## Optional web search
 
-Pass `--web` only when you want search:
+Teapilot will ask you about [SearXNG](https://docs.searxng.org) for web search during setup.
+
+Pass `--web` when you want search:
 
 ```sh
 teapilot ask --web "Research current information and cite sources"
 ```
-
-Search needs a SearXNG service that you operate or trust. Setup can connect an existing service or a local Docker container; TeaPilot does not install Docker. Manage a local service with `teapilot search status`, `start`, `stop`, or `remove`. Search requests send queries to external search engines through SearXNG.
 
 ## Automated local setup
 

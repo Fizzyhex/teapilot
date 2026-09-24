@@ -10,14 +10,9 @@ export async function fixture(): Promise<{ config: Config; cwd: string; cleanup:
   const config = await loadConfig(cwd, {});
   config.stateDir = join(cwd, '.state');
   config.router.apiKey = 'fixture-jev-secret';
-  config.secrets = { local: undefined, economy: 'fixture-cloud-secret', strong: 'fixture-cloud-secret' };
-  config.models.local.id = 'local-test';
-  for (const tier of ['economy', 'strong'] as const) {
-    config.models[tier].enabled = true;
-    config.models[tier].id = `${tier}-test`;
-    config.models[tier].inputUsdPerMillion = tier === 'economy' ? 0.2 : 1;
-    config.models[tier].outputUsdPerMillion = tier === 'economy' ? 0.5 : 2;
-  }
+  config.secrets = { fast: undefined, capable: undefined };
+  Object.assign(config.models.fast, { id: 'fast-test', reasoningEfforts: ['off'] });
+  Object.assign(config.models.capable, { id: 'capable-test', enabled: true, reasoningEfforts: ['off', 'medium', 'xhigh'] });
   config.policy.limits.requestTimeoutMs = 5000;
   config.policy.limits.attemptTimeoutMs = 10000;
   return { config, cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
@@ -38,8 +33,14 @@ export async function mockServer(handler: Handler): Promise<{ url: string; close
 }
 export function jev(response: ServerResponse, selected: string, confidence = 0.99, probabilities?: Record<string, number>): void {
   response.setHeader('Content-Type', 'application/json');
-  const all = Object.fromEntries(['coder.local', 'coder.economy', 'coder.strong', 'ask.local', 'ask.economy', 'ask.strong'].map(id => [id, id === selected ? 1 : 0]));
-  response.end(JSON.stringify({ answers: { tool: { type: 'choice', choice: selected, probabilities: { ...all, ...probabilities }, confidence } }, usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 } }));
+  const all = Object.fromEntries(['coder.fast', 'coder.normal', 'coder.reasoning', 'coder.deep', 'ask.fast', 'ask.normal', 'ask.reasoning', 'ask.deep'].map(id => [id, id === selected ? 1 : 0]));
+  const choice = (value: string) => ({ type: 'choice', choice: value, probabilities: { [value]: 1 }, confidence });
+  const repository = selected.startsWith('coder.');
+  response.end(JSON.stringify({ answers: {
+    tool: { type: 'choice', choice: selected, probabilities: { ...all, ...probabilities }, confidence },
+    'repository.read': choice(repository ? 'yes' : 'no'), 'repository.write': choice('no'), 'repository.shell': choice('no'), 'web.search': choice('no'),
+    execution_tier: choice(selected.split('.')[1] ?? 'normal'), relatedness: choice('related'),
+  }, usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 } }));
 }
 export function completion(response: ServerResponse, options: { text?: string; tool?: { name: string; arguments: unknown }; cost?: number; noUsage?: boolean; model?: string }): void {
   response.setHeader('Content-Type', 'text/event-stream');
