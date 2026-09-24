@@ -7,7 +7,7 @@ import type { Config, ModelConfig, Tier, PhysicalModel } from '../config.js';
 import { effectiveProfile, modelFor, profileFor, type ExecutionProfile } from '../routing/execution.js';
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
-import { estimateInputTokens, MAX_PAYLOAD_BYTES } from './context.js';
+import { calibratedTokens, estimateInputTokens, MAX_PAYLOAD_BYTES } from './context.js';
 
 export function piModel(config: ModelConfig, profile?: ExecutionProfile): Model<'openai-completions'> {
   return {
@@ -103,7 +103,11 @@ export function budgetedJev(config: Config, governor: SpendGovernor, telemetry: 
   };
 }
 
-export interface InferenceState { turns: number; stop?: 'budget' | 'turn_limit' | 'context_limit' | 'payload_limit' | 'unsupported' | 'provider_error' | 'timeout' }
+export interface InferenceState {
+  turns: number; stop?: 'budget' | 'turn_limit' | 'context_limit' | 'payload_limit' | 'unsupported' | 'provider_error' | 'timeout';
+  /** Lexical estimate and provider-reported prompt tokens from the latest completed call. */
+  calibration?: { estimated: number; reported: number };
+}
 
 function errorMessage(model: Model<'openai-completions'>, message: string): AssistantMessage {
   return {
@@ -156,6 +160,7 @@ export function guardedStream(
       let reservation: string | undefined;
       let completed: AssistantMessage | undefined;
       let sent = false;
+      let lexicalTokens: number | undefined;
       const observed: { cost?: number; model?: string; completeUsage?: boolean } = {};
       const signal = AbortSignal.any([options?.signal ?? new AbortController().signal, AbortSignal.timeout(config.policy.limits.requestTimeoutMs)]);
       try {
@@ -174,11 +179,13 @@ export function guardedStream(
           fetch: async (input, init) => {
             const body = typeof init?.body === 'string' ? init.body : '';
             const payloadBytes = Buffer.byteLength(body);
-            const estimatedInputTokens = body && payloadBytes <= MAX_PAYLOAD_BYTES ? estimateInputTokens(body) : undefined;
+            lexicalTokens = body && payloadBytes <= MAX_PAYLOAD_BYTES ? estimateInputTokens(body) : undefined;
+            const calibration = state.calibration;
+            const estimatedInputTokens = lexicalTokens === undefined ? undefined : calibratedTokens(lexicalTokens, calibration);
             const rejection = payloadBytes > MAX_PAYLOAD_BYTES ? 'payload_limit'
               : estimatedInputTokens !== undefined && estimatedInputTokens + reservedOutputTokens > profile.contextTokens ? 'context_limit' : undefined;
-            await telemetry.event('context_admission', { tier, model: spec.id, payloadBytes, estimatedInputTokens,
-              contextTokens: profile.contextTokens, reservedOutputTokens, method: 'conservative-lexical', rejection });
+            await telemetry.event('context_admission', { tier, model: spec.id, payloadBytes, estimatedInputTokens, lexicalTokens,
+              contextTokens: profile.contextTokens, reservedOutputTokens, method: calibration ? 'calibrated-lexical' : 'conservative-lexical', rejection });
             if (rejection) {
               state.stop = rejection; throw new Error('Request exceeds configured admission ceiling');
             }
@@ -204,6 +211,8 @@ export function guardedStream(
           const usage = completed?.usage;
           const complete = completed && !['error', 'aborted', 'pending'].includes(completed.stopReason);
           const validUsage = complete && observed.completeUsage && usage;
+          const reportedInput = validUsage ? usage.input + usage.cacheRead + usage.cacheWrite : 0;
+          if (lexicalTokens && reportedInput > 0) state.calibration = { estimated: lexicalTokens, reported: reportedInput };
           // pi's usage.cost is calculated from configured rates, not the invoice.
           // Execution backends are local-only. Some OpenAI-compatible servers
           // emit synthetic cost fields; they cannot turn a zero-cost local
