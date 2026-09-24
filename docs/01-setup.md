@@ -1,69 +1,103 @@
 # Setup and diagnostics
 
-## Install the published package
+This guide gets TeaPilot installed, connected to a model, and ready for its first request.
 
-Public npm installation:
+## 1. Install TeaPilot
+
+For the published package:
 
 ```sh
 npm install -g teapilot
 teapilot setup
+```
+
+For installation from source, follow the [README quick start](../README.md#quick-start). Replace `teapilot` in the examples below with `npm start --` when running from a checkout.
+
+## 2. Run setup
+
+The setup wizard walks you through a model provider and checks that the connection works. It supports:
+
+- **Local Ollama** — the recommended option for running without an API key. TeaPilot can install Ollama and download a model after you approve each step.
+- **An existing local endpoint** — use a model server that is already running.
+- **A cloud model** — configure this only if you want to use a hosted provider and have reviewed the [spending guidance](05-spending.md).
+
+For Ollama, the model menu includes:
+
+- **Default:** Qwen3.5-9B abliterated ([Ollama package](https://ollama.com/huihui_ai/qwen3.5-abliterated:9b), about 6.6 GB).
+- **Hard task fallback:** Qwen3.5-35B-A3B abliterated Q4_K_M ([Ollama package](https://ollama.com/huihui_ai/qwen3.5-abliterated:35b-a3b-q4_K), about 24 GB).
+- **Cheap & fast:** [Qwen3.5-4B-Uncensored-GGUF](https://huggingface.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF) Q8_0, about 4.7 GB. TeaPilot downloads it directly; no conversion is needed.
+
+You can enter one model number or several, separated by commas or spaces (for example, `1, 2, 3`). Downloads happen in order; duplicates and already-downloaded models are skipped. At the end, choose the active model to verify and save. The other selected models remain installed, but the labels do not create automatic fallback routing.
+
+The wizard checks streaming, tool continuation, and a real edit in a disposable directory. CPU execution may be slow. On Linux, Ollama may require `sudo` and `systemd`; on other service configurations, start `ollama serve` and run setup again. Use the official [Windows](https://docs.ollama.com/windows) or [Linux](https://docs.ollama.com/linux) installation instructions when needed.
+
+When setup finishes, follow the explicit `--config-dir` command it prints. That command ensures the next request uses the profile that was just checked, even if the current checkout has its own settings.
+
+## 3. Make a first request
+
+```sh
 teapilot ask "Explain dependency injection"
 teapilot code --cwd ./my-project "Fix the failing tests"
 ```
 
-## Interactive setup
+`ask` is for questions and planning. `code` can work in the repository selected by `--cwd`. See [commands](02-commands.md) for the complete command reference.
 
-The local model menu offers:
+## Configuration and safety defaults
 
-- **Default:** Qwen3.5-9B abliterated ([Ollama package](https://ollama.com/huihui_ai/qwen3.5-abliterated:9b), about 6.6 GB).
-- **Hard task fallback:** Qwen3.5-35B-A3B abliterated Q4_K_M ([Ollama package](https://ollama.com/huihui_ai/qwen3.5-abliterated:35b-a3b-q4_K), about 24 GB).
-- **Cheap & Fast:** [mradermacher/Qwen3.5-4B-Uncensored-GGUF](https://huggingface.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF) **Q8_0**, about 4.7 GB. Setup downloads it directly using `hf.co/mradermacher/Qwen3.5-4B-Uncensored-GGUF:Q8_0`; no conversion or additional setup is required.
+TeaPilot stores generated configuration in `~/.teapilot/config` with private permissions (Windows user ACLs or POSIX mode 600). Re-running setup lets you retain and verify the current profile or reconfigure it. It does not silently enable cloud fallback.
 
-Enter one number or several separated by commas/spaces (for example `1, 2, 3`). Selections are installed sequentially in that order, with duplicates removed and existing downloads reused. Context settings and download confirmations are collected before the queue starts. Failed downloads can be retried before proceeding. After the queue completes, choose one active execution model to verify and save. Additional models remain installed for later selection; the role labels do not configure automatic fallback routing.
+The router chooses a model; the execution model performs the work. Direct routing needs no routing key. Setup preserves existing routing and can optionally change it to direct or hosted Jev routing. Hosted routing verification is a separate, consented paid call; it does not execute a task.
 
-The wizard offers local Ollama, an existing local endpoint, or a cloud model. For Ollama it detects the runtime, requests consent before installation/downloads, shows model sizes and memory guidance, and checks streaming, tool continuation, and a real edit in a disposable directory. CPU execution may be slow. It creates a separate model alias with an explicit context size rather than changing the original model. Runtime installation follows the official [Windows](https://docs.ollama.com/windows) and [Linux](https://docs.ollama.com/linux) installers; Linux may require sudo and systemd. On other Linux service configurations, start `ollama serve` separately and rerun setup.
-
-Generated configuration lives in `~/.teapilot/config`, with private file permissions (Windows user ACLs / POSIX mode 600). Repeating setup offers to retain and verify settings or reconfigure them. Downloads can be resumed after failure. Previous JSON generations are retained; the active `.env` pointer is replaced only after a complete save. A partial result disables unverified coding; rerun setup and choose reconfigure to validate it again. Configuration never silently enables cloud fallback.
-
-Setup prints an explicit `--config-dir` command so the next request uses the profile it checked, even from a checkout with its own settings. `--cwd` selects the working repository independently. Doctor shows the chosen configuration and environment override names, never their values. Interrupted first saves are identified separately from retained generations of an active profile.
-
-The router chooses a model; the execution model does the work. Direct routing requires no routing key. Setup preserves existing routing and offers an optional change to direct or hosted Jev routing. Hosted routing verification is a separate, consented paid call within the usual spending limits; it does not execute a task.
+Previous JSON generations are retained, and the active `.env` pointer changes only after a complete save. If setup reports partial readiness, coding is disabled until you rerun setup and verify the profile again.
 
 ## Check readiness
 
-Setup uses bold prompts, coloured status labels, and a final settings review. Redirected output stays plain; set `NO_COLOR` to disable styling. Use `teapilot setup --verbose` for raw Ollama progress details. Installed models appear once, and TeaPilot's internal context aliases are hidden from the model picker.
+Run the basic diagnostic at any time:
+
+```sh
+teapilot doctor
+```
+
+This verifies that the selected model appears in the endpoint’s model list and that state access works. A healthy basic check does not prove coding readiness.
+
+For real inference and tool checks, use:
+
+```sh
+teapilot doctor --live
+```
+
+Live hosted checks require interactive consent and use the normal spending ledger. Failed local endpoint checks look for an already-running Ollama server and explain how to reconfigure without switching providers automatically.
+
+Use `teapilot setup --verbose` for raw Ollama progress details. Prompts and status labels are styled in an interactive terminal; redirected output stays plain. Set `NO_COLOR` to disable styling.
 
 ## Optional web search
 
-Setup offers a local SearXNG container, an existing service URL, or skipping search. Empty URLs skip configuration; invalid URLs can be corrected. Failed search checks preserve previous search settings and let model configuration finish saving. Search is activated only after a successful JSON connectivity check and consent; requests still require `--web`.
+Setup can connect TeaPilot to a local SearXNG container, an existing SearXNG service, or no search service. Search is used only when you pass `--web` to a supported request.
 
-Local setup requires an installed, running Docker engine using Linux containers and a local Docker context. If Docker is unavailable, setup provides installation guidance and continues. TeaPilot does not install Docker automatically. The consent prompt covers the SearXNG image download, background service, and test query. Search runs locally, but queries are forwarded to external search engines.
+For local SearXNG, you need a running Docker engine using Linux containers and a local Docker context. TeaPilot does not install Docker. The setup consent covers downloading the official `docker.io/searxng/searxng:latest` image, running the background service, and sending a test query. Search runs locally, but queries are forwarded to external search engines.
 
-The container uses the official `docker.io/searxng/searxng:latest` image, binds a Docker-assigned port only on `127.0.0.1`, enables JSON results, and saves its verified URL automatically. Settings live in `searxng/settings.yml` inside the selected profile. The container restarts with Docker unless explicitly stopped. Rerunning setup reuses it. See the [SearXNG container documentation](https://docs.searxng.org/admin/installation-docker).
+Manage the local service with:
 
 ```sh
 teapilot search status
-teapilot search stop
 teapilot search start
+teapilot search stop
 teapilot search remove
 ```
 
-Use `--config-dir PATH` to manage a specific profile. `status` reports the container state and URL without sending a search query. `start` requests consent and verifies search; for a newly created service, rerun setup to save its URL. `remove` requests confirmation and removes only that profile's container, retaining its settings and downloaded image. Disabling search in setup does not stop the container. Stop it separately if desired. Removing/recreating a container can change its assigned port; rerun setup to reconnect. These commands never remove unrelated containers or automatically update existing images.
+Use `--config-dir PATH` to manage a specific profile. `status` reports the container and URL without querying search. `start` requests consent and verifies the service. `remove` confirms before removing only that profile’s container; it retains the settings and downloaded image. Disabling search in setup does not stop the container.
 
-## Model diagnostics
-
-`teapilot doctor` verifies the selected model appears in the endpoint's model list and checks state access. `teapilot doctor --live` also runs real inference and tool checks and offers separate hosted routing verification. Paid live checks require interactive consent and use the normal spending ledger. A healthy basic doctor does not prove coding readiness. Failed local endpoint checks also look for an already-running Ollama server and explain how to reconfigure without switching automatically.
+The container binds a Docker-assigned port only on `127.0.0.1` and saves its verified URL in `searxng/settings.yml` inside the selected profile. It restarts with Docker and is reused by later setup runs. Removing and recreating it can change the port, so rerun setup to reconnect. See the [SearXNG container documentation](https://docs.searxng.org/admin/installation-docker).
 
 ## Scripted local setup
 
-For scripted setup against an **existing local endpoint**, with a new configuration directory:
+For automation against an **existing local endpoint**:
 
 ```sh
 teapilot setup --non-interactive --endpoint http://127.0.0.1:8080/v1 --model my-model --context-tokens 32768
 ```
 
-Provide a local endpoint credential through `LOCAL_API_KEY` if needed. This mode does not install runtimes, download models, replace existing configuration, or authorize paid probes. Never pass API keys as command-line arguments. Setup returns `2` for partial readiness.
-
-For installation from source, see the [README](../README.md#quick-start). For manual setup, see [configuration](03-configuration.md).
+Provide an endpoint credential through `LOCAL_API_KEY` when needed. Never put API keys in command-line arguments. Non-interactive setup does not install runtimes, download models, replace existing configuration, or authorize paid probes. It returns exit code `2` for partial readiness.
 
 [Back to README](../README.md)
+
