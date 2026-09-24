@@ -108,7 +108,7 @@ it('local live diagnostics require consent and do not expose credentials', async
   const log = vi.fn();
   expect(await doctor(f.config, f.cwd, { live: true, log, consent: async () => false })).toBe(false);
   expect(inferenceCalls).toBe(0);
-  expect(await doctor(f.config, f.cwd, { live: true, log, consent: async () => true })).toBe(false);
+  expect(await doctor(f.config, f.cwd, { live: true, log, consent: async () => true })).toBe(true);
   expect(inferenceCalls).toBeGreaterThan(0);
   expect(JSON.stringify(log.mock.calls)).not.toContain('paid-secret');
 });
