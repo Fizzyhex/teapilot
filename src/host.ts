@@ -17,7 +17,7 @@ import { withPrerequisites, type Mode, type SessionGrants, type Permission } fro
 import { capabilityPlanner, readRoutingPlan } from './routing/intent.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; summary?: string; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
@@ -47,8 +47,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   const currentPrompt = prompt + (request.correction ? `\nUser correction:\n${request.correction}` : '');
   // Leave room for system instructions and tool schemas while retaining whole,
   // recent turns. The inference boundary remains the final exact admission check.
-  const currentLength = currentPrompt.length + (request.context?.length ? JSON.stringify(request.context).length + 64 : 0);
-  const historyLimit = Math.max(currentLength, Math.min(config.policy.limits.maxPromptChars, 8_000));
+  const currentLength = currentPrompt.length + (request.context?.length ? JSON.stringify(request.context).length + 64 : 0) + (request.summary?.length ?? 0);
+  const historyLimit = Math.max(currentLength, config.policy.limits.maxPromptChars);
   const conversation = prepareConversation(currentPrompt, request.context ?? [], request.history ?? [], historyLimit);
   if (conversation.omitted) dependencies.onEvent?.({ type: 'history_omitted', turns: conversation.omitted });
   if (request.web && !request.authorization) {
@@ -164,6 +164,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           granted_access: request.authorization?.list(),
           web_enabled: Boolean(request.web),
           history: conversation.history,
+          compacted_summary: request.summary,
           ...(scope ? { escalation: { ...scope, evidence: previous?.reason } } : {}),
         },
         actor_permissions: config.policy.permissions,
@@ -237,7 +238,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           return activate(required, reason, signal);
         } : undefined,
         unresolvedChecks: previous?.unresolvedChecks,
-        history: conversation.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
+        history: conversation.history, summary: request.summary, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
           const approved = await dependencies.approve(approval);
           await telemetry.event('approval', { kind: approval.kind, approved });
