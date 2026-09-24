@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { estimateTokens, generateSummaryWithUsage } from '@earendil-works/pi-coding-agent';
 import type { Config, Tier, TierPreference } from '../config.js';
 import type { ActivitySink } from '../activity.js';
 import { emptyUsage } from '../integration/inference.js';
@@ -98,6 +97,28 @@ export function estimateSessionContextTokens(summary: string | undefined, histor
     + history.reduce((sum, turn) => sum + turnTokens(turn), 0);
 }
 
+function estimateAgentMessageTokens(message: AgentMessage): number {
+  if (message.role === 'user') {
+    const text = typeof message.content === 'string'
+      ? message.content
+      : message.content.map(part => part.type === 'text' ? part.text : '[image]').join('\n');
+    return estimateTextTokens(text) + 32;
+  }
+  if (message.role === 'system') return estimateTextTokens(typeof message.content === 'string' ? message.content : JSON.stringify(message.content)) + 32;
+  if (message.role === 'assistant') {
+    const text = message.content.map(part => part.type === 'text' ? part.text
+      : part.type === 'thinking' ? part.thinking
+      : part.type === 'toolCall' ? part.name + JSON.stringify(part.arguments)
+      : '').join('\n');
+    return estimateTextTokens(text) + 32;
+  }
+  if (message.role === 'toolResult') {
+    const text = message.content.map(part => part.type === 'text' ? part.text : '[image]').join('\n');
+    return estimateTextTokens(text) + 32;
+  }
+  return estimateTextTokens(JSON.stringify(message)) + 32;
+}
+
 function conversationCut(history: ConversationTurn[], keepRecentTokens: number, force: boolean): number {
   if (history.length < 2) return 0;
   let kept = 0;
@@ -143,6 +164,7 @@ async function summarize(
   const { profile, summaryReserveTokens, summaryOutputTokens } = policy(config, tier);
   const state: InferenceState = { turns: 0 };
   const stream = guardedStream(config, tier, budget, telemetry, state, { maxOutputTokens: summaryOutputTokens });
+  const { generateSummaryWithUsage } = await import('@earendil-works/pi-coding-agent');
   const result = await generateSummaryWithUsage(
     messages,
     piModel(modelFor(config, tier), profile),
@@ -228,7 +250,7 @@ export async function compactSessionConversation(
 }
 
 function messageTokens(messages: AgentMessage[]): number {
-  return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+  return messages.reduce((sum, message) => sum + estimateAgentMessageTokens(message), 0);
 }
 
 function agentCut(messages: AgentMessage[], keepRecentTokens: number, force = false): number {
@@ -238,7 +260,7 @@ function agentCut(messages: AgentMessage[], keepRecentTokens: number, force = fa
   if (candidates.length < 2) return 0;
   let kept = 0;
   for (let index = messages.length - 1; index >= 0; index--) {
-    kept += estimateTokens(messages[index]!);
+    kept += estimateAgentMessageTokens(messages[index]!);
     if (kept < keepRecentTokens) continue;
     const cut = [...candidates].reverse().find(candidate => candidate <= index) ?? candidates[0]!;
     if (cut > candidates[0]!) return cut;
