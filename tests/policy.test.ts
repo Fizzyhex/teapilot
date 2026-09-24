@@ -1,8 +1,9 @@
 import { afterEach, expect, it } from 'vitest';
-import { link, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createReadTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import { ExecutionPolicy, automaticCommand, cleanChildEnvironment } from '../src/execution/policy.js';
+import { SessionGrants, singleRepository } from '../src/execution/grants.js';
 import { fixture } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -52,4 +53,41 @@ it('never treats arbitrary shell syntax as read-only inspection', () => {
   for (const command of ['git status --short; rm -rf /', 'git -c alias.x=!evil x', 'git diff', 'npm test', 'echo $(secret)', 'git status --short\nwhoami', 'git status --short && echo yes']) expect(automaticCommand(command, [])).toBe(false);
   expect(automaticCommand('npm test', ['npm test'])).toBe(true);
   expect(cleanChildEnvironment({ PATH: 'tools', OPENROUTER_API_KEY: 'secret', SOME_SECRET: 'hidden', NODE_OPTIONS: 'evil' })).toEqual({ PATH: 'tools' });
+});
+
+it('grants Code write and shell up front only inside a single repository', async () => {
+  const f = await setup();
+  const repo = join(f.cwd, 'repo'), workspace = join(f.cwd, 'workspace');
+  await mkdir(join(repo, '.git'), { recursive: true }); await mkdir(join(repo, 'src'));
+  for (const name of ['a', 'b']) await mkdir(join(workspace, name, '.git'), { recursive: true });
+  expect(await singleRepository(join(repo, 'src'))).toBe(true);
+  expect(await singleRepository(workspace)).toBe(false);
+  expect(await singleRepository(f.cwd)).toBe(false);
+  expect((await SessionGrants.create(repo, f.config, 'code')).list()).toEqual(['inference', 'repository.read', 'repository.write', 'repository.shell']);
+  for (const root of [f.cwd, workspace]) expect((await SessionGrants.create(root, f.config, 'code')).list()).toEqual(['inference', 'repository.read']);
+  expect((await SessionGrants.create(workspace, f.config, 'chat')).list()).toEqual(['inference']);
+  // A work tree whose root holds two nested repositories is treated like a workspace.
+  await mkdir(join(workspace, '.git'));
+  expect(await singleRepository(workspace)).toBe(false);
+});
+
+it('drops write and shell when the session root moves and asks again for the new root', async () => {
+  const f = await setup();
+  const repo = join(f.cwd, 'repo'), sub = join(repo, 'sub');
+  await mkdir(join(repo, '.git'), { recursive: true }); await mkdir(sub);
+  const grants = await SessionGrants.create(repo, f.config, 'code');
+  const events: any[] = [];
+  await grants.reroot(sub, 'code', event => events.push(event));
+  expect(grants.root).toBe(await realpath(sub));
+  expect(grants.list()).toEqual(['inference', 'repository.read']);
+  expect(events).toEqual([{ type: 'root_changed', from: await realpath(repo), cwd: await realpath(sub), revoked: ['repository.write', 'repository.shell'], permissions: ['inference', 'repository.read'] }]);
+  const approvals: any[] = [];
+  expect(await grants.request(['repository.write'], 'Edit a file.', async approval => { approvals.push(approval); return true; })).toBe(true);
+  expect(approvals).toMatchObject([{ kind: 'capability', permissions: ['repository.write'], cwd: await realpath(sub) }]);
+  await grants.reroot(repo, 'chat');
+  expect(grants.list()).toEqual(['inference']);
+  await expect(grants.reroot(join(repo, 'missing'), 'code')).rejects.toThrow();
+  await writeFile(join(repo, 'file.txt'), 'x');
+  await expect(grants.reroot(join(repo, 'file.txt'), 'code')).rejects.toThrow('Not a directory');
+  expect(grants.root).toBe(await realpath(repo));
 });

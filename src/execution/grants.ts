@@ -1,4 +1,5 @@
-import { realpath } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { Config, Workload } from '../config.js';
 import type { EventSink } from '../integration/events.js';
 import type { Approve } from './policy.js';
@@ -19,13 +20,35 @@ export function withPrerequisites(requested: readonly Permission[]): Permission[
   return permissions.filter(permission => result.has(permission));
 }
 
+const hasGit = (path: string) => stat(join(path, '.git')).then(() => true, () => false);
+/**
+ * True only inside one Git work tree that is not itself a folder of repositories (two or more
+ * immediate children with `.git`). Unclear cases (unreadable, very wide) count as false.
+ */
+export async function singleRepository(root: string): Promise<boolean> {
+  let inside = false;
+  for (let path = root, depth = 0; !inside && depth < 128; depth++) {
+    inside = await hasGit(path);
+    if (dirname(path) === path) break;
+    path = dirname(path);
+  }
+  if (!inside) return false;
+  const children = await readdir(root, { withFileTypes: true })
+    .then(entries => entries.filter(entry => entry.isDirectory() && entry.name !== '.git'), () => undefined);
+  if (!children || children.length > 1000) return false;
+  return (await Promise.all(children.map(entry => hasGit(join(root, entry.name))))).filter(Boolean).length < 2;
+}
+
 /** Host-owned, in-memory authority. Never deserialize this object from model/client input. */
 export class SessionGrants {
   private granted = new Set<Permission>();
-  private constructor(readonly root: string, private readonly ceiling: readonly Permission[]) {}
+  private constructor(private current: string, private readonly ceiling: readonly Permission[]) {}
+  get root(): string { return this.current; }
+  /** Code mode grants write and shell up front only in a single repository; elsewhere they are requested on first need. */
   static async create(cwd: string, config: Config, mode: Mode, web = false): Promise<SessionGrants> {
     const state = new SessionGrants(await realpath(cwd), [...config.policy.permissions]);
-    for (const permission of ['inference', ...(mode === 'code' ? repositoryPermissions : []), ...(web ? ['web.search'] : [])] as Permission[]) {
+    const repository = mode !== 'code' ? [] : await singleRepository(state.root) ? repositoryPermissions : ['repository.read'];
+    for (const permission of ['inference', ...repository, ...(web ? ['web.search'] : [])] as Permission[]) {
       if (state.ceiling.includes(permission)) state.granted.add(permission);
     }
     if (!state.granted.has('repository.read')) for (const permission of repositoryPermissions) state.granted.delete(permission);
@@ -49,6 +72,20 @@ export class SessionGrants {
     if (approved) for (const permission of missing) this.granted.add(permission);
     await emit?.(approved ? 'grant_granted' : 'grant_denied', { permissions: missing, cwd: this.root });
     return approved;
+  }
+  /**
+   * Moves the session to another directory. Write and shell never follow; read follows only in Code
+   * mode and only if still held, so a revocation carries too. Anything more is requested for the new root.
+   */
+  async reroot(cwd: string, mode: Mode, onEvent?: EventSink): Promise<void> {
+    const root = await realpath(cwd);
+    if (!(await stat(root)).isDirectory()) throw new Error(`Not a directory: ${root}`);
+    if (root === this.current) return;
+    const keep: Permission[] = mode === 'code' && this.granted.has('repository.read') ? ['repository.read'] : [];
+    const revoked = repositoryPermissions.filter(value => !keep.includes(value) && this.granted.delete(value));
+    const from = this.current;
+    this.current = root;
+    onEvent?.({ type: 'root_changed', from, cwd: root, revoked, permissions: this.list() });
   }
   revoke(permission: Permission, onEvent?: EventSink): void {
     const removed = (permission === 'repository.read' ? repositoryPermissions : [permission]).filter(value => this.granted.delete(value));

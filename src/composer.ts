@@ -10,6 +10,8 @@ export interface ChatPromptState {
   mode?: Mode;
   grants?: Permission[];
   tier?: TierPreference;
+  /** Session root; overrides the launch directory after /cd. */
+  cwd?: string;
 }
 
 export interface ComposerContext extends ChatPromptState {
@@ -101,7 +103,7 @@ export function composerFrame(text: string, cursor: number, width: number, heigh
     const hints = ['@ files · Tab: complete · Enter: newline · Shift+Enter: send', '@ files · Shift+Enter: send', 'Shift+Enter: send', '@ files'];
     const hint = hints.find(value => cellWidth(value) + Math.min(cellWidth(model), Math.floor(columns / 3)) + 1 <= columns) ?? '';
     const access = context.grants?.filter(value => value !== 'inference').map(value => value.replace('repository.', 'repo.')).join(', ') || 'none';
-    output.unshift(muted + information(directoryLabel(cwd) + (context.mode ? ` · Access: ${access}` : ''), `Session: $${context.spentUsd.toFixed(6)}`, columns) + reset);
+    output.unshift(muted + information(directoryLabel(context.cwd ?? cwd) + (context.mode ? ` · Access: ${access}` : ''), `Session: $${context.spentUsd.toFixed(6)}`, columns) + reset);
     output.push(muted + information(hint, model, columns) + reset);
   }
   output.push(...notices.map(line => muted + pad(line, columns) + reset));

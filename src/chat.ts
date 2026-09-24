@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import type { HostRequest, HostResult } from './host.js';
 import { prepareConversation, type ConversationTurn } from './integration/events.js';
 import type { ChatPromptState } from './composer.js';
@@ -6,7 +8,7 @@ import type { Approve } from './execution/policy.js';
 import type { EventSink } from './integration/events.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
-const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /permissions, /revoke <permission>, /exit, /quit`;
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /revoke <permission>, /exit, /quit`;
 
 /**
  * One session loop for every mode (chat, ask, code). The mode selects instructions
@@ -26,6 +28,7 @@ export async function runSession(options: {
   let history: ConversationTurn[] = options.request.history ?? [];
   let mode: Mode = options.request.mode ?? 'chat';
   const grants = options.request.authorization;
+  let cwd = options.request.cwd;
   let prompt = options.request.prompt;
   let correction = options.request.correction;
   let tier: TierPreference = options.request.tier ?? 'auto';
@@ -35,7 +38,7 @@ export async function runSession(options: {
   let lastModel: string | undefined;
   while (!options.request.signal?.aborted) {
     if (!prompt.trim()) {
-      try { prompt = await options.input({ spentUsd, lastModel, tier, ...(grants ? { mode, grants: grants.list() } : {}) }); }
+      try { prompt = await options.input({ spentUsd, lastModel, tier, ...(grants ? { mode, grants: grants.list(), cwd: grants.root } : {}) }); }
       catch (error) {
         if (error instanceof Error && error.name === 'TerminalClosedError') break;
         throw error;
@@ -46,7 +49,19 @@ export async function runSession(options: {
     if (!prompt) continue;
     if (prompt.startsWith('/')) {
       const [command, value, extra] = prompt.split(/\s+/);
-      if (command === '/permissions' && !value) options.log?.(`Session access (${grants?.root ?? options.request.cwd}): ${grants?.list().join(', ') || 'none'}`);
+      if (command === '/cd') {
+        const target = prompt.slice(3).trim().replace(/^(["'])(.*)\1$/, '$2');
+        let moved = !target;
+        if (!grants) options.log?.('/cd needs a session with access grants.');
+        else if (target) try {
+          await grants.reroot(resolve(grants.root, target.replace(/^~(?=$|[\\/])/, homedir())), mode, options.onEvent);
+          cwd = grants.root; moved = true;
+        } catch (error) {
+          options.log?.(`Cannot change directory: ${(error as NodeJS.ErrnoException).code === 'ENOENT' ? `${target} does not exist` : error instanceof Error ? error.message : String(error)}. Root unchanged: ${grants.root}`);
+        }
+        if (grants && moved) options.log?.(`Root: ${grants.root}\nSession access: ${grants.list().join(', ') || 'none'}${mode === 'code'
+          && !(grants.allows('repository.write') && grants.allows('repository.shell')) ? ' (write and shell are requested for this root when first needed)' : ''}`);
+      } else if (command === '/permissions' && !value) options.log?.(`Session access (${grants?.root ?? cwd}): ${grants?.list().join(', ') || 'none'}`);
       else if (command === '/revoke' && !extra && permissions.includes(value as typeof permissions[number])) {
         grants?.revoke(value as typeof permissions[number], options.onEvent);
         options.log?.(`Session access: ${grants?.list().join(', ') || 'none'}`);
@@ -67,7 +82,7 @@ export async function runSession(options: {
     }
     // With session grants the host routes by mode and activates access on demand;
     // without them the mode's workload is fixed for the turn.
-    const result = await options.run({ ...options.request, prompt, correction, tier, relatedTier, history,
+    const result = await options.run({ ...options.request, cwd, prompt, correction, tier, relatedTier, history,
       mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode) });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
