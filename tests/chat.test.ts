@@ -32,7 +32,7 @@ it('continues after an opening prompt and carries the conversation and correctio
   const run = vi.fn(async (_request: HostRequest) => result);
   expect(await runChat({ request: { prompt: 'Help plan', correction: 'Keep it simple', cwd: '.', web: true }, maxPromptChars: 2000, input, run })).toBe(0);
   expect(run).toHaveBeenCalledTimes(2);
-  expect(run.mock.calls[0]![0]).toMatchObject({ workload: 'ask', chat: true, web: true, history: [] });
+  expect(run.mock.calls[0]![0]).toMatchObject({ workload: 'ask', mode: 'chat', web: true, history: [] });
   expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'Cost', correction: undefined, history: [{ user: 'Help plan\nUser correction:\nKeep it simple', assistant: result.text }] });
 });
 
