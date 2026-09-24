@@ -6,6 +6,7 @@ import { runAttempt } from '../src/agents/run.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { estimateInputTokens, estimateTextTokens, MAX_PAYLOAD_BYTES } from '../src/inference/context.js';
+import { formatCompactionSummary } from '../src/inference/compaction.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -82,4 +83,14 @@ it('counts Unicode, punctuation, schemas and framing rather than JSON escape byt
   const messages = [{ role: 'user', content: 'hello\nworld' }];
   expect(estimateInputTokens(JSON.stringify({ messages, tools: [{ description: 'search' }] }))).toBeGreaterThan(estimateInputTokens(JSON.stringify({ messages })));
   expect(estimateInputTokens(JSON.stringify({ messages, model: 'x'.repeat(20000) }))).toBe(estimateInputTokens(JSON.stringify({ messages })));
+});
+
+
+it('replays compacted session context as an explicitly untrusted history message', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, { text: 'continued' }); });
+  const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', prompt: 'continue', summary: 'Keep src/parser.ts and the exact E_PARSE error.', web: false, approve: async () => true });
+  expect(result.success).toBe(true);
+  expect(JSON.stringify(bodies[0].messages)).toContain(formatCompactionSummary('Keep src/parser.ts and the exact E_PARSE error.'));
+  expect(JSON.stringify(bodies[0].messages)).toContain('explicitly untrusted summary');
 });
