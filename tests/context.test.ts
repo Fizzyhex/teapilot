@@ -5,7 +5,7 @@ import { completion, events, fixture, mockServer } from './helpers.js';
 import { runAttempt } from '../src/agents/run.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
-import { estimateInputTokens, estimateTextTokens, MAX_PAYLOAD_BYTES } from '../src/inference/context.js';
+import { calibratedTokens, estimateInputTokens, estimateTextTokens, MAX_PAYLOAD_BYTES } from '../src/inference/context.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -82,4 +82,93 @@ it('counts Unicode, punctuation, schemas and framing rather than JSON escape byt
   const messages = [{ role: 'user', content: 'hello\nworld' }];
   expect(estimateInputTokens(JSON.stringify({ messages, tools: [{ description: 'search' }] }))).toBeGreaterThan(estimateInputTokens(JSON.stringify({ messages })));
   expect(estimateInputTokens(JSON.stringify({ messages, model: 'x'.repeat(20000) }))).toBe(estimateInputTokens(JSON.stringify({ messages })));
+  expect(estimateTextTokens(`\n${' '.repeat(12)}return;`)).toBe(4);
+});
+
+// A self-contained game page shaped like the one that tripped admission:
+// 4-space indentation, inline CSS and JS.
+function indentedPage(bytes: number): string {
+  const head = '<!DOCTYPE html>\n<html lang="en">\n<head>\n    <meta charset="UTF-8">\n    <title>Pong</title>\n    <style>\n        body {\n            margin: 0;\n            background: #111;\n            display: flex;\n            justify-content: center;\n        }\n        canvas { border: 2px solid #fff; }\n    </style>\n</head>\n<body>\n    <canvas id="game" width="800" height="600"></canvas>\n    <script>\n        const canvas = document.getElementById(\'game\');\n        const ctx = canvas.getContext(\'2d\');\n        const keys = {};\n        document.addEventListener(\'keydown\', event => { keys[event.key] = true; });\n\n';
+  const block = (i: number) => `        // Paddle ${i}: move within bounds, then bounce the ball off its face.
+        function updatePaddle${i}(paddle, ball, deltaTime) {
+            if (keys.ArrowUp && paddle.y > 0) {
+                paddle.y -= PADDLE_SPEED * deltaTime;
+            } else if (keys.ArrowDown && paddle.y < canvas.height - paddle.height) {
+                paddle.y += PADDLE_SPEED * deltaTime;
+            }
+            if (ball.x - ball.radius < paddle.x + paddle.width && ball.y > paddle.y) {
+                ball.dx = Math.abs(ball.dx) * 1.05;
+                ball.dy += (ball.y - (paddle.y + paddle.height / 2)) * 0.1;
+            }
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+        }
+
+`;
+  let page = head;
+  for (let i = 0; Buffer.byteLength(page) < bytes; i++) page += block(i);
+  return `${page}    </script>\n</body>\n</html>\n`;
+}
+
+// Script tool calls, then a final answer. `usage` maps request bytes to reported
+// prompt tokens; the local model in the review reported ~4.2 bytes per token.
+async function scripted(steps: { name: string; arguments: unknown }[], usage?: (bytes: number) => number) {
+  let calls = 0;
+  const f = await setup((body, _req, res) => {
+    const step = steps[calls++];
+    res.setHeader('Content-Type', 'text/event-stream');
+    const common = { id: 'mock-chat', object: 'chat.completion.chunk', created: 1, model: 'mock-model' };
+    const delta = step ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${calls}`, type: 'function', function: { name: step.name, arguments: JSON.stringify(step.arguments) } }] } : { role: 'assistant', content: 'Done.' };
+    const prompt = usage?.(Buffer.byteLength(JSON.stringify(body)));
+    res.write(`data: ${JSON.stringify({ ...common, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ ...common, choices: [{ index: 0, delta: {}, finish_reason: step ? 'tool_calls' : 'stop' }], ...(prompt === undefined ? {} : { usage: { prompt_tokens: prompt, completion_tokens: 20, total_tokens: prompt + 20 } }) })}\n\n`);
+    res.end('data: [DONE]\n\n');
+  });
+  const result = await runAttempt({ ...f, tier: 'normal', workload: 'coder', web: false, prompt: 'Create a self-contained Pong game in index.html.', approve: async () => true });
+  return { f, result, admissions: (await events(f.config)).filter(e => e.type === 'context_admission') };
+}
+const write = (content: string) => ({ name: 'write', arguments: { path: 'index.html', content } });
+
+it('admits a written 13 KB indented page at 16k with 4k reserved output', async () => {
+  const page = indentedPage(13 * 1024);
+  const { f, result, admissions } = await scripted([write(page)]);
+  expect(result, JSON.stringify(result)).toMatchObject({ success: true, toolCalls: 1 });
+  expect(await readFile(join(f.cwd, 'index.html'), 'utf8')).toBe(page);
+  expect(admissions).toHaveLength(2);
+  expect(admissions[1].payloadBytes).toBeGreaterThan(20000);
+  expect(admissions.every(e => e.method === 'conservative-lexical' && !e.rejection && e.reservedOutputTokens === 4096 && e.estimatedInputTokens + 4096 <= 16384)).toBe(true);
+});
+
+it('admits a page in a tool call and result, and rejects clearly oversized code', () => {
+  const payload = (content: string) => JSON.stringify({ messages: [
+    { role: 'system', content: 'You are a careful coding agent. Read before editing, verify after writing, and report what changed.\n'.repeat(80) },
+    { role: 'user', content: 'Create a self-contained Pong game in index.html.' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'index.html', content }) } }] },
+    { role: 'tool', tool_call_id: 'call-1', content: `Successfully wrote ${Buffer.byteLength(content)} bytes to index.html` },
+  ] });
+  const fits = payload(indentedPage(13 * 1024));
+  expect(Buffer.byteLength(fits)).toBeGreaterThan(22000);
+  expect(estimateInputTokens(fits) + 4096).toBeLessThanOrEqual(16384);
+  expect(estimateInputTokens(payload(indentedPage(120 * 1024))) + 4096).toBeGreaterThan(16384);
+});
+
+it('calibrates from reported input within an attempt, bounded below', async () => {
+  expect(calibratedTokens(10000)).toBe(10000);
+  expect(calibratedTokens(10000, { estimated: 5000, reported: 3000 })).toBe(6600);
+  expect(calibratedTokens(10000, { estimated: 5000, reported: 10 })).toBe(6000);
+  expect(calibratedTokens(10000, { estimated: 5000, reported: 50000 })).toBe(20000);
+  // Written and read back: the page appears twice (~37 KB). Lexically too large,
+  // but the provider's earlier counts show it fits.
+  const page = indentedPage(13 * 1024);
+  const twice = await scripted([write(page), { name: 'read', arguments: { path: 'index.html' } }], bytes => Math.ceil(bytes / 4));
+  expect(twice.result, JSON.stringify(twice.result)).toMatchObject({ success: true, toolCalls: 2 });
+  const last = twice.admissions.at(-1);
+  expect(twice.admissions.map(e => e.method)).toEqual(['conservative-lexical', 'calibrated-lexical', 'calibrated-lexical']);
+  expect(last.payloadBytes).toBeGreaterThan(30000);
+  expect(last.lexicalTokens + 4096).toBeGreaterThan(16384);
+  expect(last.estimatedInputTokens + 4096).toBeLessThanOrEqual(16384);
+  // A tiny provider report cannot admit ~120 KB of code: the floor still rejects it.
+  const large = await scripted([write(indentedPage(120 * 1024))], () => 10);
+  expect(large.result.stopped).toBe('context_limit');
+  expect(large.admissions.at(-1)).toMatchObject({ method: 'calibrated-lexical', rejection: 'context_limit' });
 });
