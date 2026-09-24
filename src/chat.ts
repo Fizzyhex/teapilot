@@ -5,8 +5,9 @@ import { isMode, modes, permissions, repositoryPermissions, workloadFor, type Mo
 import type { Approve } from './execution/policy.js';
 import type { EventSink } from './integration/events.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
+import type { SessionCompactionInput, SessionCompactionResult } from './inference/compaction.js';
 
-const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /permissions, /revoke <permission>, /exit, /quit`;
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /compact [focus], /new, /permissions, /revoke <permission>, /exit, /quit`;
 
 /**
  * One session loop for every mode (chat, ask, code). The mode selects instructions
@@ -18,12 +19,14 @@ export async function runSession(options: {
   maxPromptChars: number;
   input: (state: ChatPromptState) => Promise<string>;
   run: (request: HostRequest) => Promise<HostResult>;
+  compact?: (input: SessionCompactionInput) => Promise<SessionCompactionResult>;
   once?: boolean;
   approve?: Approve;
   log?: (text: string) => void;
   onEvent?: EventSink;
 }): Promise<number> {
   let history: ConversationTurn[] = options.request.history ?? [];
+  let summary = options.request.summary;
   let mode: Mode = options.request.mode ?? 'chat';
   const grants = options.request.authorization;
   let prompt = options.request.prompt;
@@ -33,6 +36,28 @@ export async function runSession(options: {
   let exitCode = 0;
   let spentUsd = 0;
   let lastModel: string | undefined;
+
+  const compactContext = async (force: boolean, focus?: string) => {
+    if (!options.compact) {
+      if (force) options.log?.('Context compaction is unavailable in this host.');
+      return;
+    }
+    const result = await options.compact({ summary, history, force, focus, tier, relatedTier });
+    spentUsd += result.spentUsd;
+    if (result.performed && result.model) lastModel = result.model;
+    if (result.error) {
+      options.log?.(`${force ? 'Context' : 'Automatic context'} compaction failed: ${result.error}`);
+      return;
+    }
+    if (!result.performed) {
+      if (force) options.log?.('Nothing to compact yet.');
+      return;
+    }
+    summary = result.summary;
+    history = result.history;
+    options.log?.(`Context compacted: summarized ${result.compactedTurns} older turn${result.compactedTurns === 1 ? '' : 's'}; kept ${history.length} recent turn${history.length === 1 ? '' : 's'}.`);
+  };
+
   while (!options.request.signal?.aborted) {
     if (!prompt.trim()) {
       try { prompt = await options.input({ spentUsd, lastModel, tier, ...(grants ? { mode, grants: grants.list() } : {}) }); }
@@ -52,8 +77,10 @@ export async function runSession(options: {
         options.log?.(`Session access: ${grants?.list().join(', ') || 'none'}`);
       } else if (command === '/tier' && !extra && isTierPreference(value)) {
         tier = value; options.log?.(`Tier preference: ${tier}`);
+      } else if (command === '/compact') {
+        await compactContext(true, prompt.slice(command.length).trim() || undefined);
       } else if (command === '/new' && !value) {
-        history = []; correction = undefined; relatedTier = undefined; tier = 'auto'; options.log?.('Started a new task. Session access and spending remain available.');
+        history = []; summary = undefined; correction = undefined; relatedTier = undefined; tier = 'auto'; options.log?.('Started a new task. Session access and spending remain available.');
       } else if (command === '/mode' && !extra && isMode(value)) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,
@@ -67,16 +94,18 @@ export async function runSession(options: {
     }
     // With session grants the host routes by mode and activates access on demand;
     // without them the mode's workload is fixed for the turn.
-    const result = await options.run({ ...options.request, prompt, correction, tier, relatedTier, history,
+    const result = await options.run({ ...options.request, prompt, correction, tier, relatedTier, history, summary,
       mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode) });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;
     if (!result.success) exitCode = 2;
     const user = prompt + (correction ? `\nUser correction:\n${correction}` : '');
-    history = prepareConversation('', [], [...history, { user, assistant: result.text }], options.maxPromptChars).history;
+    const nextHistory = [...history, { user, assistant: result.text }];
+    history = options.compact ? nextHistory : prepareConversation('', [], nextHistory, options.maxPromptChars).history;
     correction = undefined;
     prompt = '';
+    if (options.compact) await compactContext(false);
     if (options.once) break;
   }
   return exitCode;
