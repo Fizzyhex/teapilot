@@ -13,6 +13,7 @@ import { serve } from './integration/service.js';
 import { SearchSetupError } from './search.js';
 import { TerminalPresentation } from './presentation.js';
 import { isMode, SessionGrants } from './execution/grants.js';
+import { compactSessionConversation } from './inference/compaction.js';
 
 const help = `teapilot — local and hosted personal agent
 
@@ -135,7 +136,9 @@ async function main(): Promise<void> {
       if (interactive && !values.json && !values.once) presentation.log(`${mode[0]!.toUpperCase()}${mode.slice(1)} session started. Type /exit or /quit to leave.`);
       process.exitCode = await runSession({ request: { ...request, authorization, mode }, maxPromptChars: config.policy.limits.maxPromptChars,
         input: state => ui ? ui.prompt('>', resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted' }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
-        run: execute, once: Boolean(values.once || values.json || !interactive), approve, log: message => presentation.log(message), onEvent: dependencies.onEvent });
+        run: execute,
+        compact: input => compactSessionConversation(config, input, { signal: controller.signal, onActivity: presentation.setActivity, onEvent: dependencies.onEvent, onProgress: message => presentation.log(redact(message)) }),
+        once: Boolean(values.once || values.json || !interactive), approve, log: message => presentation.log(message), onEvent: dependencies.onEvent });
     } else {
       const result = await execute(request);
       process.exitCode = result.success ? 0 : 2;
