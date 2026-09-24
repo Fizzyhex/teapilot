@@ -29,58 +29,21 @@ async function privateWrite(path: string, contents: string, signal: AbortSignal)
   } finally { await handle.close(); }
 }
 
+/** Best effort: after a commit, keep the active generation and the newest previous one for rollback. */
 export async function pruneGenerations(directory: string): Promise<void> {
   try {
-    // Read active generation filenames from .env
-    const envPath = resolve(directory, '.env');
-    const envContent = await readFile(envPath, 'utf8');
-    const envVars = parse(envContent);
-    const activeModelsFile = envVars.TEAPILOT_MODELS_FILE;
-    const activePolicyFile = envVars.TEAPILOT_POLICY_FILE;
-
-    // Extract active generation UUID
-    const activeUuid = activeModelsFile?.match(/^models-(.+?)\.json$/)?.[1];
-    if (!activeUuid) return;
-
-    // List all generation files
-    const files = await readdir(directory);
-    const generationRegex = /^(models|policy)-(.+?)\.json$/;
-    const generations = new Map<string, { models: string; policy: string; mtime?: number }>();
-
-    for (const file of files) {
-      const match = file.match(generationRegex);
-      if (!match || !match[1] || !match[2]) continue;
-      const type = match[1]!, uuid = match[2]!;
-      if (!generations.has(uuid)) generations.set(uuid, { models: '', policy: '' });
-      const gen = generations.get(uuid)!;
-      if (type === 'models') gen.models = file;
-      else if (type === 'policy') gen.policy = file;
+    const active = parse(await readFile(resolve(directory, '.env'), 'utf8')).TEAPILOT_MODELS_FILE?.match(/^models-(.+)\.json$/)?.[1];
+    if (!active) return;
+    const generations = new Map<string, string[]>();
+    for (const file of await readdir(directory)) {
+      const revision = file.match(/^(?:models|policy)-(.+)\.json$/)?.[1];
+      if (revision && revision !== active) generations.set(revision, [...generations.get(revision) ?? [], file]);
     }
-
-    // Get mtimes for sorting (skip errors)
-    for (const [uuid, gen] of generations) {
-      try {
-        const stats = await stat(resolve(directory, gen.models));
-        gen.mtime = stats.mtime?.getTime() ?? 0;
-      } catch { }
-    }
-
-    // Identify generations to delete: keep active + 1 most recent previous
-    const toDelete = new Set<string>();
-    const otherUuids = Array.from(generations.keys())
-      .filter(uuid => uuid !== activeUuid)
-      .sort((a, b) => (generations.get(b)?.mtime ?? 0) - (generations.get(a)?.mtime ?? 0));
-
-    // Delete all except first (most recent)
-    for (const uuid of otherUuids.slice(1)) toDelete.add(uuid);
-
-    // Delete files
-    for (const uuid of toDelete) {
-      const gen = generations.get(uuid)!;
-      try { await rm(resolve(directory, gen.models), { force: true }); } catch { }
-      try { await rm(resolve(directory, gen.policy), { force: true }); } catch { }
-    }
-  } catch { }
+    const newest = async (files: string[]) => Math.max(0, ...await Promise.all(files.map(file => stat(resolve(directory, file)).then(info => info.mtimeMs, () => 0))));
+    const ranked = await Promise.all([...generations].map(async ([revision, files]) => ({ revision, files, mtime: await newest(files) })));
+    ranked.sort((a, b) => b.mtime - a.mtime);
+    for (const { files } of ranked.slice(1)) for (const file of files) await rm(resolve(directory, file), { force: true }).catch(() => undefined);
+  } catch { /* pruning never blocks a committed save */ }
 }
 
 export async function saveConfiguration(directory: string, config: Config, env: Record<string, string>, signal: AbortSignal): Promise<void> {
@@ -97,7 +60,8 @@ export async function saveConfiguration(directory: string, config: Config, env: 
   const modelFile = `models-${revision}.json`, policyFile = `policy-${revision}.json`;
   const pending = resolve(directory, `.env-${revision}.tmp`);
   // Commit a complete generation by atomically replacing just its pointer. A
-  // cancelled write leaves the previous config usable; prior generations remain.
+  // cancelled write leaves the previous config usable; after a commit the
+  // newest previous generation is kept for rollback and older ones are pruned.
   try {
     await privateWrite(resolve(directory, modelFile), `${JSON.stringify(config.models, null, 2)}\n`, signal);
     await privateWrite(resolve(directory, policyFile), `${JSON.stringify(config.policy, null, 2)}\n`, signal);
@@ -219,7 +183,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   ui.log(`  Search:    ${searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);
   ui.log(`  Checks:    answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'}`);
   ui.log(`  Routing check: ${config.routingMode === 'direct' ? 'Not needed' : routingReady ? 'Passed' : 'Not verified; see routing result above'}`);
-  if (!options.nonInteractive && !await ui.confirm(hasConfiguration ? 'Save these settings? Previous configuration files will be retained.' : 'Save these settings?')) {
+  if (!options.nonInteractive && !await ui.confirm(hasConfiguration ? 'Save these settings? The previous configuration will be kept for rollback.' : 'Save these settings?')) {
     ui.log('Settings were not saved. Completed downloads and any local search service are retained.');
     return false;
   }
