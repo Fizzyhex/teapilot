@@ -2,6 +2,13 @@ import { z } from 'zod';
 
 export interface HostEvent { type: string; [key: string]: unknown }
 export type EventSink = (event: HostEvent) => void;
+
+/** Human-scaled byte size, matching the precision a progress line needs and no more. */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  return `${kb >= 10 ? Math.round(kb) : Math.round(kb * 10) / 10} KB`;
+}
 export const historySchema = z.array(z.object({ user: z.string().max(20_000), assistant: z.string().max(20_000) }).strict()).max(100);
 export const contextSchema = z.array(z.object({ name: z.string().max(1000), text: z.string().max(1_000_000), path: z.string().max(4096).optional() }).strict()).max(50);
 export type ConversationTurn = z.infer<typeof historySchema>[number];

@@ -10,6 +10,8 @@ export class Evidence {
   lastCheck?: 'passed' | 'failed';
   warning?: string;
   changedFiles = new Set<string>();
+  fileSizes = new Map<string, number>();
+  largestResult?: { tool: string; chars: number };
   unresolvedChecks: Set<string>;
   checks: Array<{ command: string; status: 'passed' | 'failed' }> = [];
   observations: Array<{ tool: string; failed: boolean; detail: string }> = [];
@@ -23,6 +25,9 @@ export class Evidence {
     const data = args as { path?: string; command?: string };
     this.observations.push({ tool: name, failed, detail: (result ?? '').slice(0, 700) });
     this.observations = this.observations.slice(-6);
+    // Cheap signal for which call likely dominated context, without re-serializing on demand.
+    const chars = (result ?? '').length + JSON.stringify(args ?? {}).length;
+    if (!this.largestResult || chars > this.largestResult.chars) this.largestResult = { tool: name, chars };
     this.failures = failed ? this.failures + 1 : 0;
     if (this.failures >= this.thresholds.consecutiveFailures) this.reason = 'tool_failures';
     if (['bash', 'powershell'].includes(name) && /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(String((args as { command?: string }).command))) {

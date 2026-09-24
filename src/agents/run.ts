@@ -1,4 +1,6 @@
 import type { ActivitySink } from '../activity.js';
+import { stat } from 'node:fs/promises';
+import { relative, resolve } from 'node:path';
 import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
 import { Type, type Message } from '@earendil-works/pi-ai';
 import { emptyUsage } from '../integration/inference.js';
@@ -28,7 +30,8 @@ export interface AttemptResult {
   success: boolean; text: string; reason?: EscalationReason;
   stopped?: string; turns: number; toolCalls: number; check?: 'passed' | 'failed';
   handoff?: string;
-  changedFiles?: string[]; shellRan?: boolean;
+  changedFiles?: string[]; fileSizes?: Record<string, number>; shellRan?: boolean;
+  largestToolResult?: { tool: string; chars: number };
   unresolvedChecks?: string[];
 }
 
@@ -112,6 +115,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     { role: 'assistant' as const, content: [{ type: 'text' as const, text: turn.assistant }], api: 'openai-completions' as const, provider: model.provider, model: model.id, timestamp: Date.now(), usage: emptyUsage(), stopReason: 'stop' as const },
   ]);
   const stream = guardedStream(config, tier, input.budget, telemetry, inference);
+  // Populated in afterToolCall (which has args) and consumed once by the matching
+  // tool_execution_end event below (which only carries the result).
+  const toolDetails = new Map<string, { path?: string; size?: number; command?: string }>();
   const agent = new Agent({
     initialState: { model: piModel(model, profile), systemPrompt: setup.systemPrompt, tools: setup.tools, thinkingLevel: profile.thinking, messages: history },
     streamFn: (...args) => {
@@ -134,6 +140,18 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
       evidence.observe(toolCall.name, args, isError, result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
+      const data = args as { path?: string; command?: string };
+      // Tools normalize args.path to an absolute path before executing; keep that
+      // for evidence (unambiguous for the model's continuation) but show relative
+      // paths in the per-call trail, matching how a person names files here.
+      const relPath = (path: string) => relative(policy.root, path) || path;
+      if (!isError && ['write', 'edit'].includes(toolCall.name) && data.path) {
+        let size: number | undefined;
+        try { size = (await stat(resolve(policy.root, data.path))).size; } catch { /* stat is a display nicety, never blocks the call */ }
+        if (size !== undefined) evidence.fileSizes.set(data.path, size);
+        toolDetails.set(toolCall.id, { path: relPath(data.path), size });
+      } else if (toolCall.name === 'read' && data.path) toolDetails.set(toolCall.id, { path: relPath(data.path) });
+      else if (['bash', 'powershell'].includes(toolCall.name) && data.command) toolDetails.set(toolCall.id, { command: data.command });
       if (evidence.warning) return { content: [...result.content, { type: 'text' as const, text: evidence.warning }] };
       return undefined;
     },
@@ -153,7 +171,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       input.onEvent?.({ type: 'message_end' });
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
       if (event.type === 'tool_execution_start') input.onActivity?.({ kind: 'waiting', label: `Running ${event.toolName}...` });
-      input.onEvent?.({ type: event.type, tool: event.toolName, ...('isError' in event ? { isError: event.isError } : {}) });
+      let detail: { path?: string; size?: number; command?: string } | undefined;
+      if (event.type === 'tool_execution_end') { detail = toolDetails.get(event.toolCallId); toolDetails.delete(event.toolCallId); }
+      input.onEvent?.({ type: event.type, tool: event.toolName, ...('isError' in event ? { isError: event.isError } : {}), ...detail });
     }
   });
   const timer = setTimeout(() => { timeout = true; agent.abort(); }, config.policy.limits.attemptTimeoutMs);
@@ -172,7 +192,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? 'unsupported' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
     ?? (evidence.unresolvedChecks.size || evidence.lastCheck === 'failed' ? 'test_failures' : evidence.failures ? 'tool_failures' : undefined);
   const success = !stopped && !reason && evidence.failures === 0 && evidence.lastCheck !== 'failed' && last?.role === 'assistant' && last.stopReason === 'stop' && Boolean(text.trim());
-  const changedFiles = [...evidence.changedFiles];
+  const relPath = (path: string) => relative(input.cwd, path) || path;
+  const changedFiles = [...evidence.changedFiles].map(relPath);
+  const fileSizes = Object.fromEntries([...evidence.fileSizes].map(([path, size]) => [relPath(path), size]));
   const handoff = JSON.stringify({
     stop: stopped ?? reason ?? 'incomplete', cwd: input.cwd,
     changedFiles, shellRan: policy.shellRan, checks: evidence.checks, unresolvedChecks: [...evidence.unresolvedChecks], currentCheck: evidence.lastCheck ?? 'not run after latest edit',
@@ -183,6 +205,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     success,
     text,
     changedFiles,
+    fileSizes,
+    largestToolResult: evidence.largestResult,
     unresolvedChecks: [...evidence.unresolvedChecks],
     shellRan: policy.shellRan,
     handoff: telemetry.redact(handoff),

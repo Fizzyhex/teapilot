@@ -6,7 +6,7 @@ import { defaultPolicy, JevRouter } from 'jevrouter';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type TierPreference, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
-import { prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
+import { formatSize, prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
 import { lockState, SpendGovernor } from './inference/budget.js';
 import { budgetedJev, localAvailable, type CancellableJevProvider } from './inference/providers.js';
 import { capabilities } from './routing/capabilities.js';
@@ -65,6 +65,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   let check: 'passed' | 'failed' | undefined;
   const models: string[] = [];
   const changedFiles = new Set<string>();
+  const fileSizes = new Map<string, number>();
   let shellRan = false;
   const activePermissions: Permission[] = ['inference'];
   let searchDisabled = false;
@@ -102,7 +103,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
       provider_error: 'Run teapilot doctor --live with this configuration to check the execution model.',
       unsupported: 'Check model context and tool support with teapilot doctor --live.',
-      context_limit: 'Reduce conversation or tool-result size; the estimated input plus reserved output exceeds the configured model context.',
+      context_limit: 'Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
       payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',
       budget: 'Review spending and remaining request/day limits before retrying.',
       ineffective_calls: 'Inspect the current files, then retry with a narrower concrete change.',
@@ -111,11 +112,15 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       cancelled: 'Review any existing edits before starting another request.',
       search_unavailable: `Check the search service connection and JSON output. ${searchRepair(config)}`,
     };
+    // A workload label such as ask.normal does not mean repository tools stayed
+    // unused: mid-run capability requests can grant write/shell under any workload.
+    const touchedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
+    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool result: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars).` : '';
     return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
-      selected?.startsWith('coder.') ? `Observed file edits: ${changedFiles.size ? [...changedFiles].join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}` : undefined,
-      selected?.startsWith('coder.') ? `Checks after latest observed edit: ${attempt.check ?? 'not run'}.` : undefined,
+      touchedRepository ? `Observed file edits: ${changedFiles.size ? [...changedFiles].map(path => fileSizes.has(path) ? `${path} (${formatSize(fileSizes.get(path)!)})` : path).join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}` : undefined,
+      touchedRepository ? `Checks after latest observed edit: ${attempt.check ?? 'not run'}.` : undefined,
       changedFiles.size || shellRan ? 'Existing edits remain; no automatic rollback was performed.' : undefined,
-      `Next: ${actions[stop] ?? 'Review the partial work, then retry with a smaller task.'}`,
+      `Next: ${actions[stop] ?? 'Review the partial work, then retry with a smaller task.'}${largest}`,
       attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
   };
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
@@ -249,6 +254,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       });
       check = previous.check;
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
+      for (const [path, size] of Object.entries(previous.fileSizes ?? {})) fileSizes.set(path, size);
       shellRan ||= Boolean(previous.shellRan);
       if (accessFailure) return await finish(false, 'approval_denied', incomplete(previous, accessFailure));
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check });

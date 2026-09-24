@@ -1,4 +1,4 @@
-import type { HostEvent } from './integration/events.js';
+import { formatSize, type HostEvent } from './integration/events.js';
 import { stripVTControlCharacters } from 'node:util';
 import type { Activity, ActivityUI } from './activity.js';
 import { loadClips, Playback, type Clips } from './art/playback.js';
@@ -11,6 +11,20 @@ export function terminalColour(tty: boolean | undefined, env = process.env): boo
   return Boolean(tty && env.TERM !== 'dumb' && env.NO_COLOR === undefined);
 }
 const paint = (text: string, code: string, enabled: boolean) => enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
+
+/** One line summarising a completed tool call, for a per-call progress trail. */
+export function describeTool(event: HostEvent): string {
+  const tool = String(event.tool ?? '');
+  const suffix = event.isError ? ' — failed' : '';
+  const path = typeof event.path === 'string' ? event.path : undefined;
+  if ((tool === 'write' || tool === 'edit') && path) {
+    const size = typeof event.size === 'number' ? ` (${formatSize(event.size)})` : '';
+    return `${tool} ${path}${size}${suffix}`;
+  }
+  if (tool === 'read' && path) return `read ${path}${suffix}`;
+  if (typeof event.command === 'string') return `shell: ${event.command}${suffix}`;
+  return `${tool}${suffix}`;
+}
 
 /** Style complete lines, retaining every Markdown character and code indent. */
 export class MarkdownOutput {
@@ -398,6 +412,7 @@ export class TerminalPresentation implements ActivityUI {
       else { this.markdown.push(event.text); this.showPreview(); this.draw(); }
     } else if (event.type === 'message_end') { this.clear(); this.endMessage(); this.draw(); }
     else if (event.type === 'tool_execution_start') this.setActivity({ kind: 'waiting', label: `Running ${String(event.tool)}...` });
+    else if (event.type === 'tool_execution_end') this.write(`${paint(describeTool(event), '2', this.colour)}\n`);
     else if (event.type === 'request_end' || event.type === 'request_error') this.pause();
   }
   private endMessage(): void {
