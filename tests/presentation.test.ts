@@ -40,6 +40,8 @@ it('describes a completed tool call for the progress trail', () => {
   expect(describeTool({ type: 'tool_execution_end', tool: 'repo_list' })).toBe('repo_list');
 });
 it('prints one progress line per finished tool call, plain without colour, none under --json', () => {
+  vi.stubEnv('NO_COLOR', undefined);
+  vi.stubEnv('TERM', 'xterm');
   Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
   Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: true });
   const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
