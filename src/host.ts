@@ -48,7 +48,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   // Leave room for system instructions and tool schemas while retaining whole,
   // recent turns. The inference boundary remains the final exact admission check.
   const currentLength = currentPrompt.length + (request.context?.length ? JSON.stringify(request.context).length + 64 : 0);
-  const historyLimit = Math.max(currentLength, config.policy.limits.maxPromptChars - (request.summary?.length ?? 0));
+  const historyLimit = Math.max(currentLength, Math.min(config.policy.limits.maxPromptChars, 8_000) - (request.summary?.length ?? 0));
   const conversation = prepareConversation(currentPrompt, request.context ?? [], request.history ?? [], historyLimit);
   if (conversation.omitted) dependencies.onEvent?.({ type: 'history_omitted', turns: conversation.omitted });
   if (request.web && !request.authorization) {
