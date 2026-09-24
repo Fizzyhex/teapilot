@@ -231,18 +231,20 @@ function messageTokens(messages: AgentMessage[]): number {
   return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 }
 
-function agentCut(messages: AgentMessage[], keepRecentTokens: number): number {
-  const candidates = messages.flatMap((message, index) =>
-    message.role === 'user' || message.role === 'assistant' ? [index] : []);
+function agentCut(messages: AgentMessage[], keepRecentTokens: number, force = false): number {
+  // Cut only at user-turn boundaries. This keeps assistant tool calls and their
+  // results on the same side of the checkpoint and avoids orphaned responses.
+  const candidates = messages.flatMap((message, index) => message.role === 'user' ? [index] : []);
   if (candidates.length < 2) return 0;
   let kept = 0;
   for (let index = messages.length - 1; index >= 0; index--) {
     kept += estimateTokens(messages[index]!);
     if (kept < keepRecentTokens) continue;
     const cut = candidates.find(candidate => candidate >= index) ?? candidates.at(-1)!;
-    return cut > candidates[0]! ? cut : 0;
+    if (cut > candidates[0]!) return cut;
+    break;
   }
-  return 0;
+  return force ? candidates[1]! : 0;
 }
 
 export async function compactAgentContext(options: {
@@ -253,12 +255,14 @@ export async function compactAgentContext(options: {
   telemetry: Telemetry;
   signal?: AbortSignal;
   onActivity?: ActivitySink;
+  force?: boolean;
+  trigger?: 'threshold' | 'overflow';
 }): Promise<AgentCompactionResult> {
   const tokensBefore = messageTokens(options.messages);
   const settings = policy(options.config, options.tier);
-  if (tokensBefore <= settings.triggerTokens) return { messages: options.messages, compacted: false, tokensBefore };
+  if (!options.force && tokensBefore <= settings.triggerTokens) return { messages: options.messages, compacted: false, tokensBefore };
 
-  const cut = agentCut(options.messages, settings.keepRecentTokens);
+  const cut = agentCut(options.messages, settings.keepRecentTokens, Boolean(options.force));
   if (cut <= 0) return { messages: options.messages, compacted: false, tokensBefore };
 
   const before = options.messages.slice(0, cut);
@@ -269,16 +273,17 @@ export async function compactAgentContext(options: {
   try {
     options.signal?.throwIfAborted();
     options.onActivity?.({ kind: 'reasoning', label: 'Compacting context...' });
-    await options.telemetry.event('compaction_start', { trigger: 'threshold', tier: options.tier, messages: messagesToSummarize.length, tokensBefore });
+    const trigger = options.trigger ?? 'threshold';
+    await options.telemetry.event('compaction_start', { trigger, tier: options.tier, messages: messagesToSummarize.length, tokensBefore });
     const summary = await summarize(options.config, options.tier, messagesToSummarize, previousSummary, undefined, options.budget, options.telemetry, options.signal);
     const preservedSystem = before.filter(message => message.role === 'system');
     const checkpoint: AgentMessage = { role: 'user', content: formatCompactionSummary(summary), timestamp: Date.now() };
     const messages = [...preservedSystem, checkpoint, ...options.messages.slice(cut)];
     const estimatedTokensAfter = messageTokens(messages);
-    await options.telemetry.event('compaction_end', { trigger: 'threshold', tier: options.tier, messages: messagesToSummarize.length, tokensBefore, estimatedTokensAfter });
+    await options.telemetry.event('compaction_end', { trigger, tier: options.tier, messages: messagesToSummarize.length, tokensBefore, estimatedTokensAfter });
     return { messages, compacted: true, tokensBefore, estimatedTokensAfter };
   } catch (error) {
-    await options.telemetry.event('compaction_failed', { trigger: 'threshold', tier: options.tier, name: error instanceof Error ? error.name : 'Error' });
+    await options.telemetry.event('compaction_failed', { trigger: options.trigger ?? 'threshold', tier: options.tier, name: error instanceof Error ? error.name : 'Error' });
     return { messages: options.messages, compacted: false, tokensBefore, error: error instanceof Error ? error.message : 'Context compaction failed.' };
   }
 }
