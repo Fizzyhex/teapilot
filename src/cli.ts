@@ -29,7 +29,7 @@ teapilot serve --stdio
   Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json  --once  --tier auto|fast|normal|reasoning|deep
          --correction TEXT  --no-motion  --verbose (setup progress)  --help
 A bare prompt (positional or --prompt) runs once; direct routing asks for a workload first.
-ask/chat/code share one session interface: the opening prompt is optional, /exit or /quit leaves, --once stops after one turn.
+ask/chat/code share one session interface: the opening prompt is optional, /compact checkpoints older context, /exit or /quit leaves, --once stops after one turn.
 Approvals require an interactive terminal. Local setup needs no API key.
 
 Unattended setup (existing local endpoint, new config only):
