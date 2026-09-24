@@ -30,10 +30,11 @@ Session commands preserve spending and grants unless stated otherwise:
 
 - `/mode chat|ask|code` changes the visible mode and keeps history. Entering Code requests its configured repository defaults.
 - `/tier auto|fast|normal|reasoning|deep` sets a profile preference.
-- `/new` clears task history and the capable-model lock while retaining grants and spending.
+- `/compact [focus]` replaces older conversation turns with a structured context checkpoint while keeping recent turns verbatim. Optional focus text guides only the checkpoint summary; it is not added as a conversation turn.
+- `/new` clears task history and any compacted checkpoint, plus the capable-model lock, while retaining grants and spending.
 - `/permissions` displays current grants; `/revoke <permission>` removes one. Revoking repository read also removes write and shell.
 
-TeaPilot keeps bounded complete turns, access grants, and model stickiness in memory for the current session only.
+TeaPilot automatically compacts older context as a session approaches the selected model's usable input budget. Tool-heavy agent runs can also compact between completed tool rounds. Compaction is transactional: if summarisation fails or is cancelled, the previous context remains active. The current user request and a recent verbatim tail are never replaced by the checkpoint. Access grants, spending, and model stickiness remain in memory for the current session only.
 
 ## Web research
 
