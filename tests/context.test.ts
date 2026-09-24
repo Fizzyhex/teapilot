@@ -109,7 +109,7 @@ it('compacts once and retries the same pending step after local context rejectio
       completion(res, { text: 'recovered' });
     }
   });
-  const noisy = '!'.repeat(6000);
+  const noisy = '!'.repeat(4500);
   const result = await runAttempt({
     ...f, tier: 'normal', workload: 'ask', prompt: 'continue', web: false, approve: async () => true,
     history: [{ user: noisy, assistant: noisy }, { user: noisy, assistant: noisy }],
