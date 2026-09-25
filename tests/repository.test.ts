@@ -74,6 +74,17 @@ it('gives repeated equivalent inspection one recovery opportunity and invalidate
   expect(check.lastCheck).toBeUndefined();
 });
 
+it('repeated searches warn, then refuse further searches instead of aborting', () => {
+  const evidence = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
+  evidence.observe('web_search', { query: 'a' }, false, 'same results');
+  evidence.observe('web_search', { query: 'b' }, false, 'same results');
+  expect(evidence.warning).toContain('Stop searching');
+  expect(evidence.searchExhausted).toBe(false);
+  evidence.observe('web_search', { query: 'c' }, false, 'same results');
+  expect(evidence.reason).toBeUndefined();
+  expect(evidence.searchExhausted).toBe(true);
+});
+
 it('empty-repository coding can inspect and write without a shell approval', async () => {
   const f = await setup();
   let calls = 0, approvals = 0;
