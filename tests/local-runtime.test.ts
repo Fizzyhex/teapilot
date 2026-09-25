@@ -65,6 +65,32 @@ it('keeps unmanaged OpenAI-compatible setup lifecycle-free', async () => {
   });
 });
 
+it('keeps hardware, installation and server-readiness failures distinct', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'teapilot-tabby-failures-'));
+  cleanup.push(() => rm(state, { recursive: true, force: true }));
+  const signal = new AbortController().signal;
+  const noHardware = new TabbyRuntime(state, { platform: 'win32' });
+  await expect(noHardware.ensureInstalled({ platform: 'win32', nvidia: [], optimizedNvidia: false, reason: 'No supported GPU' }, signal))
+    .rejects.toMatchObject({ layer: 'hardware_unavailable' });
+
+  const brokenInstall = new TabbyRuntime(state, {
+    platform: 'win32',
+    command: vi.fn(async (executable: string, args: string[]) => {
+      if (executable === 'py' && args.includes('-c')) return '3.12\n';
+      throw new Error('missing git');
+    }) as any,
+  });
+  await expect(brokenInstall.ensureInstalled({ platform: 'win32', nvidia: [{ name: 'RTX 3090', memoryMiB: 24576 }], optimizedNvidia: true }, signal))
+    .rejects.toMatchObject({ layer: 'runtime_unavailable' });
+
+  const occupied = new TabbyRuntime(state, {
+    platform: 'win32',
+    fetch: vi.fn(async () => Response.json({ software: { name: 'SomethingElse' } })) as any,
+  });
+  await mkdir(occupied.repoDir, { recursive: true });
+  await expect(occupied.start(signal)).rejects.toMatchObject({ layer: 'server_not_ready' });
+});
+
 it('installs, starts, provisions, reuses and stops Tabby through mocked process/network boundaries', async () => {
   const state = await mkdtemp(join(tmpdir(), 'teapilot-tabby-'));
   cleanup.push(() => rm(state, { recursive: true, force: true }));
