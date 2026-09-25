@@ -5,7 +5,7 @@ import { runHost } from '../host.js';
 import type { SetupUI } from '../setup/terminal.js';
 import { route } from './access.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
-import type { GatewayMessage } from './gateway.js';
+import type { GatewayCommand, GatewayMessage } from './gateway.js';
 import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
 import { readDiscordSettings } from './settings.js';
 
@@ -61,10 +61,21 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     log(`${key} @${message.authorName}: ${message.content.split('\n')[0]!.slice(0, 80)}`);
     (await open(key, transport)).push(message.content);
   };
+  const handleCommand = async (command: GatewayCommand): Promise<void> => {
+    const target = route(command, settings);
+    if (!target) { await command.respond('You are not allowed to use teapilot here.'); return; }
+    const conversation = conversations.get(target.key);
+    if (!conversation?.active) { await command.respond('No active conversation here. Send a message to start one.'); return; }
+    log(`${target.key}: ${command.text}`);
+    conversation.push(command.text);
+    await command.respond();
+  };
   // discord.js loads only here, so every other command starts without it.
   const { connect } = await import('./gateway.js');
   const gateway = await connect(settings, message => void handle(message)
-    .catch(error => log(`Message handling failed: ${error instanceof Error ? error.message : String(error)}`)), log);
+    .catch(error => log(`Message handling failed: ${error instanceof Error ? error.message : String(error)}`)),
+  command => void handleCommand(command)
+    .catch(error => log(`Command handling failed: ${error instanceof Error ? error.message : String(error)}`)), log);
 
   log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} allowed user(s) in DMs${settings.channelId ? ` and channel ${settings.channelId}` : ''}.`);
   log(`Repository root: ${root}. Sessions start in ${settings.startMode} mode. Press Ctrl+C to stop.`);

@@ -8,7 +8,7 @@ import type { Approve } from './execution/policy.js';
 import type { EventSink } from './integration/events.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
-const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /revoke <permission>, /exit, /quit`;
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /exit, /quit`;
 
 /**
  * One session loop for every mode (chat, ask, code). The mode selects instructions
@@ -62,7 +62,12 @@ export async function runSession(options: {
         if (grants && moved) options.log?.(`Root: ${grants.root}\nSession access: ${grants.list().join(', ') || 'none'}${mode === 'code'
           && !(grants.allows('repository.write') && grants.allows('repository.shell')) ? ' (write and shell are requested for this root when first needed)' : ''}`);
       } else if (command === '/permissions' && !value) options.log?.(`Session access (${grants?.root ?? cwd}): ${grants?.list().join(', ') || 'none'}`);
-      else if (command === '/revoke' && !extra && permissions.includes(value as typeof permissions[number])) {
+      else if (command === '/grant' && !extra && permissions.includes(value as typeof permissions[number])) {
+        const permission = value as typeof permissions[number];
+        const approved = !!grants && await grants.request([permission], 'You requested it.', options.approve ?? (async () => false), options.request.signal,
+          async (type, fields) => { options.onEvent?.({ type, ...fields }); });
+        options.log?.(approved ? `Session access: ${grants.list().join(', ')}` : `${permission} was not granted (denied or unavailable).`);
+      } else if (command === '/revoke' && !extra && permissions.includes(value as typeof permissions[number])) {
         grants?.revoke(value as typeof permissions[number], options.onEvent);
         options.log?.(`Session access: ${grants?.list().join(', ') || 'none'}`);
       } else if (command === '/tier' && !extra && isTierPreference(value)) {

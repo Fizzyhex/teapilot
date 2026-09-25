@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { SendableChannels, Message } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
+import { commandDefinitions, commandText } from './commands.js';
 import { MESSAGE_LIMIT } from './render.js';
 import type { DiscordSettings } from './settings.js';
 
@@ -12,6 +13,12 @@ export interface GatewayMessage extends IncomingMessage {
   transport(): DiscordTransport;
   startThread(name: string): Promise<{ id: string; transport: DiscordTransport }>;
 }
+/** A slash command from an allowlisted-or-not user; `text` is the equivalent session command. */
+export interface GatewayCommand extends IncomingMessage {
+  text: string;
+  /** Answer only the invoker: with text it shows a private note, without it the invocation is dismissed quietly. */
+  respond(text?: string): Promise<void>;
+}
 export interface Gateway { botName: string; close(): Promise<void> }
 
 const noop = () => undefined;
@@ -21,7 +28,7 @@ const quiet = { allowedMentions: { parse: [] as [] } };
  * The only module that loads discord.js. It connects outbound over the Gateway:
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
-export async function connect(settings: DiscordSettings, onMessage: (message: GatewayMessage) => void, log: (text: string) => void): Promise<Gateway> {
+export async function connect(settings: DiscordSettings, onMessage: (message: GatewayMessage) => void, onCommand: (command: GatewayCommand) => void, log: (text: string) => void): Promise<Gateway> {
   const { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, MessageFlags, Partials, ThreadAutoArchiveDuration } = await import('discord.js');
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
@@ -58,6 +65,29 @@ export async function connect(settings: DiscordSettings, onMessage: (message: Ga
   };
 
   client.on(Events.InteractionCreate, async interaction => {
+    if (interaction.isChatInputCommand()) {
+      const self = client.user;
+      const channel = interaction.channel;
+      const text = commandText(interaction.commandName, interaction.options.getSubcommand(false), interaction.options.getString('value'));
+      const respond = async (note?: string) => {
+        if (note) await interaction.reply({ content: note, flags: MessageFlags.Ephemeral });
+        else { await interaction.deferReply({ flags: MessageFlags.Ephemeral }); await interaction.deleteReply(); }
+      };
+      if (!self || !text) { await respond('Unknown teapilot command.').catch(noop); return; }
+      const thread = channel?.isThread() ? channel : undefined;
+      onCommand({
+        authorId: interaction.user.id,
+        authorIsBot: interaction.user.bot,
+        guildId: interaction.guildId ?? undefined,
+        channelId: interaction.channelId,
+        parentId: thread?.parentId ?? undefined,
+        ownThread: thread?.ownerId === self.id,
+        mentionsBot: false,
+        text,
+        respond: note => respond(note).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`)),
+      });
+      return;
+    }
     if (!interaction.isButton()) return;
     const [prefix, nonce, verdict] = interaction.customId.split(':');
     if (prefix !== 'teapilot' || !nonce) return;
@@ -97,7 +127,13 @@ export async function connect(settings: DiscordSettings, onMessage: (message: Ga
   });
   client.on(Events.Error, error => log(`Discord: ${error.message}`));
 
-  const ready = new Promise<void>(resolve => client.once(Events.ClientReady, () => resolve()));
+  // Registering on ready overwrites teapilot's global set, so removed commands disappear on the next start.
+  const ready = new Promise<void>(resolve => client.once(Events.ClientReady, () => {
+    void client.application?.commands.set(commandDefinitions)
+      .then(() => log(`Registered ${commandDefinitions.length} slash commands.`))
+      .catch(error => log(`Slash command registration failed: ${error instanceof Error ? error.message : String(error)}`));
+    resolve();
+  }));
   try { await client.login(settings.token); }
   catch (error) {
     await client.destroy();
