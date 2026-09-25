@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { route, type IncomingMessage } from '../src/discord/access.js';
-import { chunk, ProgressLine, throttle } from '../src/discord/render.js';
+import { chunk, ProgressLine, quoteMessage, throttle } from '../src/discord/render.js';
 import { readDiscordSettings } from '../src/discord/settings.js';
 
 const alice = '111111111111111111', mallory = '222222222222222222', channel = '333333333333333333', guild = '444444444444444444';
@@ -69,4 +69,10 @@ it('coalesces frequent progress updates and delivers the latest on flush', async
   expect(action).toHaveBeenCalledTimes(1);
   await update.flush();
   expect(action).toHaveBeenCalledTimes(2);
+});
+
+it('quotes a selected message after the reply chain it answers, oldest first', () => {
+  expect(quoteMessage({ author: 'bob', text: 'why?' })).toBe('Message from @bob:\nwhy?');
+  expect(quoteMessage({ author: 'bob', text: 'why?' }, [{ author: 'alice', text: 'ship it' }, { author: 'carol', text: '' }]))
+    .toBe('Reply chain, oldest first:\n@alice: ship it\n\n@carol: (no text)\n\nMessage from @bob:\nwhy?');
 });

@@ -43,6 +43,19 @@ export function chunk(text: string, limit = MESSAGE_LIMIT): string[] {
   return chunks;
 }
 
+export interface QuotedMessage { author: string; text: string }
+
+/**
+ * The selected message as teapilot receives it, attributed because its author may not be the invoker.
+ * `chain` holds the messages it replies to, oldest first, so teapilot reads the conversation in order.
+ */
+export function quoteMessage(message: QuotedMessage, chain: QuotedMessage[] = []): string {
+  const selected = `Message from @${message.author}:\n${message.text}`;
+  if (!chain.length) return selected;
+  const earlier = chain.map(({ author, text }) => `@${author}: ${text || '(no text)'}`).join('\n\n');
+  return `Reply chain, oldest first:\n${earlier}\n\n${selected}`;
+}
+
 /** One status message per turn: the running tool, then completed tool lines, newest last. */
 export class ProgressLine {
   private lines: string[] = [];

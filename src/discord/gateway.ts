@@ -3,8 +3,13 @@ import type { ActionRowBuilder, ButtonBuilder, ChatInputCommandInteraction, Mess
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
 import { commandDefinitions, commandText, interactionLifetimeMs, replyCommand, replyMenu, withoutUserInstall } from './commands.js';
-import { MESSAGE_LIMIT } from './render.js';
+import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage } from './render.js';
 import type { DiscordSettings } from './settings.js';
+
+/** How far the Reply menu follows a message's replies back, and how long it may spend fetching them. */
+const replyChainDepth = 10;
+const replyChainBudgetMs = 1500;
+const replyChainMessageChars = 2000;
 
 export interface GatewayMessage extends IncomingMessage {
   /** Message text with the bot mention removed. */
@@ -12,6 +17,8 @@ export interface GatewayMessage extends IncomingMessage {
   authorName: string;
   transport(): DiscordTransport;
   startThread(name: string): Promise<{ id: string; transport: DiscordTransport }>;
+  /** The messages this one replies to, oldest first; fetched on demand, so only routed messages pay for it. */
+  replyChain(): Promise<QuotedMessage[]>;
 }
 /** A slash command from an allowlisted-or-not user; `text` is the equivalent session command. */
 export interface GatewayCommand extends IncomingMessage {
@@ -20,7 +27,7 @@ export interface GatewayCommand extends IncomingMessage {
   respond(text?: string): Promise<void>;
 }
 /** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
-export interface GatewayReply extends GatewayMessage {
+export interface GatewayReply extends Omit<GatewayMessage, 'replyChain'> {
   title: string;
   /** Interaction id, unique per invocation. */
   id: string;
@@ -49,7 +56,7 @@ const quiet = { allowedMentions: { parse: [] as [] } };
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
 export async function connect(settings: DiscordSettings, handlers: GatewayHandlers, log: (text: string) => void): Promise<Gateway> {
-  const { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, MessageFlags, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
+  const { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, MessageFlags, MessageReferenceType, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Channel],
@@ -116,6 +123,30 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   };
   const strip = (text: string, id: string) => text.replace(new RegExp(`<@!?${id}>`, 'g'), '').trim();
 
+  /**
+   * The messages `message` replies to, oldest first, for mentions and the Reply menu. Discord drops an
+   * interaction unless it is answered within 3 seconds, so the walk stops at a depth and time budget,
+   * and at anything it cannot fetch.
+   */
+  const replyChain = async (message: Message, selfId: string): Promise<QuotedMessage[]> => {
+    const chain: QuotedMessage[] = [];
+    const deadline = Date.now() + replyChainBudgetMs;
+    let current = message;
+    while (chain.length < replyChainDepth && current.reference?.type === MessageReferenceType.Default && current.reference.messageId) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const parent = await Promise.race([
+        current.fetchReference(),
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), left); }),
+      ]).catch(() => undefined).finally(() => clearTimeout(timer));
+      if (!parent) break;
+      chain.unshift({ author: parent.author.username, text: strip(parent.content, selfId).slice(0, replyChainMessageChars) });
+      current = parent;
+    }
+    return chain;
+  };
+
   /** /reply and the Reply context menu: both start or continue a conversation wherever the bot may post. */
   const reply = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction, self: NonNullable<typeof client.user>) => {
     let answered = false;
@@ -138,6 +169,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     };
     const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
     const text = interaction.isChatInputCommand() ? interaction.options.getString('message', true).trim() : strip(target?.content ?? '', self.id);
+    const chain = target && text ? await replyChain(target, self.id) : [];
     handlers.reply({
       authorId: interaction.user.id,
       authorIsBot: interaction.user.bot,
@@ -147,9 +179,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       parentId: thread?.parentId ?? undefined,
       ownThread: thread?.ownerId === self.id,
       mentionsBot: false,
-      // The person who wrote a selected message may not be the one invoking teapilot, so attribute it.
-      content: target && text ? `Message from @${target.author.username}:
-${text}` : text,
+      content: target && text ? quoteMessage({ author: target.author.username, text }, chain) : text,
       title: text,
       id: interaction.id,
       oneShot,
@@ -228,6 +258,7 @@ ${text}` : text,
       ownThread: thread?.ownerId === self.id,
       mentionsBot: message.mentions.users.has(self.id),
       content: strip(message.content, self.id),
+      replyChain: () => replyChain(message, self.id),
       transport: () => transport(channel),
       async startThread(name) {
         const created = await message.startThread({ name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay });

@@ -7,6 +7,7 @@ import { route, routeReply } from './access.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
 import type { GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
 import { interactionLifetimeMs } from './commands.js';
+import { quoteMessage } from './render.js';
 import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
 import { readDiscordSettings } from './settings.js';
 
@@ -55,6 +56,8 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     const target = route(message, settings);
     if (!target) return;
     if (!message.content) { await message.transport().send('teapilot reads text messages only.'); return; }
+    const chain = await message.replyChain();
+    const prompt = chain.length ? quoteMessage({ author: message.authorName, text: message.content }, chain) : message.content;
     let key = target.key;
     let transport: DiscordTransport;
     if (target.kind === 'new-thread') {
@@ -62,7 +65,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
       key = `thread:${thread.id}`; transport = thread.transport;
     } else transport = message.transport();
     log(`${key} @${message.authorName}: ${message.content.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport)).push(message.content);
+    (await open(key, transport)).push(prompt);
   };
   const handleCommand = async (command: GatewayCommand): Promise<void> => {
     const target = route(command, settings);
@@ -91,7 +94,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
       }
     } else transport = reply.transport();
     await reply.respond();
-    log(`${key} @${reply.authorName} (reply): ${reply.content.split('\n')[0]!.slice(0, 80)}`);
+    log(`${key} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
     (await open(key, transport, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly });
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
