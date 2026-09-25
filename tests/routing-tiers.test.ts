@@ -24,6 +24,8 @@ it('defines the four profiles from two physical models', async () => {
   f.config.models.capable.reasoningEfforts = ['off', 'medium'];
   expect(profileAvailable(f.config, 'reasoning').available).toBe(true);
   expect(profileAvailable(f.config, 'deep')).toMatchObject({ available: false, reason: expect.stringContaining('xhigh') });
+  f.config.models.capable.reasoning = undefined;
+  expect(profileAvailable(f.config, 'reasoning')).toMatchObject({ available: false, reason: expect.stringContaining('request mapping') });
 });
 
 it('selects conservatively and keeps related capable work on 27B', () => {
@@ -44,8 +46,8 @@ it('sends exact native efforts and profile output caps through the production ad
   });
   cleanups.push(server.close);
   f.config.routingMode = 'direct';
-  f.config.models.fast.baseUrl = server.url;
-  f.config.models.capable.baseUrl = server.url;
+  Object.assign(f.config.models.fast, { baseUrl: server.url, provider: 'local', reasoning: { type: 'reasoning_effort', values: { off: 'none' } } });
+  Object.assign(f.config.models.capable, { baseUrl: server.url, provider: 'local', reasoning: { type: 'reasoning_effort', values: { off: 'none', medium: 'medium', xhigh: 'xhigh' } } });
   for (const tier of ['fast', 'normal', 'reasoning', 'deep'] as const) {
     await runInference(f.config, inferenceSchema.parse({ model: tier, messages: [{ role: 'user', content: [{ type: 'text', text: 'reply' }] }] }), { approve: async () => true });
   }
@@ -79,7 +81,7 @@ it('migrates local-only legacy configuration and rejects enabled cloud execution
   await writeFile(join(directory, 'models.json'), JSON.stringify(legacy));
   const migrated = await loadConfig(directory, {});
   expect(migrated.models.fast.enabled).toBe(false);
-  expect(migrated.models.capable).toMatchObject({ id: local.id, compatibility: true, reasoningEfforts: ['off'] });
+  expect(migrated.models.capable).toMatchObject({ id: local.id, compatibility: true, reasoningEfforts: ['off'], reasoning: { type: 'reasoning_effort', values: { off: 'none' } } });
   expect(migrated.source?.warnings?.[0]).toContain('compatibility capable-only');
   await writeFile(join(directory, 'models.json'), JSON.stringify({ ...legacy, economy: { ...local, enabled: true } }));
   await expect(loadConfig(directory, {})).rejects.toThrow('Cloud execution settings');
