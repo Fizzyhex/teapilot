@@ -169,6 +169,12 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   }
   config.secrets = Object.fromEntries((['fast', 'capable'] as const).map(name => [name, env[config.models[name].apiKeyEnv] || undefined])) as Config['secrets'];
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
+  const discovered = await during(ui, 'Discovering model capabilities...', () => discoverModelCapabilities(modelFor(config, tier), config.secrets[profileFor(tier).model], signal));
+  if (discovered.contextTokens && discovered.contextTokens >= 8192) {
+    modelFor(config, tier).contextTokens = discovered.contextTokens;
+    modelFor(config, tier).maxOutputTokens = Math.min(modelFor(config, tier).maxOutputTokens, Math.max(128, discovered.contextTokens - 2049));
+  }
+  if (discovered.vision !== undefined) modelFor(config, tier).vision = discovered.vision;
   const status = await during(ui, 'Checking model endpoint...', () => modelStatus(config, tier, signal));
   let report: LiveReport | undefined;
   if (status) { ui.log(`Endpoint ${modelFor(config, tier).baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
