@@ -169,6 +169,22 @@ it('keeps ask.normal for a low-confidence decision in Ask mode', async () => {
   expect(log.find(entry => entry.type === 'routing_fallback')).toMatchObject({ capability: 'ask.normal', reason: 'low_confidence' });
 });
 
+it('falls back to ask.normal, not ask.fast, when the router is unsure and fast is enabled', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  const server = await mockServer((body, request, response) => {
+    if (request.url === '/jev') { jev(response, 'ask.fast', 0.1); return; }
+    completion(response, { text: 'answered' });
+  });
+  cleanups.push(server.close);
+  f.config.router.endpoint = `${server.url}/jev`;
+  f.config.models.capable.baseUrl = server.url;
+  const grants = await SessionGrants.create(f.cwd, f.config, 'ask');
+  const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Explain this topic', mode: 'ask', authorization: grants }, { approve: async () => false, localProbe: async () => true });
+  expect(result).toMatchObject({ success: true, capability: 'ask.normal' });
+  const log = await events(f.config);
+  expect(log.find(entry => entry.type === 'routing_fallback')).toMatchObject({ capability: 'ask.normal', reason: 'low_confidence' });
+});
+
 it('activates direct-mode repository tools in place without restarting the turn', async () => {
   const f = await fixture(); cleanups.push(f.cleanup);
   let calls = 0;
