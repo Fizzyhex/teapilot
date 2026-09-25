@@ -20,9 +20,9 @@ function positiveInteger(value: unknown): number | undefined {
  */
 export async function discoverModelCapabilities(model: ModelConfig, apiKey?: string, signal?: AbortSignal): Promise<DiscoveredModelCapabilities> {
   const result: DiscoveredModelCapabilities = {};
-  const requestSignal = signal ?? AbortSignal.timeout(5000);
+  const requestSignal = () => signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000);
   try {
-    const response = await fetch(`${model.baseUrl.replace(/\/$/, '')}/models`, { headers: headers(apiKey), signal: requestSignal, redirect: 'error' });
+    const response = await fetch(`${model.baseUrl.replace(/\/$/, '')}/models`, { headers: headers(apiKey), signal: requestSignal(), redirect: 'error' });
     if (response.ok) {
       const body = await response.json() as { data?: Array<Record<string, unknown>> };
       const card = body.data?.find(item => item.id === model.id);
@@ -34,7 +34,7 @@ export async function discoverModelCapabilities(model: ModelConfig, apiKey?: str
 
   const root = model.baseUrl.replace(/\/v1\/?$/, '');
   try {
-    const response = await fetch(`${root}/props`, { headers: headers(apiKey), signal: requestSignal, redirect: 'error' });
+    const response = await fetch(`${root}/props`, { headers: headers(apiKey), signal: requestSignal(), redirect: 'error' });
     if (response.ok) {
       const body = await response.json() as {
         default_generation_settings?: { n_ctx?: unknown };
