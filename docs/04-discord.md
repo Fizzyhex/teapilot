@@ -16,7 +16,7 @@ teapilot discord remove   # deletes the Discord settings from the profile
 - **teapilot only runs while `teapilot discord start` is open.** It connects outbound to Discord's Gateway: no public URL, tunnel, webhook or local server. The terminal logs each incoming task, approval and result.
 - **Only people you have let in can use it.** Messages from anyone else, and from bots, are ignored without a reply.
   - **Operators** (the IDs from setup) have every permission and can approve actions.
-  - **Users** get inference and web search. Operators add users, and give them extra permissions for a limited time (for example "let <@id> in", or "give <@id> code access for 2 hours"), just by asking teapilot in Discord. Each change needs an operator's Approve click, and grants expire on their own.
+  - **Users** get inference and web search. Operators add users, and give them extra permissions, for a limited time or until revoked (for example "let <@id> in", or "give <@id> code access for 2 hours"), just by asking teapilot in Discord. Each change needs an operator's Approve click, and timed access expires on its own.
 - **Where it listens:**
   - Each DM is one session.
   - If you configured a channel, @mentioning the bot there starts a thread, and that thread is one session. Follow-ups in the thread don't need a mention.

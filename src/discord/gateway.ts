@@ -48,7 +48,12 @@ export interface GatewayHandlers {
   command(command: GatewayCommand): void;
   reply(reply: GatewayReply): void;
 }
-export interface Gateway { botName: string; close(): Promise<void> }
+export interface Gateway {
+  botName: string;
+  /** A user's Discord username, or undefined when it cannot be fetched. */
+  username(id: string): Promise<string | undefined>;
+  close(): Promise<void>;
+}
 
 const noop = () => undefined;
 const quiet = { allowedMentions: { parse: [] as [] } };
@@ -319,6 +324,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   await ready;
   return {
     botName: client.user?.tag ?? 'bot',
+    username: id => client.users.fetch(id).then(user => user.username, () => undefined),
     async close() {
       for (const entry of pending.values()) entry.resolve(false);
       pending.clear();

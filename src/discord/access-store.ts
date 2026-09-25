@@ -16,14 +16,19 @@ const permission = z.custom<Permission>(value => permissions.includes(value as P
 const fileSchema = z.object({
   users: z.record(snowflake, z.object({
     addedBy: snowflake, addedAt: timestamp,
-    grants: z.array(z.object({ permission, expiresAt: timestamp, grantedBy: snowflake, grantedAt: timestamp })),
+    /** Discord username when last seen; display only. */
+    name: z.string().optional(),
+    /** Absent for a permanent user. */
+    expiresAt: timestamp.optional(),
+    /** Absent for a grant that lasts until revoked. */
+    grants: z.array(z.object({ permission, expiresAt: timestamp.optional(), grantedBy: snowflake, grantedAt: timestamp })),
   })),
 });
 type Data = z.infer<typeof fileSchema>;
 
 export interface AccessSummary {
   operators: string[];
-  users: Array<{ id: string; addedBy: string; addedAt: string; grants: Array<{ permission: Permission; expiresAt: string }> }>;
+  users: Array<{ id: string; name?: string; addedBy: string; addedAt: string; expiresAt?: string; grants: Array<{ permission: Permission; expiresAt?: string }> }>;
 }
 
 /** "30m", "2h", "1d" → milliseconds; anything unbounded, vague or over the cap is rejected. */
@@ -37,11 +42,13 @@ export function parseDuration(text: string): number {
 
 /**
  * Discord roles. Operators are the setup-time user IDs (never stored here, so a damaged file cannot lock
- * them out or promote anyone); this file holds whitelisted users and their temporary grants, as absolute
+ * them out or promote anyone); this file holds whitelisted users and their grants, as absolute
  * timestamps so expiry survives restarts. The bot is the only writer, so it loads once and writes through.
  */
 export class AccessStore {
   private data?: Data;
+  /** Resolves a Discord username (set once the gateway is connected); names are display-only. */
+  lookup?: (id: string) => Promise<string | undefined>;
   constructor(readonly file: string, readonly operators: readonly string[], private readonly ceiling: readonly Permission[], private readonly now: () => number = Date.now) {}
 
   static at(stateDir: string, operators: readonly string[], ceiling: readonly Permission[]): AccessStore {
@@ -73,8 +80,9 @@ export class AccessStore {
     const data = this.load();
     const now = this.now();
     let changed = false;
-    for (const user of Object.values(data.users)) {
-      const kept = user.grants.filter(grant => Date.parse(grant.expiresAt) > now);
+    for (const [id, user] of Object.entries(data.users)) {
+      if (user.expiresAt && Date.parse(user.expiresAt) <= now) { delete data.users[id]; changed = true; continue; }
+      const kept = user.grants.filter(grant => !grant.expiresAt || Date.parse(grant.expiresAt) > now);
       if (kept.length !== user.grants.length) { user.grants = kept; changed = true; }
     }
     if (changed) this.save(data);
@@ -82,7 +90,9 @@ export class AccessStore {
   }
 
   roleOf(id: string): Role | undefined {
-    return this.operators.includes(id) ? 'operator' : this.load().users[id] ? 'user' : undefined;
+    if (this.operators.includes(id)) return 'operator';
+    const user = this.load().users[id];
+    return user && (!user.expiresAt || Date.parse(user.expiresAt) > this.now()) ? 'user' : undefined;
   }
 
   /** Role permissions plus unexpired grants, within the policy ceiling. */
@@ -91,7 +101,7 @@ export class AccessStore {
     if (!role) return [];
     const held = new Set<Permission>(role === 'operator' ? permissions : userPermissions);
     const now = this.now();
-    for (const grant of this.load().users[id]?.grants ?? []) if (Date.parse(grant.expiresAt) > now) held.add(grant.permission);
+    for (const grant of this.load().users[id]?.grants ?? []) if (!grant.expiresAt || Date.parse(grant.expiresAt) > now) held.add(grant.permission);
     return withPrerequisites([...held]).filter(value => this.ceiling.includes(value));
   }
 
@@ -106,25 +116,37 @@ export class AccessStore {
   /** The management surface handed to the agent for one sender; the role is fixed here, by the host. */
   adminFor(id: string): AccessAdmin | undefined {
     const role = this.roleOf(id);
-    return role && { role, senderId: id, list: () => this.list(), addUser: (target, by) => this.addUser(target, by), removeUser: target => this.removeUser(target),
+    return role && { role, senderId: id, username: target => this.lookup?.(target) ?? Promise.resolve(undefined), list: () => this.list(), addUser: (target, by) => this.addUser(target, by), removeUser: target => this.removeUser(target),
       grant: (target, value, ms, by) => this.grant(target, value, ms, by), revoke: (target, value) => this.revoke(target, value), parseDuration };
   }
 
   list(): AccessSummary {
     return {
       operators: [...this.operators],
-      users: Object.entries(this.live().users).map(([id, user]) => ({ id, addedBy: user.addedBy, addedAt: user.addedAt, grants: user.grants.map(({ permission, expiresAt }) => ({ permission, expiresAt })) })),
+      users: Object.entries(this.live().users).map(([id, user]) => ({ id, name: user.name, expiresAt: user.expiresAt, addedBy: user.addedBy, addedAt: user.addedAt, grants: user.grants.map(({ permission, expiresAt }) => ({ permission, expiresAt })) })),
     };
   }
 
-  addUser(id: string, by: string): 'added' | 'exists' | 'operator' {
+  /** Whitelists a user, permanently unless `durationMs` is given. Adding again updates the expiry and name. */
+  addUser(id: string, by: string, options: { name?: string; durationMs?: number } = {}): 'added' | 'updated' | 'operator' {
     if (!snowflake.safeParse(id).success) throw new Error('Discord IDs are 17–20 digit numbers.');
     if (this.operators.includes(id)) return 'operator';
+    const { name, durationMs } = options;
+    if (durationMs !== undefined && (!Number.isFinite(durationMs) || durationMs < 60_000 || durationMs > maxGrantMs)) throw new Error('Temporary access must last between 1 minute and 30 days.');
     const data = this.live();
-    if (data.users[id]) return 'exists';
-    data.users[id] = { addedBy: by, addedAt: new Date(this.now()).toISOString(), grants: [] };
+    const existing = data.users[id];
+    const expiresAt = durationMs === undefined ? undefined : new Date(this.now() + durationMs).toISOString();
+    data.users[id] = { addedBy: existing?.addedBy ?? by, addedAt: existing?.addedAt ?? new Date(this.now()).toISOString(), name: name ?? existing?.name, expiresAt, grants: existing?.grants ?? [] };
     this.save(data);
-    return 'added';
+    return existing ? 'updated' : 'added';
+  }
+
+  /** Keeps a whitelisted user's displayed username current; writes only on change. */
+  rememberName(id: string, name: string): void {
+    const user = this.load().users[id];
+    if (!user || user.name === name) return;
+    user.name = name;
+    this.save(this.data!);
   }
 
   removeUser(id: string): boolean {
@@ -135,17 +157,17 @@ export class AccessStore {
     return true;
   }
 
-  /** Returns the absolute expiry. Extending replaces an existing grant of the same permission. */
-  grant(id: string, value: Permission, durationMs: number, by: string): string {
+  /** Lasts until revoked unless `durationMs` is given. Returns the absolute expiry, if any. A repeat replaces the earlier grant of that permission. */
+  grant(id: string, value: Permission, durationMs: number | undefined, by: string): string | undefined {
     if (this.operators.includes(id)) throw new Error('Operators already hold every permission.');
     const data = this.live();
     const user = data.users[id];
     if (!user) throw new Error('That person is not whitelisted. Add them first.');
     if (!this.ceiling.includes(value)) throw new Error(`${value} is disabled by this installation's policy.`);
     if (userPermissions.includes(value)) throw new Error(`Users already hold ${value}.`);
-    if (!Number.isFinite(durationMs) || durationMs < 60_000 || durationMs > maxGrantMs) throw new Error('Temporary access must last between 1 minute and 30 days.');
+    if (durationMs !== undefined && (!Number.isFinite(durationMs) || durationMs < 60_000 || durationMs > maxGrantMs)) throw new Error('Temporary access must last between 1 minute and 30 days.');
     const now = this.now();
-    const expiresAt = new Date(now + durationMs).toISOString();
+    const expiresAt = durationMs === undefined ? undefined : new Date(now + durationMs).toISOString();
     user.grants = [...user.grants.filter(grant => grant.permission !== value), { permission: value, expiresAt, grantedBy: by, grantedAt: new Date(now).toISOString() }];
     this.save(data);
     return expiresAt;

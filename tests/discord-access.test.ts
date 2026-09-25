@@ -191,3 +191,47 @@ it('resolves permissions per message in a shared conversation', async () => {
   expect(seen[1]).toEqual({ role: 'user', write: false });
   expect(seen[2]).toEqual({ role: undefined, write: false });
 });
+
+it('whitelists a user temporarily and drops them, with their grants, when time runs out', async () => {
+  const { access } = await store();
+  expect(access.addUser(bob, op, { durationMs: 2 * hour })).toBe('added');
+  access.grant(bob, 'repository.read', hour, op);
+  expect(access.list().users[0]!.expiresAt).toBe('2026-01-01T02:00:00.000Z');
+  clock += hour;
+  expect(reopen(access).roleOf(bob)).toBe('user');
+  clock += hour;
+  const later = reopen(access);
+  expect(later.roleOf(bob)).toBeUndefined();
+  expect(later.permissionsOf(bob)).toEqual([]);
+  expect(later.list().users).toEqual([]);
+  expect(access.addUser(bob, op)).toBe('added');
+  expect(access.addUser(bob, op, { durationMs: hour })).toBe('updated');
+  expect(() => access.addUser(bob, op, { durationMs: 5 })).toThrow();
+});
+
+it('lists usernames, from Discord when available and from the last seen name otherwise', async () => {
+  const { access } = await store();
+  access.addUser(bob, op, { name: 'bobby' });
+  access.rememberName(bob, 'bob_renamed');
+  access.rememberName(eve, 'stranger');
+  expect(access.list().users[0]!.name).toBe('bob_renamed');
+  expect(reopen(access).list().users[0]!.name).toBe('bob_renamed');
+  const tool = (admin = access.adminFor(op)!) => accessTools(admin, async () => true).find(value => value.name === 'access_list')!;
+  const text = async () => JSON.stringify((await tool().execute('1', {}, undefined as never, undefined as never)).content);
+  expect(await text()).toContain(`${bob} (@bob_renamed)`);
+  access.lookup = async id => id === op ? 'boss' : id === bob ? 'bob_live' : undefined;
+  const listed = await text();
+  expect(listed).toContain(`${op} (@boss)`);
+  expect(listed).toContain(`${bob} (@bob_live)`);
+});
+
+it('keeps a grant without a duration until it is revoked', async () => {
+  const { access } = await store();
+  access.addUser(bob, op);
+  expect(access.grant(bob, 'repository.write', undefined, op)).toBeUndefined();
+  clock += 365 * 24 * hour;
+  expect(reopen(access).permissionsOf(bob)).toContain('repository.write');
+  expect(reopen(access).list().users[0]!.grants).toEqual([{ permission: 'repository.write', expiresAt: undefined }]);
+  expect(access.revoke(bob, 'repository.write')).toBe(1);
+  expect(access.permissionsOf(bob)).not.toContain('repository.write');
+});

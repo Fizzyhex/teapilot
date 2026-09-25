@@ -59,6 +59,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   const handle = async (message: GatewayMessage): Promise<void> => {
     const target = route(message, settings, allowed);
     if (!target) return;
+    access.rememberName(message.authorId, message.authorName);
     if (!message.content) { await message.transport().send('teapilot reads text messages only.'); return; }
     // A running conversation already holds its earlier turns, so only a new one needs the reply chain.
     const chain = target.kind === 'new-thread' || !conversations.get(target.key)?.active ? await message.replyChain() : undefined;
@@ -111,6 +112,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     reply: reply => void handleReply(reply).catch(failed('Reply handling')),
   }, log);
 
+  access.lookup = gateway.username;
   log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} operator(s) and ${access.list().users.length} user(s) in DMs${settings.channelId ? ` and channel ${settings.channelId}` : ''}.`);
   log(`Repository root: ${root}. Sessions start in ${settings.startMode} mode. Press Ctrl+C to stop.`);
   if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
