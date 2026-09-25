@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { SendableChannels, Message } from 'discord.js';
+import type { ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
-import { commandDefinitions, commandText } from './commands.js';
+import { commandDefinitions, commandText, replyCommand, replyMenu } from './commands.js';
 import { MESSAGE_LIMIT } from './render.js';
 import type { DiscordSettings } from './settings.js';
 
@@ -19,6 +19,16 @@ export interface GatewayCommand extends IncomingMessage {
   /** Answer only the invoker: with text it shows a private note, without it the invocation is dismissed quietly. */
   respond(text?: string): Promise<void>;
 }
+/** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
+export interface GatewayReply extends GatewayMessage {
+  title: string;
+  respond(text?: string): Promise<void>;
+}
+export interface GatewayHandlers {
+  message(message: GatewayMessage): void;
+  command(command: GatewayCommand): void;
+  reply(reply: GatewayReply): void;
+}
 export interface Gateway { botName: string; close(): Promise<void> }
 
 const noop = () => undefined;
@@ -28,7 +38,7 @@ const quiet = { allowedMentions: { parse: [] as [] } };
  * The only module that loads discord.js. It connects outbound over the Gateway:
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
-export async function connect(settings: DiscordSettings, onMessage: (message: GatewayMessage) => void, onCommand: (command: GatewayCommand) => void, log: (text: string) => void): Promise<Gateway> {
+export async function connect(settings: DiscordSettings, handlers: GatewayHandlers, log: (text: string) => void): Promise<Gateway> {
   const { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, MessageFlags, Partials, ThreadAutoArchiveDuration } = await import('discord.js');
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
@@ -64,7 +74,65 @@ export async function connect(settings: DiscordSettings, onMessage: (message: Ga
     };
   };
 
+  const sendable = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction) => {
+    const channel = interaction.channel ?? await client.channels.fetch(interaction.channelId).catch(() => null);
+    return channel?.isSendable() ? channel : undefined;
+  };
+  const strip = (text: string, id: string) => text.replace(new RegExp(`<@!?${id}>`, 'g'), '').trim();
+
+  /** /reply and the Reply context menu: both start or continue a conversation wherever the bot may post. */
+  const reply = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction, self: NonNullable<typeof client.user>) => {
+    let answered = false;
+    const respond = async (note?: string) => {
+      if (answered) { if (note) await interaction.followUp({ content: note, flags: MessageFlags.Ephemeral }); return; }
+      answered = true;
+      if (note) await interaction.reply({ content: note, flags: MessageFlags.Ephemeral });
+      else { await interaction.deferReply({ flags: MessageFlags.Ephemeral }); await interaction.deleteReply(); }
+    };
+    const channel = await sendable(interaction);
+    if (!channel) { await respond('teapilot cannot post in this channel.').catch(noop); return; }
+    const thread = channel.isThread() ? channel : undefined;
+    const spawn = async (start: () => Promise<{ id: string } & Parameters<typeof transport>[0]>) => {
+      if (thread) throw new Error('Threads cannot be started inside other threads.');
+      const created = await start();
+      return { id: created.id, transport: transport(created) };
+    };
+    const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
+    const text = interaction.isChatInputCommand() ? interaction.options.getString('message', true).trim() : strip(target?.content ?? '', self.id);
+    handlers.reply({
+      authorId: interaction.user.id,
+      authorIsBot: interaction.user.bot,
+      authorName: interaction.user.username,
+      guildId: interaction.guildId ?? undefined,
+      channelId: interaction.channelId,
+      parentId: thread?.parentId ?? undefined,
+      ownThread: thread?.ownerId === self.id,
+      mentionsBot: false,
+      // The person who wrote a selected message may not be the one invoking teapilot, so attribute it.
+      content: target && text ? `Message from @${target.author.username}:
+${text}` : text,
+      title: text,
+      transport: () => transport(channel),
+      startThread: name => spawn(async () => {
+        const options = { name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay };
+        if (target) return await target.startThread(options);
+        // A slash command has no message to anchor a thread, so echo the prompt and open the thread on it.
+        const response = await interaction.reply({ content: `<@${interaction.user.id}>: ${text}`.slice(0, MESSAGE_LIMIT), ...quiet, withResponse: true });
+        answered = true;
+        const message = response.resource?.message;
+        if (!message) throw new Error('Discord did not return the message to start a thread on.');
+        return await message.startThread(options);
+      }),
+      respond: note => respond(note).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`)),
+    });
+  };
+
   client.on(Events.InteractionCreate, async interaction => {
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && interaction.commandName === replyCommand) {
+      const self = client.user;
+      if (self && (interaction.isMessageContextMenuCommand() || interaction.isChatInputCommand())) await reply(interaction, self).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
     if (interaction.isChatInputCommand()) {
       const self = client.user;
       const channel = interaction.channel;
@@ -75,7 +143,7 @@ export async function connect(settings: DiscordSettings, onMessage: (message: Ga
       };
       if (!self || !text) { await respond('Unknown teapilot command.').catch(noop); return; }
       const thread = channel?.isThread() ? channel : undefined;
-      onCommand({
+      handlers.command({
         authorId: interaction.user.id,
         authorIsBot: interaction.user.bot,
         guildId: interaction.guildId ?? undefined,
@@ -108,7 +176,7 @@ export async function connect(settings: DiscordSettings, onMessage: (message: Ga
     if (!self || message.author.id === self.id || !message.channel.isSendable()) return;
     const channel = message.channel;
     const thread = channel.isThread() ? channel : undefined;
-    onMessage({
+    handlers.message({
       authorId: message.author.id,
       authorIsBot: message.author.bot,
       authorName: message.author.username,
@@ -117,7 +185,7 @@ export async function connect(settings: DiscordSettings, onMessage: (message: Ga
       parentId: thread?.parentId ?? undefined,
       ownThread: thread?.ownerId === self.id,
       mentionsBot: message.mentions.users.has(self.id),
-      content: message.content.replace(new RegExp(`<@!?${self.id}>`, 'g'), '').trim(),
+      content: strip(message.content, self.id),
       transport: () => transport(channel),
       async startThread(name) {
         const created = await message.startThread({ name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay });

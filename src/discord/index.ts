@@ -3,9 +3,9 @@ import { loadConfig } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
 import { runHost } from '../host.js';
 import type { SetupUI } from '../setup/terminal.js';
-import { route } from './access.js';
+import { route, routeReply } from './access.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
-import type { GatewayCommand, GatewayMessage } from './gateway.js';
+import type { GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
 import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
 import { readDiscordSettings } from './settings.js';
 
@@ -70,12 +70,33 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     conversation.push(command.text);
     await command.respond();
   };
+  const handleReply = async (reply: GatewayReply): Promise<void> => {
+    const target = routeReply(reply, settings);
+    if (!target) { await reply.respond('You are not allowed to use teapilot here.'); return; }
+    if (!reply.content) { await reply.respond('teapilot reads text messages only.'); return; }
+    let key = target.key;
+    let transport: DiscordTransport;
+    if (target.kind === 'new-thread') {
+      try {
+        const thread = await reply.startThread(reply.title);
+        key = `thread:${thread.id}`; transport = thread.transport;
+      } catch (error) {
+        await reply.respond(`teapilot could not start a thread here: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+    } else transport = reply.transport();
+    await reply.respond();
+    log(`${key} @${reply.authorName} (reply): ${reply.content.split('\n')[0]!.slice(0, 80)}`);
+    (await open(key, transport)).push(reply.content);
+  };
+  const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   // discord.js loads only here, so every other command starts without it.
   const { connect } = await import('./gateway.js');
-  const gateway = await connect(settings, message => void handle(message)
-    .catch(error => log(`Message handling failed: ${error instanceof Error ? error.message : String(error)}`)),
-  command => void handleCommand(command)
-    .catch(error => log(`Command handling failed: ${error instanceof Error ? error.message : String(error)}`)), log);
+  const gateway = await connect(settings, {
+    message: message => void handle(message).catch(failed('Message handling')),
+    command: command => void handleCommand(command).catch(failed('Command handling')),
+    reply: reply => void handleReply(reply).catch(failed('Reply handling')),
+  }, log);
 
   log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} allowed user(s) in DMs${settings.channelId ? ` and channel ${settings.channelId}` : ''}.`);
   log(`Repository root: ${root}. Sessions start in ${settings.startMode} mode. Press Ctrl+C to stop.`);

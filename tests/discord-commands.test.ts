@@ -17,7 +17,13 @@ it('maps permissions subcommands', () => {
 });
 
 it('offers valid choices for option commands', () => {
-  const mode = commandDefinitions.find(command => command.name === 'mode')!;
+  const mode = commandDefinitions.find(command => command.name === 'mode' && 'options' in command)! as Extract<typeof commandDefinitions[number], { options?: unknown }>;
   expect(mode.options![0]).toMatchObject({ choices: [{ value: 'chat' }, { value: 'ask' }, { value: 'code' }] });
-  for (const command of commandDefinitions) expect(command.description.length).toBeLessThanOrEqual(100);
+  for (const command of commandDefinitions) if ('description' in command) expect(command.description.length).toBeLessThanOrEqual(100);
+});
+
+it('registers reply as a slash command and a message context menu without session text', () => {
+  expect(commandDefinitions).toContainEqual({ type: 3, name: 'Reply' });
+  expect(commandDefinitions.some(command => command.name === 'reply' && 'options' in command)).toBe(true);
+  expect(commandText('reply', null, 'hello')).toBeUndefined();
 });
