@@ -64,6 +64,16 @@ export function checkDisk(available: number, required: number): void {
   if (available < required) throw new Error(`Insufficient disk space: need approximately ${(required / 1e9).toFixed(1)} GB. Free space and rerun teapilot setup.`);
 }
 
+// /api/create only registers an alias; it never loads the weights, so a GGUF with
+// missing/incompatible tensors is accepted silently. An empty-prompt /api/generate
+// forces llama-server to actually load the model, surfacing load failures here
+// instead of at first inference. Large models can take a while to load.
+async function probeOllamaLoad(base: string, id: string, alias: string, signal: AbortSignal): Promise<void> {
+  const response = await fetch(`${base}/api/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: alias, prompt: '', stream: false, keep_alive: 0 }), signal: AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]), redirect: 'error' });
+  const payload = await response.json().catch(() => undefined) as { error?: string } | undefined;
+  if (!response.ok || payload?.error) throw new Error(`Ollama could not load ${id}: ${payload?.error ?? `HTTP ${response.status}`}. The model file may be incompatible with this Ollama version; choose a different model.`);
+}
+
 async function binary(signal: AbortSignal): Promise<string | undefined> {
   for (const candidate of ['ollama', ...(process.platform === 'win32' && process.env.LOCALAPPDATA ? [join(process.env.LOCALAPPDATA, 'Programs/Ollama/ollama.exe')] : [])]) {
     try { await command(candidate, ['--version'], AbortSignal.any([signal, AbortSignal.timeout(10000)])); return candidate; } catch { signal.throwIfAborted(); }
@@ -207,5 +217,6 @@ async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, 
   const alias = `teapilot-${createHash('sha256').update(id).digest('hex').slice(0, 10)}:latest`;
   ui.log(`Preparing ${id} with a ${context.toLocaleString('en-US')}-token context...`);
   await during(ui, `Preparing ${id}...`, () => streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose));
+  await during(ui, `Loading ${id}...`, () => probeOllamaLoad(base, id, alias, signal));
   return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true };
 }

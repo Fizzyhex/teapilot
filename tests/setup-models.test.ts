@@ -20,7 +20,7 @@ it('accepts multiple selections in order, deduplicates and rejects invalid selec
   expect(await chooseMany(ui(['']), 'Models', ['a', 'b'], 1)).toEqual([1]);
 });
 
-function ollama(installed: string[] = [], failFirstPull = false) {
+function ollama(installed: string[] = [], failFirstPull = false, loadError?: string) {
   const operations: Array<{ path: string; model: string }> = [];
   let failed = false;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
@@ -30,6 +30,7 @@ function ollama(installed: string[] = [], failFirstPull = false) {
     if (path === '/api/tags') return Response.json({ models: installed.map(name => ({ name, size: 1 })) });
     if (path === '/api/show') return Response.json({ capabilities: ['tools'], model_info: { 'qwen.context_length': 32768 } });
     if (path === '/api/pull' && failFirstPull && !failed) { failed = true; return new Response('{"error":"interrupted"}\n'); }
+    if (path === '/api/generate' && loadError) return new Response(JSON.stringify({ error: loadError }), { status: 500 });
     return new Response('{"status":"success"}\n');
   }));
   return operations;
@@ -41,7 +42,7 @@ it('downloads and prepares queued models sequentially, retries in place and sele
   prompts.choose = vi.fn(async () => 1);
   const model = await selectOllamaModel(prompts, new AbortController().signal);
   expect(operations.filter(op => op.path === '/api/pull').map(op => op.model)).toEqual([presets[0]!.id, presets[0]!.id, presets[1]!.id]);
-  expect(operations.map(op => op.path)).toEqual(['/api/tags', '/api/pull', '/api/pull', '/api/show', '/api/create', '/api/pull', '/api/show', '/api/create']);
+  expect(operations.map(op => op.path)).toEqual(['/api/tags', '/api/pull', '/api/pull', '/api/show', '/api/create', '/api/generate', '/api/pull', '/api/show', '/api/create', '/api/generate']);
   expect(model.source).toBe(presets[1]!.id);
   expect(model.context).toBe(32768);
   expect(prompts.choose).toHaveBeenCalledWith('Active execution model', [presets[0]!.id, presets[1]!.id], 0);
@@ -53,6 +54,14 @@ it('reuses the fast model and pulls the capable preset without a conversion prom
   await selectOllamaModel(prompts, new AbortController().signal);
   expect(operations.filter(op => op.path === '/api/pull').map(op => op.model)).toEqual([presets[1]!.id]);
   expect(prompts.input).toHaveBeenCalledTimes(3);
+});
+
+it('throws with the Ollama message when the prepared model fails to load', async () => {
+  const loadError = "llama-server process has terminated: exit status 1: error loading model: check_tensor_dims: tensor 'blk.64.attn_norm.weight' not found";
+  const operations = ollama([], false, loadError);
+  const prompts = ui(['0']);
+  await expect(selectOllamaModel(prompts, new AbortController().signal)).rejects.toThrow(new RegExp(`could not load ${presets[0]!.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*tensor 'blk\\.64\\.attn_norm\\.weight' not found`));
+  expect(operations.map(op => op.path)).toEqual(['/api/tags', '/api/pull', '/api/show', '/api/create', '/api/generate']);
 });
 
 it('stops the queue on cancellation without starting subsequent downloads', async () => {
