@@ -138,8 +138,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       const next = await compose();
       return { context: { ...context, tools: next.tools }, messages: [{ role: 'system', content: `Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
     },
-    beforeToolCall: async () => {
+    beforeToolCall: async ({ toolCall }) => {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) return { block: true, terminate: true, reason: 'Attempt stopped' };
+      if (evidence.searchExhausted && toolCall.name === 'web_search') return { block: true, reason: 'Search refused: repeated searches found no new evidence. Answer now from the results already found, clearly stating any gaps.' };
       if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
       return undefined;
     },

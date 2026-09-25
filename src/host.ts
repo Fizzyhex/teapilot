@@ -111,6 +111,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   };
   const incomplete = (attempt: AttemptResult, fallback?: string) => {
     const stop = attempt.stopped ?? attempt.reason ?? 'incomplete';
+    const usedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
     const actions: Record<string, string> = {
       approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
       provider_error: 'Run teapilot doctor --live with this configuration to check the execution model.',
@@ -118,7 +119,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       context_limit: 'Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
       payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',
       budget: 'Review spending and remaining request/day limits before retrying.',
-      ineffective_calls: 'Inspect the current files, then retry with a narrower concrete change.',
+      ineffective_calls: usedRepository ? 'Inspect the current files, then retry with a narrower concrete change.' : 'Retry with a narrower question, or check the search service with teapilot doctor --live.',
       test_failures: 'Inspect the failing check output and retry with that failure as the task.',
       tool_failures: 'Inspect the tool error and correct its path or command before retrying.',
       cancelled: 'Review any existing edits before starting another request.',
@@ -293,7 +294,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const next = fallback.find(item => item.assessment.allowed)?.tier;
       if (!next) {
         const resumableSameTier = ['unsupported', 'turn_limit', 'ineffective_calls', 'tool_failures', 'test_failures'];
-        const madeProgress = previous.turns > 0 || changedFiles.size > 0 || shellRan;
+        const repositoryWork = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
+        // Without repository work, resuming the same model after repeated calls just repeats them.
+        const madeProgress = previous.reason === 'ineffective_calls' ? repositoryWork : previous.turns > 0 || repositoryWork;
         if (!previous.reason || !resumableSameTier.includes(previous.reason) || !madeProgress) {
           return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || 'no higher tier configured'}.`));
         }

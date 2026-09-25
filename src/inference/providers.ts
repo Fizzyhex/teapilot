@@ -89,15 +89,20 @@ export function budgetedJev(config: Config, governor: SpendGovernor, telemetry: 
       if (Buffer.byteLength(JSON.stringify(request)) > 32000) throw new Error('Routing input is too large');
       const reservation = await governor.reserve(config.router.maxCallUsd, 'jev');
       let cost: number | undefined;
+      let rate = false;
       let usage: Record<string, unknown> | undefined;
       try {
         const result = await decideUntilCancelled(inner, request, signal);
         usage = result.usage;
         if (typeof usage?.cost === 'number' && usage.cost >= 0) cost = usage.cost;
+        // The SDK reports no cost; with a configured token rate, charge the tokens actually used instead of the ceiling.
+        else if (config.router.usdPerMillionTokens !== undefined && typeof usage?.input_tokens === 'number' && typeof usage?.output_tokens === 'number') {
+          cost = (usage.input_tokens + usage.output_tokens) * config.router.usdPerMillionTokens / 1e6; rate = true;
+        }
         return result;
       } finally {
-        const charged = await governor.settle(reservation, cost, 'provider-reported');
-        await telemetry.event('usage', { stage: 'routing', chargedUsd: charged, basis: cost === undefined ? 'reserved-maximum' : 'provider-reported', inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens });
+        const charged = await governor.settle(reservation, cost, rate ? 'configured-rate' : 'provider-reported');
+        await telemetry.event('usage', { stage: 'routing', chargedUsd: charged, basis: cost === undefined ? 'reserved-maximum' : rate ? 'configured-rate' : 'provider-reported', inputTokens: usage?.input_tokens, outputTokens: usage?.output_tokens });
       }
     },
   };

@@ -16,6 +16,8 @@ export class Evidence {
   checks: Array<{ command: string; status: 'passed' | 'failed' }> = [];
   observations: Array<{ tool: string; failed: boolean; detail: string }> = [];
   private inspectionWarning = false;
+  // Set once a search repeats after its warning: further searches are refused so the model answers instead.
+  searchExhausted = false;
   private repeated = new Map<string, number>();
   constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = []) {
     this.unresolvedChecks = new Set(unresolvedChecks);
@@ -43,7 +45,8 @@ export class Evidence {
       this.changedFiles.add(String(data.path)); this.lastCheck = undefined;
       this.repeated.clear(); this.inspectionWarning = false; return;
     }
-    const inspection = ['repo_list', 'repo_search', 'read'].includes(name) && !failed;
+    const search = name === 'web_search' && !failed;
+    const inspection = (['repo_list', 'repo_search', 'read'].includes(name) && !failed) || search;
     // Equal bounded inspection results provide no new evidence, even if the
     // caller varies query spelling or optional arguments. Never normalize shell grammar.
     const signature = createHash('sha256').update(JSON.stringify(inspection && result !== undefined ? [name, result] : [name, args])).digest('hex');
@@ -52,8 +55,11 @@ export class Evidence {
     if (count >= this.thresholds.repeatedToolCalls) {
       if (inspection && !this.inspectionWarning) {
         this.inspectionWarning = true;
-        this.warning = 'Repeated inspection produced no new evidence. Change approach now: use the information already found, narrow the search, or create the requested files if the repository is empty. Another repeated inspection will stop this attempt.';
-      } else this.reason = 'ineffective_calls';
+        this.warning = search
+          ? 'Repeated searches produced no new evidence. Stop searching now and answer from the results already found, clearly stating any gaps. Further searches will be refused.'
+          : 'Repeated inspection produced no new evidence. Change approach now: use the information already found [*clearly* stating knowledge gaps!], narrow the search, or create the requested files if the repository is empty. Another repeated inspection will stop this attempt.';
+      } else if (search) this.searchExhausted = true;
+      else this.reason = 'ineffective_calls';
     }
   }
 }
