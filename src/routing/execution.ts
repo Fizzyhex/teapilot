@@ -23,6 +23,7 @@ export function profileAvailable(config: Config, tier: Tier): { available: boole
   if (!model.enabled) return { available: false, reason: 'Physical model is disabled' };
   if (model.contextTokens < 4096) return { available: false, reason: 'Model context is too small' };
   if (!model.reasoningEfforts.includes(profile.thinking)) return { available: false, reason: `Native ${profile.thinking} reasoning is not verified` };
+  if (profile.thinking !== 'off' && (!model.reasoning || model.reasoning.values[profile.thinking] === undefined)) return { available: false, reason: `No request mapping is configured for ${profile.thinking} reasoning` };
   return { available: true };
 }
 export function tierSupportsWorkload(tier: Tier, workload: Workload, explicit = false): boolean {
