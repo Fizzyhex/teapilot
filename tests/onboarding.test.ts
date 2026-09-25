@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configDirectory, loadConfig } from '../src/config.js';
-import { doctor, liveCheck, modelStatus, routingCheck } from '../src/diagnostics.js';
+import { diagnoseModel, doctor, liveCheck, modelStatus, routingCheck } from '../src/diagnostics.js';
 import { runHost } from '../src/host.js';
 import { saveConfiguration, setup } from '../src/setup/index.js';
 import { checkDisk, streamOperation } from '../src/setup/ollama.js';
@@ -85,13 +85,14 @@ it('an answer without tool execution is not reported as coding readiness', async
   expect(await liveCheck(f.config, 'normal')).toEqual({ ask: true, tools: false, coding: false, spentUsd: 0 });
 });
 
-it('Ollama execution disables thinking in the actual HTTP request', async () => {
+it('model reasoning protocol controls the actual HTTP request independent of provider identity', async () => {
   let effort: unknown;
   const f = await local((body, req, res) => {
     if (req.url?.endsWith('/models')) res.end('{}');
     else { effort = body.reasoning_effort; completion(res, { text: 'A concise answer.' }); }
   });
-  f.config.models.capable.provider = 'ollama';
+  f.config.models.capable.provider = 'local';
+  f.config.models.capable.reasoning = { type: 'reasoning_effort', values: { off: 'none' } };
   expect((await runHost(f.config, { prompt: 'Explain', workload: 'ask', cwd: f.cwd }, { approve: async () => false })).success).toBe(true);
   expect(effort).toBe('none');
 });
@@ -134,11 +135,14 @@ it('model checks distinguish missing models, invalid credentials, and an unavail
   const f = await local();
   f.config.models.capable.id = 'missing';
   expect(await modelStatus(f.config, 'normal')).toContain('not installed');
+  expect(await diagnoseModel(f.config, 'normal')).toMatchObject({ ok: false, layer: 'model_unavailable' });
   const denied = await mockServer((_body, _req, res) => { res.writeHead(401); res.end('{}'); }); cleanup.push(denied.close);
   f.config.models.capable.baseUrl = denied.url;
   expect(await modelStatus(f.config, 'normal')).toContain('401');
+  expect(await diagnoseModel(f.config, 'normal')).toMatchObject({ ok: false, layer: 'api_incompatible' });
   f.config.models.capable.baseUrl = 'http://127.0.0.1:1/v1';
   expect(await modelStatus(f.config, 'normal')).toContain('unreachable');
+  expect(await diagnoseModel(f.config, 'normal')).toMatchObject({ ok: false, layer: 'server_not_ready' });
 });
 
 it('setup saves private config, reruns preserve it, and environment overrides remain effective', async () => {
@@ -177,6 +181,25 @@ it('recognizes interrupted first setup without mislabeling retained generations'
   messages.length = 0;
   await setup({ directory }, ui, new AbortController().signal);
   expect(messages.join('\n')).not.toContain('interrupted before activation');
+});
+
+it('setup does not enable advertised tool or coding support until live verification passes', async () => {
+  const f = await local((body, req, res) => {
+    if (req.url?.endsWith('/models')) { res.end(JSON.stringify({ data: [{ id: 'local-test' }] })); return; }
+    completion(res, { text: JSON.stringify(body.messages).includes('TEAPILOT_OK') ? 'TEAPILOT_OK' : 'No tool call.' });
+  });
+  vi.stubEnv('TEAPILOT_STATE_DIR', f.config.stateDir);
+  const prompts: SetupUI = {
+    log: vi.fn(),
+    input: async () => '',
+    choose: async message => message === 'Execution model' || message.startsWith('Web search') ? 1 : 0,
+    confirm: async message => message.startsWith('Run live local checks') || message.startsWith('Save these settings'),
+  };
+  const directory = join(f.cwd, 'verification-gate');
+  await setup({ directory, endpoint: `${f.server.url}/v1`, model: 'local-test', contextTokens: 16384 }, prompts, new AbortController().signal);
+  const configured = await loadConfig(directory, {});
+  expect(configured.models.capable.toolCalling).toBe(false);
+  expect(configured.policy.disabledCapabilities).toEqual(expect.arrayContaining(['coder.normal', 'coder.reasoning', 'coder.deep']));
 });
 
 it('blank optional search still saves a verified interactive setup', async () => {
