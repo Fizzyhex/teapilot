@@ -1,6 +1,7 @@
 import { Type } from '@earendil-works/pi-ai';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config } from '../config.js';
+import { SEARCH_UNAVAILABLE } from '../routing/escalation.js';
 import { searchQuery, searchRepair, SearchSetupError } from '../search.js';
 
 export function ask(config: Config, web: boolean, repository = false): { systemPrompt: string; tools: AgentTool[] } {
@@ -17,7 +18,8 @@ export function ask(config: Config, web: boolean, repository = false): { systemP
           if (!(error instanceof SearchSetupError)) throw error;
           throw new SearchSetupError(`${error.message} ${searchRepair(config)}`);
         }
-        return { content: [{ type: 'text', text: JSON.stringify(results) }], details: {} };
+        const text = results.length || !results.unresponsive?.length ? JSON.stringify(results) : `${SEARCH_UNAVAILABLE} (${results.unresponsive.join('; ')}). Retrying will not help - continue without search and tell the user search was unavailable.`;
+        return { content: [{ type: 'text', text }], details: {} };
       },
     });
   }
@@ -37,7 +39,7 @@ function askPrompt(repository: boolean, webSearch: boolean): string {
       ? 'Repository access is limited to the tools currently provided.'
       : 'Repository tools are not currently active.',
     
-    '**volatile fact policy** - \`web.search\` when facts or sources are requested; cite the returned source URLs (inline where possible), and distinguish evidence from inference. If search isn\'t helping - be transparent about it.',
+    '**volatile fact policy** - when `web.search` is available, call it BEFORE answering questions about a specific real-world business, person, place, product or event, or anything current; never answer these from memory, and never guess or "correct" a name you don\'t recognise - search for it as written. Cite the returned source URLs (inline where possible), and distinguish evidence from inference. If search isn\'t helping - be transparent about it.',
     
     webSearch
       ? '`web.search` is available.'

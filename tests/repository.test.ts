@@ -85,6 +85,12 @@ it('repeated searches warn, then refuse further searches instead of aborting', (
   expect(evidence.searchExhausted).toBe(true);
 });
 
+it('refuses further searches at once when every search engine is unavailable', () => {
+  const evidence = new Evidence({ repeatedToolCalls: 3, consecutiveFailures: 2, maxEscalations: 2 });
+  evidence.observe('web_search', { query: 'a' }, false, 'No results: the search engines were unavailable (brave: Suspended). Retrying will not help.');
+  expect(evidence.searchExhausted).toBe(true);
+});
+
 it('empty-repository coding can inspect and write without a shell approval', async () => {
   const f = await setup();
   let calls = 0, approvals = 0;

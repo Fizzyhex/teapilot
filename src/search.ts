@@ -4,7 +4,7 @@ export class SearchSetupError extends Error {}
 export function searchRepair(config: Config): string {
   return `Configuration: ${config.source?.directory ?? 'provided settings'}. Run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and choose Reconfigure, then configure search. See docs/02-commands.md#web-research.`;
 }
-export async function searchQuery(base: string, query: string, signal?: AbortSignal): Promise<Array<{ title: string; url: string; snippet: string }>> {
+export async function searchQuery(base: string, query: string, signal?: AbortSignal): Promise<Array<{ title: string; url: string; snippet: string }> & { unresponsive?: string[] }> {
   try {
     const endpoint = new URL(base);
     if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error('Invalid search URL');
@@ -22,13 +22,16 @@ export async function searchQuery(base: string, query: string, signal?: AbortSig
         chunks.push(next.value);
       }
     } finally { await reader.cancel(); }
-    const data = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { results?: unknown };
+    const data = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { results?: unknown; unresponsive_engines?: unknown };
     if (!Array.isArray(data.results)) throw new Error('Search requires a JSON results array');
-    return data.results.slice(0, 5).map(result => ({
+    const results = data.results.slice(0, 5).map(result => ({
       title: String(result?.title ?? '').slice(0, 300),
       url: typeof result?.url === 'string' && /^https?:\/\//.test(result.url) ? result.url.slice(0, 2000) : '',
       snippet: String(result?.content ?? '').slice(0, 1500),
     }));
+    // SearXNG reports engines it could not query (rate limits, blocks) beside an empty result list.
+    const unresponsive = Array.isArray(data.unresponsive_engines) ? data.unresponsive_engines.map(entry => Array.isArray(entry) ? entry.slice(0, 2).join(': ') : String(entry)).slice(0, 8) : [];
+    return Object.assign(results, { unresponsive });
   } catch {
     signal?.throwIfAborted();
     throw new SearchSetupError('Search service unavailable or incompatible. Check its URL, connectivity, and SearXNG JSON output.');

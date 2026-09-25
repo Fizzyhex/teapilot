@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Policy } from '../config.js';
 
 export type EscalationReason = 'test_failures' | 'tool_failures' | 'ineffective_calls' | 'unsupported' | 'uncertainty' | 'turn_limit' | 'provider_error';
+export const SEARCH_UNAVAILABLE = 'No results: the search engines were unavailable';
 export class Evidence {
   reason?: EscalationReason;
   toolCalls = 0;
@@ -46,6 +47,8 @@ export class Evidence {
       this.repeated.clear(); this.inspectionWarning = false; return;
     }
     const search = name === 'web_search' && !failed;
+    // A search with every engine down cannot improve on retry; refuse further searches at once.
+    if (search && result?.startsWith(SEARCH_UNAVAILABLE)) this.searchExhausted = true;
     const inspection = (['repo_list', 'repo_search', 'read'].includes(name) && !failed) || search;
     // Equal bounded inspection results provide no new evidence, even if the
     // caller varies query spelling or optional arguments. Never normalize shell grammar.

@@ -104,7 +104,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       const allowed = ['repository.read', 'repository.write', 'repository.shell', 'web.search'] as Permission[];
       if (!Array.isArray(requested) || requested.some(value => typeof value !== 'string' || !allowed.includes(value as Permission))) return { content: [{ type: 'text', text: 'Invalid capability request.' }], details: {} };
       const required = withPrerequisites(requested as Permission[]);
-      if (!await input.requestCapabilities!(required, `Additional access requested to complete your current task:\n${input.prompt}`, signal)) {
+      if (!await input.requestCapabilities!(required, `Additional access requested to complete your current task:\n${input.prompt.split('\nPrevious attempt stopped:')[0]}`, signal)) {
         capabilityDenied = true;
         return { content: [{ type: 'text', text: 'Required access was not granted. This turn stops; no dependent tools will execute.' }], details: {} };
       }
@@ -133,14 +133,16 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     toolExecution: 'sequential',
     prepareNextTurnWithContext: async ({ context }) => {
-      if (!toolsChanged) return undefined;
+      // Once search is exhausted or down, take the tool away: a refusal message alone does not stop a model retrying it.
+      const withoutSearch = <T extends { name: string }>(tools: T[]) => evidence.searchExhausted ? tools.filter(tool => tool.name !== 'web_search') : tools;
+      if (!toolsChanged) return evidence.searchExhausted && context.tools?.some(tool => tool.name === 'web_search') ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
       toolsChanged = false;
       const next = await compose();
-      return { context: { ...context, tools: next.tools }, messages: [{ role: 'system', content: `Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
+      return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[host notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
     },
     beforeToolCall: async ({ toolCall }) => {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) return { block: true, terminate: true, reason: 'Attempt stopped' };
-      if (evidence.searchExhausted && toolCall.name === 'web_search') return { block: true, reason: 'Search refused: repeated searches found no new evidence. Answer now from the results already found, clearly stating any gaps.' };
+      if (evidence.searchExhausted && toolCall.name === 'web_search') return { block: true, reason: 'Search refused: search is unavailable or repeated searches found no new evidence. Continue without it, clearly stating any gaps.' };
       if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
       return undefined;
     },
