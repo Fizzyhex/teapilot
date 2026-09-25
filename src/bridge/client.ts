@@ -32,15 +32,18 @@ export function bridgeUrl(target?: string): string {
 }
 
 const refusal: Record<number, string> = {
-  401: 'The bridge token was refused. Use the token shown when the host first started (or run teapilot bridge host --rotate-token).',
+  401: 'This host requires a bridge token, and the one sent was missing or wrong. Use the token shown when the host first started with --token (or run teapilot bridge host --rotate-token).',
   403: 'The host refused this connection.',
   409: 'The host already has a client connected.',
   429: 'Too many wrong tokens were sent; the host is refusing attempts for a minute.',
 };
 
+export class BridgeAuthError extends Error { name = 'BridgeAuthError'; }
+
 export interface BridgeClientOptions {
   url: string;
-  token: string;
+  /** Sent as a bearer token when present; hosts only ask for one if started with --token. */
+  token?: string;
   ui: SetupUI & { prompt(message: string, cwd: string, context?: ComposerContext): Promise<string> };
   presentation: TerminalPresentation;
   signal: AbortSignal;
@@ -49,7 +52,7 @@ export interface BridgeClientOptions {
 /** A thin terminal for a remote session. Resolves 0 when the session ends normally, 2 if the connection drops. */
 export function connectBridge({ url, token, ui, presentation, signal }: BridgeClientOptions): Promise<number> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` }, maxPayload: MAX_MESSAGE_BYTES, handshakeTimeout: 15_000 });
+    const ws = new WebSocket(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, maxPayload: MAX_MESSAGE_BYTES, handshakeTimeout: 15_000 });
     const send = (message: ClientMessage) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); };
     let root = '';
     let routingMode: 'hosted' | 'direct' = 'hosted';
@@ -60,7 +63,7 @@ export function connectBridge({ url, token, ui, presentation, signal }: BridgeCl
 
     ws.on('unexpected-response', (_request, response) => {
       response.resume();
-      reject(new Error(refusal[response.statusCode ?? 0] ?? `The host answered HTTP ${response.statusCode}. Is this a teapilot bridge?`));
+      reject(response.statusCode === 401 ? new BridgeAuthError(refusal[401]!) : new Error(refusal[response.statusCode ?? 0] ?? `The host answered HTTP ${response.statusCode}. Is this a teapilot bridge?`));
     });
     ws.on('error', error => reject(new Error(`Cannot reach the bridge at ${url}: ${(error as NodeJS.ErrnoException).code ?? error.message}`)));
     ws.on('close', () => {

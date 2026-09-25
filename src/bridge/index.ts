@@ -6,7 +6,7 @@ import type { TerminalPresentation } from '../presentation.js';
 import type { ComposerContext } from '../composer.js';
 import type { SetupUI } from '../setup/terminal.js';
 import { loadToken, tokenPath } from './auth.js';
-import { bridgeUrl, connectBridge } from './client.js';
+import { BridgeAuthError, bridgeUrl, connectBridge } from './client.js';
 import { startBridgeHost } from './host.js';
 import { DEFAULT_BRIDGE_PORT, TOKEN_ENV } from './protocol.js';
 import { publishToTailnet, tailnetTip, tailscaleBinary, tailscaleExec, type TailscaleExec } from './tailscale.js';
@@ -21,6 +21,8 @@ export interface BridgeCommand {
   signal: AbortSignal;
   /** `--ts`: log in to and publish through Tailscale for the user. */
   tailscale?: boolean;
+  /** `--token`: require clients to present a token. */
+  requireToken?: boolean;
   rotateToken?: boolean;
   exec?: TailscaleExec;
   env?: NodeJS.ProcessEnv;
@@ -40,17 +42,18 @@ export async function bridge(action: string, target: string | undefined, options
   throw new Error(`Use teapilot bridge ${bridgeActions.join('|')}.`);
 }
 
-async function hostBridge(port: number, { directory, cwd, ui, signal, tailscale, rotateToken, exec = tailscaleExec, env = process.env }: BridgeCommand): Promise<boolean> {
+async function hostBridge(port: number, { directory, cwd, ui, signal, tailscale, requireToken, rotateToken, exec = tailscaleExec, env = process.env }: BridgeCommand): Promise<boolean> {
   const config = await loadConfig(directory, { ...env });
   const root = await realpath(cwd);
   const secrets = [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value));
   const redact = (text: string) => secrets.reduce((result, secret) => result.split(secret).join('[REDACTED]'), text);
   const log = (text: string) => ui.log(`${new Date().toLocaleTimeString()} ${redact(text)}`);
-  const { token, created } = await loadToken(config.stateDir, rotateToken);
+  const { token, created } = requireToken || rotateToken ? await loadToken(config.stateDir, rotateToken) : { token: undefined, created: false };
   const host = await startBridgeHost({ config, root, port, token, signal, log, redact });
   ui.log(`Bridge listening on 127.0.0.1:${host.port} for ${root}`);
-  ui.log(created ? `New bridge token (shown once, also stored in ${tokenPath(config.stateDir)}):\n  ${token}` : `Bridge token: stored in ${tokenPath(config.stateDir)}; run with --rotate-token to replace it.`);
-  ui.log(`Anyone with the token who can reach this port can approve actions on this computer. Keep it private.`);
+  if (token === undefined) ui.log('No token required: access is limited to this computer and whatever you publish, so on a shared tailnet restrict who can reach it with your Tailscale access rules, or restart with --token.');
+  else ui.log(created ? `New bridge token (shown once, also stored in ${tokenPath(config.stateDir)}):
+  ${token}` : `Bridge token required: stored in ${tokenPath(config.stateDir)}; --rotate-token replaces it.`);
   let published: { stop(): void } | undefined;
   try {
     if (tailscale) {
@@ -74,7 +77,15 @@ async function hostBridge(port: number, { directory, cwd, ui, signal, tailscale,
 async function connect(target: string | undefined, { ui, presentation, signal, env = process.env }: BridgeCommand): Promise<boolean> {
   if (!ui.prompt) throw new Error('teapilot bridge connect needs an interactive terminal.');
   const url = bridgeUrl(target);
-  const token = env[TOKEN_ENV]?.trim() || (await ui.input('Bridge token', '', true, signal)).trim();
-  if (!token) throw new Error(`No bridge token. Set ${TOKEN_ENV} or enter it when asked.`);
-  return await connectBridge({ url, token, ui: { ...ui, prompt: ui.prompt.bind(ui) }, presentation, signal }) === 0;
+  const terminal = { ...ui, prompt: ui.prompt.bind(ui) };
+  let token = env[TOKEN_ENV]?.trim() || undefined;
+  // Hosts only require a token when started with --token, so ask only if this one does.
+  for (let attempt = 0; ; attempt++) {
+    try { return await connectBridge({ url, token, ui: terminal, presentation, signal }) === 0; }
+    catch (error) {
+      if (!(error instanceof BridgeAuthError) || attempt) throw error;
+      token = (await ui.input('This host requires a bridge token', '', true, signal)).trim();
+      if (!token) throw new Error(`No bridge token. Set ${TOKEN_ENV} or enter it when asked.`);
+    }
+  }
 }

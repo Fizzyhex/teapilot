@@ -207,3 +207,13 @@ it('--ts leaves an existing mapping alone, refuses to replace another, and logs 
   expect(logins).toBe(1);
   await expect(publishToTailnet({ ...opts, exec: fake({ 'status --json': { stdout: status('NeedsLogin', '') } }), login: async () => 1 })).rejects.toThrow('did not complete');
 });
+
+it('needs no token by default, but still refuses browsers and a second client', async () => {
+  const { host, logs } = await start(async () => result('x'), { token: undefined });
+  const first = await client(host.port, '');
+  expect((await first.next('hello')).version).toBe(1);
+  expect(await (await client(host.port, '')).rejected).toBe(409);
+  first.ws.close();
+  expect(await (await client(host.port, '', { Origin: 'https://evil.example' })).rejected).toBe(403);
+  expect(logs.some(line => line.includes('wrong token'))).toBe(false);
+});

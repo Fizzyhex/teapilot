@@ -14,7 +14,8 @@ export interface BridgeHostOptions {
   config: Config;
   root: string;
   port: number;
-  token: string;
+  /** When set, clients must present it. Without one, access rests on the loopback bind and whatever publishes the port (tailscale serve). */
+  token?: string;
   signal: AbortSignal;
   log: (text: string) => void;
   redact?: (text: string) => string;
@@ -48,8 +49,8 @@ export async function startBridgeHost(options: BridgeHostOptions): Promise<Bridg
   server.on('upgrade', (request, socket, head) => {
     // Browsers attach Origin; a page in the user's browser must never be able to drive this.
     if (request.headers.origin !== undefined) return refuse(socket, 403, 'Forbidden');
-    if (limiter.blocked()) return refuse(socket, 429, 'Too Many Requests');
-    if (!tokenMatches(token, bearer(request.headers.authorization))) {
+    if (token !== undefined && limiter.blocked()) return refuse(socket, 429, 'Too Many Requests');
+    if (token !== undefined && !tokenMatches(token, bearer(request.headers.authorization))) {
       limiter.fail(); log('Refused a connection with a missing or wrong token.');
       return refuse(socket, 401, 'Unauthorized');
     }
