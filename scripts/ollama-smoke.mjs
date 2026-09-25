@@ -22,13 +22,13 @@ try {
   } }, signal, base);
   const config = await loadConfig(scratch, {});
   config.routingMode = 'direct'; config.stateDir = join(scratch, 'state');
-  config.models.economy.enabled = false; config.models.strong.enabled = false;
-  Object.assign(config.models.local, { provider: 'ollama', baseUrl: `${base}/v1`, id: configured.id, contextTokens: configured.context, toolCalling: configured.tools, temperature: 0.2 });
+  config.models.fast.enabled = false;
+  Object.assign(config.models.capable, { enabled: true, provider: 'ollama', baseUrl: `${base}/v1`, id: configured.id, contextTokens: configured.context, toolCalling: configured.tools, temperature: 0.2, reasoningEfforts: ['off'], reasoning: { type: 'reasoning_effort', values: { off: 'none' } } });
   config.policy.budget.requestUsd = 0; config.policy.budget.dailyUsd = 0;
   config.policy.limits.requestTimeoutMs = 120000;
   config.policy.limits.attemptTimeoutMs = 600000;
-  assert.equal(await modelStatus(config, 'local', signal), undefined);
-  const report = await liveCheck(config, 'local', signal, console.log);
+  assert.equal(await modelStatus(config, 'normal', signal), undefined);
+  const report = await liveCheck(config, 'normal', signal, console.log);
   console.log(JSON.stringify({ model, platform: process.platform, ...report }));
   assert.deepEqual(report, { ask: true, tools: true, coding: true, spentUsd: 0 });
   console.log('Checking the production coding workload...');
