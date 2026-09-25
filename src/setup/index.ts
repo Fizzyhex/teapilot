@@ -182,7 +182,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   const status = await during(ui, 'Checking model endpoint...', () => modelStatus(config, tier, signal));
   let report: LiveReport | undefined;
   if (status) { ui.log(`Endpoint ${modelFor(config, tier).baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
-  else if (await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
+  else if (options.nonInteractive || await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
     report = await during(ui, 'Verifying answers and coding...', () => liveCheck(config, tier, signal, ui.log));
   }
   // Advertised metadata is only a hint. Failed or skipped live verification
