@@ -94,7 +94,9 @@ export async function runSession(options: {
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;
     if (!result.success) exitCode = 2;
     const user = prompt + (correction ? `\nUser correction:\n${correction}` : '');
-    history = prepareConversation('', [], [...history, { user, assistant: result.text }], options.maxPromptChars).history;
+    // A failed turn's text is the host's diagnostic, not a reply; models imitate it on the next turn.
+    const assistant = result.success ? result.text : `[that request stopped before finishing: ${result.status.replaceAll('_', ' ')}]`;
+    history = prepareConversation('', [], [...history, { user, assistant }], options.maxPromptChars).history;
     correction = undefined;
     prompt = '';
     if (options.once) break;

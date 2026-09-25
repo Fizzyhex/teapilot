@@ -41,10 +41,18 @@ it('continues after an opening prompt and carries the conversation and correctio
 
 it('ignores empty prompts, continues after incomplete turns, and bounds retained history', async () => {
   const input = vi.fn().mockResolvedValueOnce('').mockResolvedValueOnce('First').mockResolvedValueOnce('Next').mockResolvedValueOnce('/quit');
-  const run = vi.fn(async (_request: HostRequest) => ({ ...result, success: false, text: 'x'.repeat(500) }));
+  const run = vi.fn().mockResolvedValueOnce({ ...result, text: 'x'.repeat(500) }).mockResolvedValueOnce({ ...result, success: false });
   expect(await runChat({ request: { prompt: '', cwd: '.' }, maxPromptChars: 200, input, run })).toBe(2);
   expect(run).toHaveBeenCalledTimes(2);
   expect(run.mock.calls[1]![0].history).toEqual([]);
+});
+
+it('keeps host diagnostics from failed turns out of the conversation history', async () => {
+  const input = vi.fn().mockResolvedValueOnce('try again').mockResolvedValueOnce('/exit');
+  const run = vi.fn().mockResolvedValueOnce({ ...result, success: false, status: 'context_limit', text: 'Incomplete: context limit.\nNext: Type /new' })
+    .mockResolvedValueOnce(result);
+  await runChat({ request: { prompt: 'Build it', cwd: '.' }, maxPromptChars: 2000, input, run });
+  expect(run.mock.calls[1]![0].history).toEqual([{ user: 'Build it', assistant: '[that request stopped before finishing: context limit]' }]);
 });
 
 it('ends an empty session on terminal EOF without running a request', async () => {
