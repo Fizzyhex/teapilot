@@ -123,21 +123,35 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   if (process.env.TEAPILOT_STATE_DIR) config.stateDir = resolve(process.env.TEAPILOT_STATE_DIR);
   const before = { execution: Object.values(config.models).filter(model => model.enabled).map(model => model.id).join(', '), routing: config.routingMode, search: config.searchUrl ?? 'Disabled' };
   ui.log('Model downloads and verification happen before the final settings review.');
-  const choice = options.nonInteractive ? 1 : await ui.choose('Execution model', ['Local Ollama (execution runs locally; no execution API charges)', 'Existing OpenAI-compatible local endpoint']);
-  const tier: Tier = choice === 0 ? 'fast' : 'normal';
-  const previousModel = { ...modelFor(config, tier) };
-  let displayModel: string | undefined;
-  // A new profile enables precisely one execution tier, never a silent paid fallback.
-  for (const model of Object.values(config.models)) model.enabled = false;
-  config.models[profileFor(tier).model].enabled = true;
-  if (!hasConfiguration) config.routingMode = 'direct';
   let env: Record<string, string> = { ...savedEnv };
   if (process.env.TEAPILOT_STATE_DIR) env.TEAPILOT_STATE_DIR = config.stateDir.replace(/\\/g, '/');
-  // Remove old overrides for settings the wizard owns; otherwise saved .env
-  // values would silently undo the newly written JSON configuration.
   for (const key of Object.keys(env)) {
     if (/^(LOCAL|ECONOMY|STRONG)_(ENABLED|MODEL|BASE_URL|INPUT_USD_PER_MILLION|OUTPUT_USD_PER_MILLION)$/.test(key) || ['REQUEST_BUDGET_USD', 'DAILY_BUDGET_USD'].includes(key)) delete env[key];
   }
+
+  const hardware = await during(ui, 'Inspecting local hardware...', () => inspectHardware(signal));
+  if (hardware.nvidia.length) ui.log(`NVIDIA: ${hardware.nvidia.map(gpu => `${gpu.name} (${(gpu.memoryMiB / 1024).toFixed(1)} GiB)`).join(', ')}`);
+  else if (hardware.reason && !options.nonInteractive) ui.log(`Optimized NVIDIA unavailable: ${hardware.reason}`);
+
+  const runtimeContext = { ui, signal, stateDir: config.stateDir, hardware, options, existingApiKey: env.LOCAL_API_KEY };
+  const drivers = options.nonInteractive ? [runtimeDriver('openai-compatible')] : await discoverRuntimeDrivers(runtimeContext);
+  if (!drivers.length) throw new Error('No local inference runtime is available.');
+  const runtimeChoice = options.nonInteractive ? 0 : await ui.choose('Execution model', drivers.map(driver => driver.label));
+  const driver = drivers[runtimeChoice];
+  if (!driver) throw new Error('Invalid runtime selection.');
+  const selection = await during(ui, `Preparing ${driver.label}...`, () => driver.prepare(runtimeContext));
+  const tier = selection.tier;
+  const previousModel = { ...modelFor(config, tier) };
+  const displayModel = selection.displayModel;
+
+  for (const model of Object.values(config.models)) model.enabled = false;
+  const selectedModel = modelFor(config, tier);
+  Object.assign(selectedModel, selection.model, { enabled: true, inputUsdPerMillion: 0, outputUsdPerMillion: 0, compatibility: false });
+  if (selection.clearApiKey) delete env[selectedModel.apiKeyEnv];
+  else if (selection.apiKey) env[selectedModel.apiKeyEnv] = selection.apiKey;
+  if (selection.requestTimeoutMs) config.policy.limits.requestTimeoutMs = selection.requestTimeoutMs;
+  if (!hasConfiguration) config.routingMode = 'direct';
+
   ui.log('The router chooses a model; the execution model does the work. Direct routing needs no routing key.');
   if (config.routingMode === 'hosted') ui.log('Hosted routing may still incur charges, including when execution runs locally.');
   if (!options.nonInteractive) {
@@ -152,25 +166,6 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
       config.router.apiKey = env[keyName] || undefined;
       if (!config.router.apiKey) throw new Error('Hosted routing needs a routing key. Rerun setup and choose direct or provide a key.');
     }
-  }
-  if (choice === 0) {
-    await during(ui, 'Preparing Ollama...', () => ensureOllama(ui, signal));
-    const model = await during(ui, 'Inspecting local models...', () => selectOllamaModel(ui, signal, undefined, options.verbose));
-    displayModel = model.source;
-    Object.assign(modelFor(config, tier), { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
-    delete env.LOCAL_API_KEY;
-    config.policy.limits.requestTimeoutMs = 120000;
-  } else {
-    const model = modelFor(config, tier);
-    model.baseUrl = options.endpoint ?? await ui.input('API base URL including /v1', 'http://127.0.0.1:8080/v1');
-    model.id = options.model ?? await ui.input('Exact model ID');
-    model.contextTokens = options.contextTokens ?? await numberInput(ui, 'Actual server context tokens', 16384, 8192);
-    model.maxOutputTokens = Math.min(2048, Math.floor(model.contextTokens / 4));
-    model.toolCalling = true;
-    model.provider = 'local';
-    const key = options.nonInteractive ? process.env.LOCAL_API_KEY ?? '' : await ui.input('API key if required (hidden; blank keeps existing)', env[model.apiKeyEnv] ?? '', true);
-    if (key) env[model.apiKeyEnv] = key;
-    model.inputUsdPerMillion = 0; model.outputUsdPerMillion = 0; model.reasoningEfforts = ['off'];
   }
   config.secrets = Object.fromEntries((['fast', 'capable'] as const).map(name => [name, env[config.models[name].apiKeyEnv] || undefined])) as Config['secrets'];
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
