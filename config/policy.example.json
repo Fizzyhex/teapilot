@@ -15,7 +15,7 @@
   "limits": {
     "maxTurns": 12,
     "maxToolCalls": 40,
-    "attemptTimeoutMs": 300000,
+    "attemptTimeoutMs": 900000,
     "requestTimeoutMs": 60000,
     "commandTimeoutSeconds": 120,
     "maxPromptChars": 12000

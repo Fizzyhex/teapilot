@@ -160,7 +160,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     displayModel = prepared.map(model => `${model.source} (${model.roles.join(' + ')})`).join(', ');
     roles = physicalModels.filter(role => prepared.some(model => model.roles.includes(role)));
     for (const model of prepared) for (const role of model.roles) {
-      Object.assign(config.models[role], { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
+      Object.assign(config.models[role], { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: role === 'capable' ? Math.min(16384, Math.floor(model.context / 2)) : 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
     }
     delete env.LOCAL_API_KEY;
     config.policy.limits.requestTimeoutMs = 120000;
@@ -169,7 +169,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
     model.baseUrl = options.endpoint ?? await ui.input('API base URL including /v1', 'http://127.0.0.1:8080/v1');
     model.id = options.model ?? await ui.input('Exact model ID');
     model.contextTokens = options.contextTokens ?? await numberInput(ui, 'Actual server context tokens', 16384, 8192);
-    model.maxOutputTokens = Math.min(2048, Math.floor(model.contextTokens / 4));
+    model.maxOutputTokens = Math.min(16384, Math.floor(model.contextTokens / 4));
     model.toolCalling = true;
     model.provider = 'local';
     const key = options.nonInteractive ? process.env.LOCAL_API_KEY ?? '' : await ui.input('API key if required (hidden; blank keeps existing)', env[model.apiKeyEnv] ?? '', true);
