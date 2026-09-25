@@ -182,10 +182,13 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   else if (await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
     report = await during(ui, 'Verifying answers and coding...', () => liveCheck(config, tier, signal, ui.log));
   }
-  // Failed or skipped coding validation never advertises a ready coding path.
+  // Advertised metadata is only a hint. Failed or skipped live verification
+  // never advertises a ready coding path on any profile backed by this model.
   modelFor(config, tier).toolCalling = Boolean(report?.tools);
-  config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
-  if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
+  const physical = profileFor(tier).model;
+  const affectedTiers = (['fast', 'normal', 'reasoning', 'deep'] as const).filter(candidate => profileFor(candidate).model === physical);
+  config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => !affectedTiers.some(candidate => id === `coder.${candidate}`));
+  if (!report?.coding) for (const candidate of affectedTiers) config.policy.disabledCapabilities.push(`coder.${candidate}`);
   ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
   const routingReady = config.routingMode === 'direct' || await during(ui, 'Verifying hosted routing...', () => routingCheck(config, ui.confirm, ui.log, signal));
   const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, directory, ui, signal);
