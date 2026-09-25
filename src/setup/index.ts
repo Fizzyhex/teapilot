@@ -146,6 +146,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
 
   for (const model of Object.values(config.models)) model.enabled = false;
   const selectedModel = modelFor(config, tier);
+  delete selectedModel.reasoning; delete selectedModel.temperature;
   Object.assign(selectedModel, selection.model, { enabled: true, inputUsdPerMillion: 0, outputUsdPerMillion: 0, compatibility: false });
   if (selection.clearApiKey) delete env[selectedModel.apiKeyEnv];
   else if (selection.apiKey) env[selectedModel.apiKeyEnv] = selection.apiKey;
