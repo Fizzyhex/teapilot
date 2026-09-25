@@ -17,6 +17,9 @@ export function parseClip(raw: string, expectedCount: number): Clip {
   return { fps: value.frameRate, frames };
 }
 
+/** Multiplier applied to each clip's frame rate during playback. */
+export const PLAYBACK_SPEED = 0.5;
+
 let cached: Clips | null | undefined;
 export function loadClips(): Clips | undefined {
   if (cached === undefined) {
@@ -47,13 +50,14 @@ export class Playback {
     const sequence = this.sequence;
     if (!sequence) return;
     const elapsed = Math.max(0, performance.now() - sequence.started);
-    const step = Math.floor(elapsed * sequence.clip.fps / 1000);
+    const fps = sequence.clip.fps * PLAYBACK_SPEED;
+    const step = Math.floor(elapsed * fps / 1000);
     const index = sequence.loop ? step % sequence.indices.length : Math.min(step, sequence.indices.length - 1);
     this.frame = sequence.clip.frames[sequence.indices[index]!];
     this.draw();
     if (this.sequence !== sequence) return;
     if (sequence.loop || index < sequence.indices.length - 1) {
-      this.schedule(Math.max(1, (step + 1) * 1000 / sequence.clip.fps - elapsed));
+      this.schedule(Math.max(1, (step + 1) * 1000 / fps - elapsed));
     } else if (sequence.onEnd) { const onEnd = sequence.onEnd; sequence.onEnd = undefined; onEnd(); }
   }
   hold(frame?: string): void { this.stop(); this.frame = frame; this.draw(); }

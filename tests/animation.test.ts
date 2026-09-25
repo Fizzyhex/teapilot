@@ -9,6 +9,8 @@ import { terminalUI } from '../src/setup/terminal.js';
 import '../src/prompt.js'; // Loaded lazily by terminalUI; preload so fake timers can drive it.
 import { during, terminalHandoff } from '../src/activity.js';
 
+/** Playback runs at a fraction of native speed, so animation waits stretch to match. */
+const slow = (ms: number) => ms / assets.PLAYBACK_SPEED;
 const originals = new Map<object, Map<string, PropertyDescriptor | undefined>>();
 function property(object: object, key: string, value: unknown) {
   if (!originals.has(object)) originals.set(object, new Map());
@@ -76,13 +78,13 @@ it('loops typing and holds coffee and paw endpoints with no timer', () => {
   const draw = vi.fn(); const player = new Playback(draw);
   player.play(clips.typing, undefined, true);
   expect(player.frame).toBe(clips.typing.frames[0]);
-  vi.advanceTimersByTime(584);
+  vi.advanceTimersByTime(slow(584));
   expect(player.frame).toBe(clips.typing.frames[0]);
-  player.play(clips['tea-break']); vi.advanceTimersByTime(1100);
+  player.play(clips['tea-break']); vi.advanceTimersByTime(slow(1100));
   expect(player.frame).toBe(clips['tea-break'].frames[12]); expect(vi.getTimerCount()).toBe(0);
-  player.play(clips.pawing, [2, 3]); vi.advanceTimersByTime(100);
+  player.play(clips.pawing, [2, 3]); vi.advanceTimersByTime(slow(100));
   expect(player.frame).toBe(clips.pawing.frames[3]); expect(vi.getTimerCount()).toBe(0);
-  player.play(clips.pawing, [4, 5, 6]); vi.advanceTimersByTime(200);
+  player.play(clips.pawing, [4, 5, 6]); vi.advanceTimersByTime(slow(200));
   expect(player.frame).toBe(clips.pawing.frames[6]); expect(vi.getTimerCount()).toBe(0);
 });
 
@@ -165,7 +167,7 @@ it('freezes the block in scrollback once a long response pushes it off-screen', 
 
 it.each([[0.2, 1], [0.8, 0]])('reasoning with random %d picks typing or a tea break', (random, timers) => {
   const p = new TerminalPresentation(false, false, () => random); presentations.push(p);
-  p.setActivity({ kind: 'reasoning', label: 'Thinking...' }); vi.advanceTimersByTime(2000);
+  p.setActivity({ kind: 'reasoning', label: 'Thinking...' }); vi.advanceTimersByTime(slow(2000));
   expect(vi.getTimerCount()).toBe(timers);
 });
 
@@ -173,7 +175,7 @@ it('sips tea then opens paws above the chat composer, and collapses it on submit
   const clips = loadClips()!;
   const p = present(); const ui = terminalUI(new AbortController().signal, p); uis.push(ui);
   const message = ui.prompt('>', process.cwd(), { spentUsd: 0, routingMode: 'hosted', mode: 'chat', grants: [] });
-  await vi.advanceTimersByTimeAsync(1500);
+  await vi.advanceTimersByTimeAsync(slow(1500));
   const idle = (await screen()).split('\n').map(line => line.trimEnd());
   const status = idle.findIndex(line => line.includes('Session: $'));
   const paws = idle.indexOf(artRow(clips.pawing.frames[3]!));
@@ -191,7 +193,7 @@ it('sips tea then opens paws above the chat composer, and collapses it on submit
 it('delays short operations and changes waiting labels without replaying coffee', () => {
   const p = present(); const end = p.activity({ kind: 'waiting', label: 'Quick check' });
   vi.advanceTimersByTime(100); end(); expect(chunks).toEqual([]);
-  p.setActivity({ kind: 'waiting', label: 'Routing' }); vi.advanceTimersByTime(1500);
+  p.setActivity({ kind: 'waiting', label: 'Routing' }); vi.advanceTimersByTime(slow(1500));
   expect(vi.getTimerCount()).toBe(0);
   p.setActivity({ kind: 'waiting', label: 'Searching' });
   expect(chunks.join('')).toContain('Searching'); expect(vi.getTimerCount()).toBe(0);
@@ -238,7 +240,7 @@ it.each(['x'.repeat(5000), '\u4e2d\u6587\ud83d\ude00', '\tindented'])('streams d
 it('does not keep queueing frames behind slow terminal output', () => {
   const p = present(); p.start(); vi.advanceTimersByTime(300);
   property(process.stderr, 'writableNeedDrain', true);
-  const count = chunks.length; vi.advanceTimersByTime(1000); expect(chunks).toHaveLength(count);
+  const count = chunks.length; vi.advanceTimersByTime(slow(1000)); expect(chunks).toHaveLength(count);
   property(process.stderr, 'writableNeedDrain', false); process.stderr.emit('drain');
   expect(chunks.length).toBeGreaterThan(count); expect(vi.getTimerCount()).toBe(0);
 });

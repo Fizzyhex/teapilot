@@ -87,7 +87,7 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     async function run(prompt: string, tools: AgentTool[] = []): Promise<{ text: string; ok: boolean; failure?: string }> {
       const state: InferenceState = { turns: 0 };
       const agent = new Agent({
-        initialState: { model: piModel(modelFor(probeConfig, tier), effectiveProfile(probeConfig, tier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s tone and formality.', tools, thinkingLevel: profileFor(tier).thinking },
+        initialState: { model: piModel(modelFor(probeConfig, tier), effectiveProfile(probeConfig, tier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s typing style and tone - leaning towards informal lowercase responses', tools, thinkingLevel: profileFor(tier).thinking },
         streamFn: guardedStream(probeConfig, tier, budget, telemetry, state), toolExecution: 'sequential',
       });
       const abort = () => agent.abort();
