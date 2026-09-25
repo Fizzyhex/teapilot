@@ -11,9 +11,7 @@ From a source checkout without `--global`, follow the [README quick start](../RE
 
 ## Choose a model
 
-The setup wizard walks through local model setup with Ollama and tests the selected model. The built-in presets are Qwen3.5-9B Heretic Q4_K_M for Fast and Qwen3.8-27B Heretic Q4_K_M for the capable profiles. Hosted Jev routing is optional and has separate spending limits; execution remains local.
-
-Teapilot should launch Ollama for you, but open it up manually if not!
+The setup wizard walks through local model setup and tests the selected model. The built-in presets are `Qwen3.5-9B Heretic Q4_K_M` for Fast and `Qwen3.8-27B Heretic Q4_K_M` for the capable profiles. 
 
 ## Make your first request
 
@@ -22,7 +20,7 @@ teapilot ask "explain dependency injection"
 teapilot code --cwd ./my-project "which tests are failing?"
 ```
 
-Ask starts without repository tools. Code starts with repository access allowed by policy. Interactive sessions can approve, inspect, and revoke additional access. See [commands](02-commands.md) for all modes.
+Ask starts without the repository tools required for file work. Code starts with repository access allowed by policy. Interactive sessions can approve, inspect, and revoke additional access. See [commands](02-commands.md) for all modes.
 
 ## Check readiness
 
@@ -42,6 +40,9 @@ Pass `--web` when you want search:
 ```sh
 teapilot ask --web "Research current information and cite sources"
 ```
+
+> [!NOTE] Auto Grants
+> If Jev is configured, the agent may search the web if context permits without the explicit `--web` permission.
 
 ## Automated local setup
 

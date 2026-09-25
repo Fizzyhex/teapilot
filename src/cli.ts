@@ -24,6 +24,8 @@ teapilot --prompt "Summarise this idea"   (one-shot, no session)
 teapilot doctor [--live]
 teapilot search status|start|stop|remove
 teapilot discord setup|start|status|remove   (optional; chat from Discord)
+teapilot bridge host [port] [--ts]   (share this computer's teapilot over your tailnet)
+teapilot bridge connect [port|host]
 teapilot serve --stdio
 
   Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json  --once  --tier auto|fast|normal|reasoning|deep
@@ -47,15 +49,17 @@ async function main(): Promise<void> {
     stdio: { type: 'boolean' }, tier: { type: 'string' }, once: { type: 'boolean' },
     'no-motion': { type: 'boolean' },
     verbose: { type: 'boolean' },
+    ts: { type: 'boolean' }, 'rotate-token': { type: 'boolean' },
   } });
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
-  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search', 'discord'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search', 'discord', 'bridge'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
   if (command === 'serve') { if (!values.stdio) throw new Error('serve requires --stdio'); await serve(); return; }
   if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
   if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');
+  if ((values.ts || values['rotate-token']) && command !== 'bridge') throw new Error('--ts and --rotate-token require teapilot bridge host.');
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
   const controller = new AbortController();
   const presentation = new TerminalPresentation(Boolean(values.json), Boolean(values['no-motion'] || values['non-interactive']));
@@ -90,6 +94,16 @@ async function main(): Promise<void> {
       const { discord } = await import('./discord/index.js');
       const discordUI = ui ?? { log: (text: string) => console.error(text), confirm: async () => false, input: async () => '', choose: async () => 0 };
       process.exitCode = await discord(action, { directory, cwd: resolve(values.cwd), ui: discordUI, signal: controller.signal }) ? 0 : 2;
+      return;
+    }
+    if (command === 'bridge') {
+      const action = positionals.shift() ?? '';
+      const target = positionals.shift();
+      if (positionals.length || !['host', 'connect'].includes(action)) throw new Error('Use teapilot bridge host [port] or teapilot bridge connect [port|host].');
+      if (action === 'connect' && (values.ts || values['rotate-token'])) throw new Error('--ts and --rotate-token apply to teapilot bridge host.');
+      const { bridge } = await import('./bridge/index.js');
+      const bridgeUI = ui ?? { log: (text: string) => console.error(text), confirm: async () => false, input: async () => '', choose: async () => 0 };
+      process.exitCode = await bridge(action, target, { directory, cwd: resolve(values.cwd), ui: bridgeUI, presentation, signal: controller.signal, tailscale: values.ts, rotateToken: values['rotate-token'] }) ? 0 : 2;
       return;
     }
     let config;
