@@ -3,7 +3,7 @@ import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-s
 import { stream as openAIStream } from '@earendil-works/pi-ai/api/openai-completions';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import { createSdkProvider, type JevProvider } from 'jevrouter';
-import type { Config, ModelConfig, Tier } from '../config.js';
+import type { Config, ModelConfig, PhysicalModel, Tier } from '../config.js';
 import { effectiveProfile, modelFor, profileFor, type ExecutionProfile } from '../routing/execution.js';
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
