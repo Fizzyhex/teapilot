@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, SendableChannels } from 'discord.js';
+import type { ActionRowBuilder, ButtonBuilder, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
-import { commandDefinitions, commandText, replyCommand, replyMenu } from './commands.js';
+import { commandDefinitions, commandText, interactionLifetimeMs, replyCommand, replyMenu, withoutUserInstall } from './commands.js';
 import { MESSAGE_LIMIT } from './render.js';
 import type { DiscordSettings } from './settings.js';
 
@@ -22,6 +22,14 @@ export interface GatewayCommand extends IncomingMessage {
 /** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
 export interface GatewayReply extends GatewayMessage {
   title: string;
+  /** Interaction id, unique per invocation. */
+  id: string;
+  /**
+   * The bot cannot post in this channel, so it answers through the interaction itself: one
+   * conversation per invocation, no threads, and it ends when Discord expires the interaction.
+   * With this set, `respond()` with no text keeps the reply visible instead of dismissing it.
+   */
+  oneShot: boolean;
   respond(text?: string): Promise<void>;
 }
 export interface GatewayHandlers {
@@ -39,7 +47,7 @@ const quiet = { allowedMentions: { parse: [] as [] } };
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
 export async function connect(settings: DiscordSettings, handlers: GatewayHandlers, log: (text: string) => void): Promise<Gateway> {
-  const { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, MessageFlags, Partials, ThreadAutoArchiveDuration } = await import('discord.js');
+  const { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, MessageFlags, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Channel],
@@ -48,29 +56,55 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   const pending = new Map<string, { text: string; resolve(approved: boolean): void }>();
   const settle = (text: string, verdict: string) => `${text.slice(0, MESSAGE_LIMIT - verdict.length - 2)}\n\n${verdict}`;
 
+  type Payload = { content: string; components: Array<ActionRowBuilder<ButtonBuilder>>; allowedMentions: { parse: [] } };
+  /** Approve/deny buttons under `text`; `post` and `revise` decide whether a channel or an interaction carries them. */
+  const askApproval = (text: string, signal: AbortSignal, post: (payload: Payload) => Promise<{ id: string }>, revise: (id: string, payload: Payload) => Promise<unknown>): Promise<boolean> => {
+    if (signal.aborted) return Promise.resolve(false);
+    const nonce = randomUUID();
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`teapilot:${nonce}:approve`).setLabel('Approve').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`teapilot:${nonce}:deny`).setLabel('Deny').setStyle(ButtonStyle.Danger));
+    return post({ content: text, components: [row], ...quiet }).then(message => new Promise<boolean>(resolve => {
+      const expire = () => {
+        if (!pending.delete(nonce)) return;
+        void revise(message.id, { content: settle(text, '**Denied** (expired or cancelled)'), components: [], ...quiet }).catch(noop);
+        resolve(false);
+      };
+      pending.set(nonce, { text, resolve: approved => { signal.removeEventListener('abort', expire); resolve(approved); } });
+      signal.addEventListener('abort', expire, { once: true });
+    }));
+  };
+
   const transport = (channel: SendableChannels): DiscordTransport => {
     const sent = new Map<string, Message>();
     return {
       async send(text) { const message = await channel.send({ content: text, ...quiet }); sent.set(message.id, message); return message.id; },
       async edit(id, text) { const message = sent.get(id) ?? await channel.messages.fetch(id); await message.edit({ content: text, ...quiet }); },
       typing() { void channel.sendTyping().catch(noop); },
-      async askApproval(text, signal) {
-        if (signal.aborted) return false;
-        const nonce = randomUUID();
-        const row = new ActionRowBuilder<InstanceType<typeof ButtonBuilder>>().addComponents(
-          new ButtonBuilder().setCustomId(`teapilot:${nonce}:approve`).setLabel('Approve').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`teapilot:${nonce}:deny`).setLabel('Deny').setStyle(ButtonStyle.Danger));
-        const message = await channel.send({ content: text, components: [row], ...quiet });
-        return await new Promise<boolean>(resolve => {
-          const expire = () => {
-            if (!pending.delete(nonce)) return;
-            void message.edit({ content: settle(text, '**Denied** (expired or cancelled)'), components: [], ...quiet }).catch(noop);
-            resolve(false);
-          };
-          pending.set(nonce, { text, resolve: approved => { signal.removeEventListener('abort', expire); resolve(approved); } });
-          signal.addEventListener('abort', expire, { once: true });
-        });
-      },
+      askApproval: (text, signal) => askApproval(text, signal, payload => channel.send(payload), async (id, payload) => (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload)),
+    };
+  };
+
+  /**
+   * Where the bot cannot post, answer through the interaction webhook, which needs no channel permission.
+   * Discord keeps that webhook valid for 15 minutes, and there is no typing indicator or thread.
+   */
+  const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction): DiscordTransport => {
+    const expires = Date.now() + interactionLifetimeMs;
+    let first = true;
+    const live = () => { if (Date.now() > expires) throw new Error('This Discord interaction expired after 15 minutes. Run /reply again.'); };
+    const post = async (payload: Payload) => {
+      live();
+      // The deferred "thinking" message becomes the first message; later ones are follow-ups.
+      if (first) { first = false; return await interaction.editReply(payload); }
+      return await interaction.followUp(payload);
+    };
+    const revise = async (id: string, payload: Partial<Payload>) => { live(); await interaction.webhook.editMessage(id, payload); };
+    return {
+      async send(text) { return (await post({ content: text, components: [], ...quiet })).id; },
+      edit: (id, text) => revise(id, { content: text, ...quiet }),
+      typing: noop,
+      askApproval: (text, signal) => askApproval(text, signal, post, revise),
     };
   };
 
@@ -83,16 +117,19 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   /** /reply and the Reply context menu: both start or continue a conversation wherever the bot may post. */
   const reply = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction, self: NonNullable<typeof client.user>) => {
     let answered = false;
+    const channel = await sendable(interaction);
+    const thread = channel?.isThread() ? channel : undefined;
+    // Servers where teapilot is only user-installed, or where it lacks Send Messages, still allow interaction replies.
+    const oneShot = !channel || (interaction.inGuild() && !interaction.appPermissions?.has([PermissionFlagsBits.ViewChannel, thread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages]));
     const respond = async (note?: string) => {
       if (answered) { if (note) await interaction.followUp({ content: note, flags: MessageFlags.Ephemeral }); return; }
       answered = true;
       if (note) await interaction.reply({ content: note, flags: MessageFlags.Ephemeral });
+      else if (oneShot) await interaction.deferReply();
       else { await interaction.deferReply({ flags: MessageFlags.Ephemeral }); await interaction.deleteReply(); }
     };
-    const channel = await sendable(interaction);
-    if (!channel) { await respond('teapilot cannot post in this channel.').catch(noop); return; }
-    const thread = channel.isThread() ? channel : undefined;
     const spawn = async (start: () => Promise<{ id: string } & Parameters<typeof transport>[0]>) => {
+      if (!channel || oneShot) throw new Error('teapilot cannot post in this channel.');
       if (thread) throw new Error('Threads cannot be started inside other threads.');
       const created = await start();
       return { id: created.id, transport: transport(created) };
@@ -112,7 +149,9 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       content: target && text ? `Message from @${target.author.username}:
 ${text}` : text,
       title: text,
-      transport: () => transport(channel),
+      id: interaction.id,
+      oneShot,
+      transport: () => channel && !oneShot ? transport(channel) : interactionTransport(interaction),
       startThread: name => spawn(async () => {
         const options = { name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay };
         if (target) return await target.startThread(options);
@@ -197,9 +236,16 @@ ${text}` : text,
 
   // Registering on ready overwrites teapilot's global set, so removed commands disappear on the next start.
   const ready = new Promise<void>(resolve => client.once(Events.ClientReady, () => {
-    void client.application?.commands.set(commandDefinitions)
-      .then(() => log(`Registered ${commandDefinitions.length} slash commands.`))
-      .catch(error => log(`Slash command registration failed: ${error instanceof Error ? error.message : String(error)}`));
+    void (async () => {
+      const done = () => log(`Registered ${commandDefinitions.length} app commands.`);
+      try { await client.application?.commands.set(commandDefinitions); done(); }
+      catch (error) {
+        // Discord rejects user-install commands until User Install is enabled in the Developer Portal.
+        log(`App command registration failed: ${error instanceof Error ? error.message : String(error)}. Retrying without user-install support.`);
+        await client.application?.commands.set(withoutUserInstall(commandDefinitions)).then(done)
+          .catch(retry => log(`App command registration failed: ${retry instanceof Error ? retry.message : String(retry)}`));
+      }
+    })();
     resolve();
   }));
   try { await client.login(settings.token); }

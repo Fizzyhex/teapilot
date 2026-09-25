@@ -6,6 +6,7 @@ import type { SetupUI } from '../setup/terminal.js';
 import { route, routeReply } from './access.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
 import type { GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
+import { interactionLifetimeMs } from './commands.js';
 import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
 import { readDiscordSettings } from './settings.js';
 
@@ -34,13 +35,15 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
 
-  const open = async (key: string, transport: DiscordTransport): Promise<Conversation> => {
+  const open = async (key: string, transport: DiscordTransport, oneShot = false): Promise<Conversation> => {
     const existing = conversations.get(key);
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
     const conversation = new Conversation({
       key, transport, queue, redact, log,
-      request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal },
+      // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
+      once: oneShot,
+      request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal },
       maxPromptChars: config.policy.limits.maxPromptChars,
       run: (request, dependencies) => runHost(config, request, dependencies),
     });
@@ -76,7 +79,9 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     if (!reply.content) { await reply.respond('teapilot reads text messages only.'); return; }
     let key = target.key;
     let transport: DiscordTransport;
-    if (target.kind === 'new-thread') {
+    if (reply.oneShot) {
+      key = `reply:${reply.id}`; transport = reply.transport();
+    } else if (target.kind === 'new-thread') {
       try {
         const thread = await reply.startThread(reply.title);
         key = `thread:${thread.id}`; transport = thread.transport;
@@ -87,7 +92,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     } else transport = reply.transport();
     await reply.respond();
     log(`${key} @${reply.authorName} (reply): ${reply.content.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport)).push(reply.content);
+    (await open(key, transport, reply.oneShot)).push(reply.content);
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   // discord.js loads only here, so every other command starts without it.

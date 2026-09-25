@@ -38,6 +38,8 @@ export interface ConversationOptions {
   redact: (text: string) => string;
   /** Operator log in the terminal running teapilot discord start. */
   log: (text: string) => void;
+  /** Answer one message and end, for transports that cannot receive follow-ups. */
+  once?: boolean;
   approvalTimeoutMs?: number;
   progressIntervalMs?: number;
 }
@@ -146,9 +148,9 @@ export class Conversation {
 
   private async start(): Promise<void> {
     try {
-      await runSession({ request: this.options.request, maxPromptChars: this.options.maxPromptChars, input: this.input, run: this.run,
+      await runSession({ request: this.options.request, once: this.options.once, maxPromptChars: this.options.maxPromptChars, input: this.input, run: this.run,
         approve: this.approve, log: text => void this.say(text), onEvent: this.onEvent });
-      if (!this.options.request.signal?.aborted) await this.say('Session ended. Send a message to start a new one.');
+      if (!this.options.request.signal?.aborted && !this.options.once) await this.say('Session ended. Send a message to start a new one.');
     } catch (error) {
       if (!this.options.request.signal?.aborted) {
         const message = this.options.redact(error instanceof Error ? error.message : String(error));

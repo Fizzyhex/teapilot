@@ -51,6 +51,21 @@ All the [session commands](02-commands.md#interactive-use) work, with these diff
 
 Long answers are split across several messages. Only text is read; attachments are ignored.
 
+## `/reply` and the Reply menu
+
+Allowlisted users can also talk to teapilot outside DMs and the configured channel:
+
+- `/reply message:<text>` asks teapilot something in the current channel.
+- Right-click a message → **Apps → Reply** makes teapilot respond to it. teapilot receives the text prefixed with the author's username (`Message from @name:`).
+
+Where the bot can post, it starts a thread on your prompt or on the selected message, and that thread is one session. Where it can't (no Send Messages permission, or the bot is not in the server at all), it answers through the interaction itself. That needs no channel permission, but it has limits:
+
+- **Each use is a one-shot conversation.** There are no threads and no follow-ups; run `/reply` again for the next question.
+- **It stops after 15 minutes,** when Discord expires the interaction. Pending approvals are denied.
+- **There is no typing indicator.**
+
+For servers where the bot is not installed, enable **Installation → User Install** in the Developer Portal (and keep the *applications.commands* scope), then install the app to your account from its install link. Without it, `teapilot discord start` logs a registration warning and registers server-install commands only.
+
 ## Troubleshooting
 
 | Symptom | Fix |

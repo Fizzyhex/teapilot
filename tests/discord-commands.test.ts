@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { commandDefinitions, commandText } from '../src/discord/commands.js';
+import { commandDefinitions, commandText, withoutUserInstall } from '../src/discord/commands.js';
 
 it('maps slash commands to session commands', () => {
   expect(commandText('mode', null, 'code')).toBe('/mode code');
@@ -23,7 +23,15 @@ it('offers valid choices for option commands', () => {
 });
 
 it('registers reply as a slash command and a message context menu without session text', () => {
-  expect(commandDefinitions).toContainEqual({ type: 3, name: 'Reply' });
+  expect(commandDefinitions).toContainEqual(expect.objectContaining({ type: 3, name: 'Reply' }));
   expect(commandDefinitions.some(command => command.name === 'reply' && 'options' in command)).toBe(true);
   expect(commandText('reply', null, 'hello')).toBeUndefined();
+});
+
+it('offers reply in user-installed contexts and can drop that for server-only registration', () => {
+  const reply = commandDefinitions.filter(command => command.name.toLowerCase() === 'reply');
+  expect(reply).toHaveLength(2);
+  for (const command of reply) expect(command).toMatchObject({ integration_types: [0, 1], contexts: [0, 1, 2] });
+  for (const command of withoutUserInstall(commandDefinitions)) expect(command).not.toHaveProperty('integration_types');
+  expect(withoutUserInstall(commandDefinitions)).toHaveLength(commandDefinitions.length);
 });
