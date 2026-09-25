@@ -6,7 +6,10 @@ import { parse } from 'dotenv';
 import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config, type Tier } from '../config.js';
 import { modelFor, profileFor } from '../routing/execution.js';
 import { liveCheck, modelStatus, routingCheck, endpointHint, type LiveReport } from '../diagnostics.js';
-import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js';
+import { discoverModelCapabilities } from '../inference/capabilities.js';
+import { command } from './ollama.js';
+import { inspectHardware } from './hardware.js';
+import { discoverRuntimeDrivers, runtimeDriver } from './runtimes.js';
 import type { SetupUI } from './terminal.js';
 import { configureSearch } from './search.js';
 
