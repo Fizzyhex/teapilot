@@ -38,8 +38,8 @@ export async function run() {
   const runtime = join(extension.extensionPath, 'runtime', 'node_modules', 'teapilot');
   const models = JSON.parse(await readFile(join(runtime, 'config', 'models.example.json'), 'utf8'));
   const policy = JSON.parse(await readFile(join(runtime, 'config', 'policy.example.json'), 'utf8'));
-  for (const tier of ['local', 'economy', 'strong']) models[tier].enabled = tier === 'local';
-  Object.assign(models.local, { id: 'fixture', provider: 'local', baseUrl: `http://127.0.0.1:${address.port}/v1`, contextTokens: 32768, maxOutputTokens: 1024, inputUsdPerMillion: 0, outputUsdPerMillion: 0, toolCalling: true });
+  models.fast.enabled = false;
+  Object.assign(models.capable, { enabled: true, id: 'fixture', provider: 'local', baseUrl: `http://127.0.0.1:${address.port}/v1`, contextTokens: 32768, maxOutputTokens: 16384, inputUsdPerMillion: 0, outputUsdPerMillion: 0, toolCalling: true });
   policy.budget.requestUsd = 0; policy.budget.dailyUsd = 0;
   await writeFile(join(profile, 'models.json'), JSON.stringify(models));
   await writeFile(join(profile, 'policy.json'), JSON.stringify(policy));
@@ -53,8 +53,8 @@ export async function run() {
     assert.ok(vscode.lm.tools.some(t => t.name === 'teapilot_ask'));
     assert.ok(vscode.lm.tools.some(t => t.name === 'teapilot_code'));
     const information = await api.provider.provideLanguageModelChatInformation({ silent: true }, token.token);
-    assert.deepEqual(information.map((m: any) => m.id), ['auto', 'local']);
-    const registered = await vscode.lm.selectChatModels({ vendor: 'teapilot', id: 'local' });
+    assert.deepEqual(information.map((m: any) => m.id), ['auto', 'normal', 'reasoning', 'deep']);
+    const registered = await vscode.lm.selectChatModels({ vendor: 'teapilot', id: 'normal' });
     assert.equal(registered.length, 1, 'model is discoverable through VS Code registry');
     const stream: any[] = [];
     await api.provider.provideLanguageModelChatResponse(information[1], [vscode.LanguageModelChatMessage.User('LOOKUP_TOOL')], { tools: [{ name: 'lookup', description: 'lookup', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } }], toolMode: vscode.LanguageModelChatToolMode.Required }, { report: (part: any) => stream.push(part) }, token.token);
@@ -80,9 +80,9 @@ export async function run() {
     const delegate = await vscode.lm.invokeTool('teapilot_ask', { input: { task: 'hello' }, toolInvocationToken: undefined }, token.token);
     assert.ok(delegate.content.some(part => part instanceof vscode.LanguageModelTextPart && part.value.includes('Packaged TeaPilot response')));
     // The inference lease has ended before delegated agent work begins.
-    const again = await api.client.request('inference', { model: 'local', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello again' }] }] });
+    const again = await api.client.request('inference', { model: 'normal', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello again' }] }] });
     assert.equal(again.spentUsd, 0);
-    const slow = api.client.request('inference', { model: 'local', messages: [{ role: 'user', content: [{ type: 'text', text: 'SLOW_REQUEST' }] }] });
+    const slow = api.client.request('inference', { model: 'normal', messages: [{ role: 'user', content: [{ type: 'text', text: 'SLOW_REQUEST' }] }] });
     const cancelled = new vscode.CancellationTokenSource();
     const queued = api.client.request('spending', {}, cancelled.token);
     cancelled.cancel(); await assert.rejects(queued); await slow; cancelled.dispose();
@@ -94,10 +94,10 @@ export async function run() {
       const nativeExtension = vscode.extensions.getExtension('GitHub.copilot-chat');
       assert.ok(nativeExtension, 'VS Code built-in chat extension is available');
       await nativeExtension.activate();
-      models.local.contextTokens = 262144;
+      models.capable.contextTokens = 262144;
       await writeFile(join(profile, 'models.json'), JSON.stringify(models));
       await api.client.setProfile({ directory: profile, managed: false });
-      const native = vscode.commands.executeCommand('workbench.action.chat.open', { mode: 'agent', modelSelector: { vendor: 'teapilot', id: 'local' }, query: 'NATIVE_AGENT_SMOKE: Say hello briefly.', blockOnResponse: true });
+      const native = vscode.commands.executeCommand('workbench.action.chat.open', { mode: 'agent', modelSelector: { vendor: 'teapilot', id: 'normal' }, query: 'NATIVE_AGENT_SMOKE: Say hello briefly.', blockOnResponse: true });
       let timeout: ReturnType<typeof setTimeout>;
       const nativeResult = await Promise.race([native, new Promise((_resolve, reject) => { timeout = setTimeout(() => reject(new Error('Native Agent smoke test timed out')), 90_000); })]).finally(() => clearTimeout(timeout));
       console.log('Native Agent result:', JSON.stringify(nativeResult));
