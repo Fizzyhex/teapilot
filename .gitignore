@@ -16,3 +16,4 @@ coverage/
 *.vsix
 extensions/vscode/runtime/
 extensions/vscode/.vscode-test/
+.claude/
