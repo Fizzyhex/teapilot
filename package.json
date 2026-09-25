@@ -32,7 +32,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-art.mjs",
     "global:build": "npm run build && npm install --global .",
-    "global:pull": "git pull && npm install && npm run global:build",
+    "global:pull": "git pull && npm install --allow-git=all && npm run global:build",
     "test": "vitest run",
     "check": "npm run typecheck && npm test && npm run build",
     "prepack": "npm run build",
