@@ -15,6 +15,11 @@ export const escalationOrder: Tier[] = ['fast', 'normal', 'reasoning', 'deep'];
 export function profileFor(tier: Tier): ExecutionProfile { return executionProfiles[tier]; }
 export function effectiveProfile(config: Config, tier: Tier): ExecutionProfile {
   const profile = profileFor(tier); const model = modelFor(config, tier);
+  // With no higher tier able to run on this model (e.g. local models without native
+  // reasoning), this tier is the ceiling: use the model's configured limits in full.
+  const ceiling = !escalationOrder.slice(escalationOrder.indexOf(tier) + 1)
+    .some(next => profileFor(next).model === profile.model && profileAvailable(config, next).available);
+  if (ceiling) return { ...profile, contextTokens: model.contextTokens, maxOutputTokens: model.maxOutputTokens };
   return { ...profile, contextTokens: Math.min(profile.contextTokens, model.contextTokens), maxOutputTokens: Math.min(profile.maxOutputTokens, model.maxOutputTokens) };
 }
 export function modelFor(config: Config, tier: Tier): ModelConfig { return config.models[profileFor(tier).model]; }
