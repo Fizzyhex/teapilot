@@ -48,22 +48,34 @@ export async function routingCheck(config: Config, consent: (message: string) =>
   } finally { await unlock(); }
 }
 
-export async function modelStatus(config: Config, tier: Tier, signal?: AbortSignal): Promise<string | undefined> {
+export type ModelDiagnosticLayer = 'server_not_ready' | 'model_unavailable' | 'api_incompatible';
+export interface ModelDiagnostic {
+  ok: boolean;
+  layer?: ModelDiagnosticLayer;
+  message?: string;
+}
+
+export async function diagnoseModel(config: Config, tier: Tier, signal?: AbortSignal): Promise<ModelDiagnostic> {
   const model = modelFor(config, tier); const secret = config.secrets[profileFor(tier).model];
   try {
     const response = await fetch(`${model.baseUrl.replace(/\/$/, '')}/models`, {
       headers: secret ? { Authorization: `Bearer ${secret}` } : {},
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000), redirect: 'error',
     });
-    if (!response.ok) return `Model listing returned HTTP ${response.status}; check the endpoint and credential.`;
+    if (!response.ok) return { ok: false, layer: 'api_incompatible', message: `Model listing returned HTTP ${response.status}; check the endpoint and credential.` };
     const body = await response.json() as { data?: Array<{ id?: string }> };
-    if (!Array.isArray(body.data)) return 'Endpoint did not return an OpenAI-compatible model list.';
-    if (!body.data.some(item => item.id === model.id)) return 'Selected model is not installed/available; rerun teapilot setup.';
-    return undefined;
+    if (!Array.isArray(body.data)) return { ok: false, layer: 'api_incompatible', message: 'Endpoint did not return an OpenAI-compatible model list.' };
+    if (!body.data.some(item => item.id === model.id)) return { ok: false, layer: 'model_unavailable', message: 'Selected model is not installed/available; rerun teapilot setup.' };
+    return { ok: true };
   } catch {
     signal?.throwIfAborted();
-    return 'Endpoint is unreachable; start the model server and check its URL.';
+    return { ok: false, layer: 'server_not_ready', message: 'Endpoint is unreachable; start the model server and check its URL.' };
   }
+}
+
+export async function modelStatus(config: Config, tier: Tier, signal?: AbortSignal): Promise<string | undefined> {
+  const result = await diagnoseModel(config, tier, signal);
+  return result.ok ? undefined : result.message;
 }
 
 export interface LiveReport { ask: boolean; tools: boolean; coding: boolean; spentUsd: number }
