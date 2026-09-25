@@ -31,6 +31,7 @@ export interface RuntimeContext {
   stateDir: string;
   hardware: HardwareReport;
   options: RuntimeSetupOptions;
+  existingApiKey?: string;
 }
 
 export type RuntimeModelConfig = Pick<ModelConfig,
