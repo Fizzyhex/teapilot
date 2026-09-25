@@ -56,7 +56,8 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     const target = route(message, settings);
     if (!target) return;
     if (!message.content) { await message.transport().send('teapilot reads text messages only.'); return; }
-    const chain = await message.replyChain();
+    // A running conversation already holds its earlier turns, so only a new one needs the reply chain.
+    const chain = target.kind === 'new-thread' || !conversations.get(target.key)?.active ? await message.replyChain() : [];
     const prompt = chain.length ? quoteMessage({ author: message.authorName, text: message.content }, chain) : message.content;
     let key = target.key;
     let transport: DiscordTransport;

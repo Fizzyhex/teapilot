@@ -10,6 +10,8 @@ import type { DiscordSettings } from './settings.js';
 const replyChainDepth = 10;
 const replyChainBudgetMs = 1500;
 const replyChainMessageChars = 2000;
+/** The fields teapilot reads from a message in a raw Gateway payload. */
+interface RawMessage { author?: { username?: string }; content?: string }
 
 export interface GatewayMessage extends IncomingMessage {
   /** Message text with the bot mention removed. */
@@ -122,14 +124,20 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     return channel?.isSendable() ? channel : undefined;
   };
   const strip = (text: string, id: string) => text.replace(new RegExp(`<@!?${id}>`, 'g'), '').trim();
+  /**
+   * The message each Reply-menu target replies to, by interaction id, from the raw payload. discord.js
+   * keeps it only in the channel's cache, which does not exist where teapilot cannot view the channel.
+   */
+  const interactionReplies = new Map<string, RawMessage>();
 
   /**
    * The messages `message` replies to, oldest first, for mentions and the Reply menu. Discord drops an
    * interaction unless it is answered within 3 seconds, so the walk stops at a depth and time budget,
    * and at anything it cannot fetch.
    */
-  const replyChain = async (message: Message, selfId: string): Promise<QuotedMessage[]> => {
+  const replyChain = async (message: Message, selfId: string, repliedTo?: RawMessage): Promise<QuotedMessage[]> => {
     const chain: QuotedMessage[] = [];
+    const quote = (author: string | undefined, content: string | undefined) => chain.unshift({ author: author ?? 'unknown', text: strip(content ?? '', selfId).slice(0, replyChainMessageChars) });
     const deadline = Date.now() + replyChainBudgetMs;
     let current = message;
     while (chain.length < replyChainDepth && current.reference?.type === MessageReferenceType.Default && current.reference.messageId) {
@@ -140,8 +148,12 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         current.fetchReference(),
         new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), left); }),
       ]).catch(() => undefined).finally(() => clearTimeout(timer));
-      if (!parent) break;
-      chain.unshift({ author: parent.author.username, text: strip(parent.content, selfId).slice(0, replyChainMessageChars) });
+      if (!parent) {
+        // Without channel access nothing can be fetched, but Discord sent the first reply with the interaction.
+        if (current === message && repliedTo) quote(repliedTo.author?.username, repliedTo.content);
+        break;
+      }
+      quote(parent.author.username, parent.content);
       current = parent;
     }
     return chain;
@@ -169,7 +181,9 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     };
     const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
     const text = interaction.isChatInputCommand() ? interaction.options.getString('message', true).trim() : strip(target?.content ?? '', self.id);
-    const chain = target && text ? await replyChain(target, self.id) : [];
+    const repliedTo = interactionReplies.get(interaction.id);
+    interactionReplies.delete(interaction.id);
+    const chain = target && text ? await replyChain(target, self.id, repliedTo) : [];
     handlers.reply({
       authorId: interaction.user.id,
       authorIsBot: interaction.user.bot,
@@ -199,7 +213,16 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     });
   };
 
+  // Raw packets arrive before discord.js builds the interaction, so the entry is ready when reply() runs.
+  client.on(Events.Raw, (packet: { t?: string; d?: { id?: string; data?: { target_id?: string; resolved?: { messages?: Record<string, { referenced_message?: RawMessage | null }> } } } }) => {
+    const data = packet.t === 'INTERACTION_CREATE' ? packet.d?.data : undefined;
+    const repliedTo = data?.target_id ? data.resolved?.messages?.[data.target_id]?.referenced_message : undefined;
+    if (packet.d?.id && repliedTo) interactionReplies.set(packet.d.id, repliedTo);
+  });
+
   client.on(Events.InteractionCreate, async interaction => {
+    // Only the Reply menu reads this; drop it for every other interaction so the map stays empty.
+    if (!(interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu)) interactionReplies.delete(interaction.id);
     if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && interaction.commandName === replyCommand) {
       const self = client.user;
       if (self && (interaction.isMessageContextMenuCommand() || interaction.isChatInputCommand())) await reply(interaction, self).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
