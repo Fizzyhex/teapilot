@@ -10,14 +10,28 @@ const endpoint = z.string().url().refine(value => {
   const url = new URL(value);
   return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
 }, 'Use an HTTP(S) endpoint without embedded credentials, query, or fragment');
-const effort = z.enum(['off', 'medium', 'xhigh']);
+export const reasoningLevels = ['off', 'medium', 'xhigh'] as const;
+export type ReasoningLevel = typeof reasoningLevels[number];
+const effort = z.enum(reasoningLevels);
+const reasoningValue = z.union([
+  z.string().min(1),
+  z.object({
+    reasoningEffort: z.string().min(1).optional(),
+    templateVars: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+  }).strict(),
+]);
+const reasoningProtocolSchema = z.object({
+  type: z.literal('reasoning_effort'),
+  values: z.object({ off: reasoningValue.optional(), medium: reasoningValue.optional(), xhigh: reasoningValue.optional() }).strict(),
+}).strict();
+export type ReasoningProtocol = z.infer<typeof reasoningProtocolSchema>;
 const modelSchema = z.object({
   enabled: z.boolean(), id: z.string().min(1), provider: z.string().min(1), baseUrl: endpoint,
   apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/), contextTokens: z.number().int().min(4096).max(2_000_000),
   maxOutputTokens: z.number().int().min(128).max(32768), inputUsdPerMillion: money, outputUsdPerMillion: money,
   vision: z.boolean().default(false), toolCalling: z.boolean().default(true), supportsDeveloperRole: z.boolean().default(false),
   supportsUsage: z.boolean().default(true), temperature: z.number().min(0).max(2).optional(),
-  reasoningEfforts: z.array(effort).min(1).default(['off']), compatibility: z.boolean().default(false),
+  reasoningEfforts: z.array(effort).min(1).default(['off']), reasoning: reasoningProtocolSchema.optional(), compatibility: z.boolean().default(false),
 }).strict().refine(m => m.maxOutputTokens + 2048 < m.contextTokens, 'Context must leave room for input');
 
 export const tiers = ['fast', 'normal', 'reasoning', 'deep'] as const;
@@ -39,7 +53,7 @@ export const policySchema = z.object({
   permissions: z.array(z.enum(['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search'])),
   disabledCapabilities: z.array(z.string()),
   budget: z.object({ requestUsd: money, dailyUsd: money, approvalThresholdUsd: money }).strict(),
-  limits: z.object({ maxTurns: z.number().int().min(1).max(100), maxToolCalls: z.number().int().min(1).max(300), attemptTimeoutMs: z.number().int().min(1000).max(3_600_000), requestTimeoutMs: z.number().int().min(1000).max(120_000), commandTimeoutSeconds: z.number().int().min(1).max(600), maxPromptChars: z.number().int().min(1).max(20_000) }).strict(),
+  limits: z.object({ maxTurns: z.number().int().min(1).max(100), maxToolCalls: z.number().int().min(1).max(300), attemptTimeoutMs: z.number().int().min(1000).max(3_600_000), requestTimeoutMs: z.number().int().min(1000).max(600_000), commandTimeoutSeconds: z.number().int().min(1).max(600), maxPromptChars: z.number().int().min(1).max(20_000) }).strict(),
   escalation: z.object({ maxEscalations: z.number().int().min(0).max(3), consecutiveFailures: z.number().int().min(1).max(10), repeatedToolCalls: z.number().int().min(2).max(10) }).strict(),
   execution: z.object({ trustedCommands: z.array(z.string().min(1)), largeOverwriteBytes: z.number().int().min(1) }).strict(),
 }).strict();
@@ -68,16 +82,31 @@ function legacyCloudEnabled(raw: Record<string, unknown>, env: NodeJS.ProcessEnv
   const economy = (raw.economy ?? {}) as Record<string, unknown>; const strong = (raw.strong ?? {}) as Record<string, unknown>;
   return economy.enabled === true || strong.enabled === true || env.ECONOMY_ENABLED === 'true' || env.STRONG_ENABLED === 'true' || Boolean(env.ECONOMY_MODEL || env.STRONG_MODEL);
 }
+const legacyOllamaReasoning: ReasoningProtocol = {
+  type: 'reasoning_effort',
+  values: { off: 'none', medium: 'medium', xhigh: 'xhigh' },
+};
+
+function addProtocolCompatibility(models: CanonicalModels): CanonicalModels {
+  for (const model of Object.values(models)) {
+    // Older TeaPilot configurations encoded Ollama's request protocol only in
+    // provider identity. Normalize that once at config load so inference itself
+    // can remain provider-agnostic.
+    if (!model.reasoning && model.provider === 'ollama') model.reasoning = structuredClone(legacyOllamaReasoning);
+  }
+  return models;
+}
+
 function canonicalize(raw: unknown, env: NodeJS.ProcessEnv): { models: CanonicalModels; warnings: string[] } {
   if (!raw || typeof raw !== 'object') throw new Error('Model configuration must be a JSON object.');
   const object = raw as Record<string, unknown>;
-  if ('fast' in object || 'capable' in object) return { models: canonicalModelsSchema.parse(object), warnings: [] };
+  if ('fast' in object || 'capable' in object) return { models: addProtocolCompatibility(canonicalModelsSchema.parse(object)), warnings: [] };
   if (!('local' in object) || !('economy' in object) || !('strong' in object)) throw new Error('Model configuration must define fast and capable models. Run teapilot setup to migrate it.');
   if (legacyCloudEnabled(object, env)) throw new Error('Cloud execution settings from legacy economy/strong tiers are no longer supported. Disable them and run teapilot setup to configure local fast/capable models.');
   const local = modelSchema.parse(object.local);
   const capable: ModelConfig = { ...local, inputUsdPerMillion: 0, outputUsdPerMillion: 0, reasoningEfforts: ['off'], compatibility: true };
   const fast: ModelConfig = { ...capable, enabled: false, id: `${local.id}:fast-unavailable` };
-  return { models: canonicalModelsSchema.parse({ fast, capable }), warnings: ['Loaded legacy local-only configuration as compatibility capable-only; setup must verify the target models before fast, medium, or xhigh execution is enabled.'] };
+  return { models: addProtocolCompatibility(canonicalModelsSchema.parse({ fast, capable })), warnings: ['Loaded legacy local-only configuration as compatibility capable-only; setup must verify the target models before fast, medium, or xhigh execution is enabled.'] };
 }
 function applyOverride(model: ModelConfig, env: NodeJS.ProcessEnv, prefix: string): void {
   if (env[`${prefix}_MODEL`]) model.id = env[`${prefix}_MODEL`]!;
