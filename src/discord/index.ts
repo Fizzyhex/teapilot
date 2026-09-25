@@ -92,7 +92,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     } else transport = reply.transport();
     await reply.respond();
     log(`${key} @${reply.authorName} (reply): ${reply.content.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport, reply.oneShot)).push(reply.content);
+    (await open(key, transport, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly });
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   // discord.js loads only here, so every other command starts without it.

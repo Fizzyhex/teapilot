@@ -53,6 +53,7 @@ export class Conversation {
   private turn?: AbortController;
   private sink?: EventSink;
   private ended = false;
+  private answerOnly = false;
   readonly done: Promise<void>;
 
   constructor(private readonly options: ConversationOptions) {
@@ -60,24 +61,28 @@ export class Conversation {
   }
 
   /** Deliver a message from an allowlisted person. Local commands take effect immediately. */
-  push(text: string): void {
+  push(text: string, options: { answerOnly?: boolean } = {}): void {
+    // Only the next turn is answer-only, and only if nothing is running to change mid-turn.
+    if (options.answerOnly && !this.turn) this.answerOnly = true;
     const trimmed = text.trim();
     const [command] = trimmed.split(/\s+/);
     if (command === '/stop') {
-      if (this.turn && !this.turn.signal.aborted) { this.turn.abort(); void this.say('Stopping the current turn. Edits already made remain on disk.'); }
-      else void this.say('Nothing is running.');
+      if (this.turn && !this.turn.signal.aborted) { this.turn.abort(); void this.say('Stopping the current turn. Edits already made remain on disk.', true); }
+      else void this.say('Nothing is running.', true);
       return;
     }
-    if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.'); return; }
-    if (command === '/help') void this.say(discordHelp);
-    if (this.turn && !['/exit', '/quit'].includes(command ?? '')) void this.say('Queued as your next message.');
+    if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.', true); return; }
+    if (command === '/help') void this.say(discordHelp, true);
+    if (this.turn && !['/exit', '/quit'].includes(command ?? '')) void this.say('Queued as your next message.', true);
     if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; waiting.resolve(text); }
     else this.inbox.push(text);
   }
 
   get active(): boolean { return !this.ended; }
 
-  private async say(text: string): Promise<void> {
+  /** `direct` text always goes to Discord; anything else stays in the terminal during an answer-only turn. */
+  private async say(text: string, direct = false): Promise<void> {
+    if (this.answerOnly && !direct) { this.options.log(`${this.options.key}: ${this.options.redact(text)}`); return; }
     for (const part of chunk(this.options.redact(text))) await this.options.transport.send(part).catch(error => this.options.log(`${this.options.key}: send failed: ${error instanceof Error ? error.message : error}`));
   }
 
@@ -119,13 +124,14 @@ export class Conversation {
       if (!status) status = this.options.transport.send(text);
       else await this.options.transport.edit(await status, text);
     }, this.options.progressIntervalMs ?? 1500);
-    this.sink = event => { if (progress.push(event)) update.request(); };
-    const typing = setInterval(() => this.options.transport.typing(), 8000);
+    const answerOnly = this.answerOnly;
+    this.sink = event => { if (!answerOnly && progress.push(event)) update.request(); };
+    const typing = answerOnly ? undefined : setInterval(() => this.options.transport.typing(), 8000);
     let result: HostResult;
     try {
       result = await this.options.queue.run(async () => {
         signal.throwIfAborted();
-        this.options.transport.typing();
+        if (!answerOnly) this.options.transport.typing();
         return await this.options.run({ ...request, signal }, { approve: this.approve, onEvent: this.onEvent });
       }, () => void this.say('Queued behind another task.'));
     } catch (error) {
@@ -140,9 +146,11 @@ export class Conversation {
       await update.flush();
       if (this.turn === turn) this.turn = undefined;
     }
-    await this.say(result.text || '(no answer)');
-    await this.say(`-# Result: ${result.status}; accounted $${result.spentUsd.toFixed(6)}${result.requestId ? `; request ${result.requestId}` : ''}`);
+    await this.say(result.text || '(no answer)', true);
+    // The terminal log below already records the result of an answer-only turn.
+    if (!answerOnly) await this.say(`-# Result: ${result.status}; accounted $${result.spentUsd.toFixed(6)}${result.requestId ? `; request ${result.requestId}` : ''}`);
     this.options.log(`${this.options.key}: ${result.status}; $${result.spentUsd.toFixed(6)}`);
+    this.answerOnly = false;
     return result;
   };
 

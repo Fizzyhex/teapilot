@@ -9,7 +9,7 @@ import type { Config, Tier } from './config.js';
 import { tiers } from './config.js';
 import { runAttempt } from './agents/run.js';
 import { SpendGovernor, lockState } from './inference/budget.js';
-import { budgetedJev, guardedStream, piModel } from './inference/providers.js';
+import { budgetedJev, guardedStream, piModel, type InferenceState } from './inference/providers.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import { capabilities } from './routing/capabilities.js';
@@ -84,10 +84,10 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     const probeConfig = structuredClone(config);
     modelFor(probeConfig, tier).temperature = 0;
     probeConfig.policy.limits.maxTurns = Math.min(6, config.policy.limits.maxTurns);
-    async function run(prompt: string, tools: AgentTool[] = []): Promise<{ text: string; ok: boolean }> {
-      const state = { turns: 0 };
+    async function run(prompt: string, tools: AgentTool[] = []): Promise<{ text: string; ok: boolean; failure?: string }> {
+      const state: InferenceState = { turns: 0 };
       const agent = new Agent({
-        initialState: { model: piModel(modelFor(probeConfig, tier), effectiveProfile(probeConfig, tier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user's tone and formality.', tools, thinkingLevel: profileFor(tier).thinking },
+        initialState: { model: piModel(modelFor(probeConfig, tier), effectiveProfile(probeConfig, tier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s tone and formality.', tools, thinkingLevel: profileFor(tier).thinking },
         streamFn: guardedStream(probeConfig, tier, budget, telemetry, state), toolExecution: 'sequential',
       });
       const abort = () => agent.abort();
@@ -97,11 +97,16 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
       finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
       signal?.throwIfAborted();
       const last = agent.state.messages.findLast(message => message.role === 'assistant');
-      return { ok: last?.role === 'assistant' && last.stopReason === 'stop', text: last?.role === 'assistant' ? last.content.filter(part => part.type === 'text').map(part => part.text).join('') : '' };
+      const stopReason = last?.role === 'assistant' ? last.stopReason : 'no response';
+      return {
+        ok: stopReason === 'stop', text: last?.role === 'assistant' ? last.content.filter(part => part.type === 'text').map(part => part.text).join('') : '',
+        failure: state.providerDetail ?? (state.stop ? `inference stopped (${state.stop})` : stopReason !== 'stop' ? `stop reason ${stopReason}` : undefined),
+      };
     }
     progress('Checking streamed answers...');
     const answer = await run('Reply with exactly TEAPILOT_OK.');
     report.ask = answer.ok && answer.text.includes('TEAPILOT_OK');
+    if (!report.ask) progress(`Answer check failed: ${answer.failure ?? 'reply did not contain TEAPILOT_OK'}. ${answer.failure && /loading model|tensor/i.test(answer.failure) ? 'The model file cannot be loaded by this Ollama version; rerun teapilot setup and choose another model.' : 'Try another model or update Ollama.'}`);
     if (report.ask && modelFor(config, tier).toolCalling) {
       progress('Checking tool calls and continuation...');
       const token = randomUUID();

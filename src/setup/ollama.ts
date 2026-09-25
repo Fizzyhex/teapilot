@@ -10,8 +10,10 @@ import { chooseMany, type SetupUI } from './terminal.js';
 export const ollamaURL = 'http://127.0.0.1:11434';
 export const presets = [
   { label: 'Fast - Qwen3.5-9B Heretic Q4_K_M', id: 'hf.co/mradermacher/Qwen3.5-9B-heretic-GGUF:Q4_K_M', bytes: 6_600_000_000, memoryGiB: 12, context: 8192, role: 'fast' as PhysicalModel },
-  { label: 'Capable - Qwen3.8-27B Heretic Q4_K_M', id: 'hf.co/DevJac/Qwen3.8-27B-heretic:Q4_K_M', bytes: 18_000_000_000, memoryGiB: 24, context: 32768, role: 'capable' as PhysicalModel },
+  { label: 'Capable - Qwen3.8-27B Heretic ARA Q4_K_M', id: 'hf.co/mradermacher/Qwen3.8-27B-heretic-ara-GGUF:Q4_K_M', bytes: 16_900_000_000, memoryGiB: 24, context: 32768, role: 'capable' as PhysicalModel },
 ];
+// hf.co/DevJac/Qwen3.8-27B-heretic declares 65 blocks but omits the MTP block
+// (blk.64), so llama-server refuses to load it. Do not restore that preset.
 export interface OllamaModel { name: string; size: number; remote_model?: string }
 
 export function command(executable: string, args: string[], signal: AbortSignal, inherit = false): Promise<string> {

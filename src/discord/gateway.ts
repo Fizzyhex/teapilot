@@ -30,6 +30,8 @@ export interface GatewayReply extends GatewayMessage {
    * With this set, `respond()` with no text keeps the reply visible instead of dismissing it.
    */
   oneShot: boolean;
+  /** From the Reply menu: only teapilot's answer (and approval buttons) go to Discord; the rest is logged in the terminal. */
+  answerOnly: boolean;
   respond(text?: string): Promise<void>;
 }
 export interface GatewayHandlers {
@@ -151,6 +153,7 @@ ${text}` : text,
       title: text,
       id: interaction.id,
       oneShot,
+      answerOnly: !!target,
       transport: () => channel && !oneShot ? transport(channel) : interactionTransport(interaction),
       startThread: name => spawn(async () => {
         const options = { name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay };

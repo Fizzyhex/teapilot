@@ -141,3 +141,17 @@ it('serialises turns across conversations and tells the waiting one', async () =
   await Promise.all([first, second]);
   expect(order).toEqual(['first start', 'first end', 'second']);
 });
+
+it('sends only the answer to Discord for an answer-only turn and logs the rest', async () => {
+  const { sent, transport } = discord();
+  const log = vi.fn();
+  const run = vi.fn<ConversationOptions['run']>(async (_request, dependencies) => { dependencies.onEvent?.({ type: 'tool_started', name: 'read' } as never); return result; });
+  const { chat } = conversation({ transport, run, log, progressIntervalMs: 1 });
+  chat.push('summarise this', { answerOnly: true });
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(expect.stringMatching(/completed; \$/)));
+  expect(sent).toEqual(['Done with [REDACTED].']);
+  expect(transport.typing).not.toHaveBeenCalled();
+  // The next turn is back to normal.
+  chat.push('and again');
+  await vi.waitFor(() => expect(sent.some(text => text.startsWith('-# Result: completed'))).toBe(true));
+});

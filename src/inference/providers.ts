@@ -107,6 +107,21 @@ export interface InferenceState {
   turns: number; stop?: 'budget' | 'turn_limit' | 'context_limit' | 'payload_limit' | 'unsupported' | 'provider_error' | 'timeout';
   /** Lexical estimate and provider-reported prompt tokens from the latest completed call. */
   calibration?: { estimated: number; reported: number };
+  /** Server-side failure text, kept only when it matches a known load/runtime signature. */
+  providerDetail?: string;
+}
+
+// Provider error bodies may reflect request content, so only messages that
+// describe the server itself (model load, memory, crashed runner) are kept.
+const serverFailure = /error loading model|llama-server process has terminated|model runner has unexpectedly stopped|requires more system memory|unable to allocate|out of memory|model ["']?[^"'\s]+["']? not found/i;
+export async function providerFailureDetail(response: Response): Promise<string | undefined> {
+  const body = await response.clone().text().catch(() => '');
+  let message = body;
+  try { const parsed = JSON.parse(body) as { error?: string | { message?: string } }; message = typeof parsed.error === 'string' ? parsed.error : parsed.error?.message ?? ''; } catch { /* plain text */ }
+  const match = serverFailure.exec(message);
+  if (!match) return undefined;
+  const line = message.split('\n').find(part => serverFailure.test(part)) ?? match[0];
+  return line.trim().slice(0, 300);
 }
 
 function errorMessage(model: Model<'openai-completions'>, message: string): AssistantMessage {
@@ -196,7 +211,10 @@ export function guardedStream(
             sent = true;
             const response = await fetch(input, { ...init, redirect: 'error', signal });
             if (response.status === 400 || response.status === 404 || response.status === 422) state.stop = 'unsupported';
-            if (!response.ok) await telemetry.event('provider_http_error', { tier, model: spec.id, status: response.status });
+            if (!response.ok) {
+              state.providerDetail = await providerFailureDetail(response);
+              await telemetry.event('provider_http_error', { tier, model: spec.id, status: response.status, detail: state.providerDetail });
+            }
             return observeBilling(response, observed);
           },
         });

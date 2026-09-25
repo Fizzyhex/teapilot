@@ -58,6 +58,8 @@ Allowlisted users can also talk to teapilot outside DMs and the configured chann
 - `/reply message:<text>` asks teapilot something in the current channel.
 - Right-click a message → **Apps → Reply** makes teapilot respond to it. teapilot receives the text prefixed with the author's username (`Message from @name:`).
 
+With the Reply menu, only teapilot's answer and any approval buttons go to Discord; progress, queue notices and result lines go to the terminal running `teapilot discord start`.
+
 Where the bot can post, it starts a thread on your prompt or on the selected message, and that thread is one session. Where it can't (no Send Messages permission, or the bot is not in the server at all), it answers through the interaction itself. That needs no channel permission, but it has limits:
 
 - **Each use is a one-shot conversation.** There are no threads and no follow-ups; run `/reply` again for the next question.

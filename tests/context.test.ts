@@ -56,6 +56,17 @@ it.each([400, 404, 422])('keeps provider HTTP %s separate from local overflow', 
   expect((await events(f.config)).some(e => e.type === 'provider_http_error' && e.status === status)).toBe(true);
 });
 
+it('records server load failures but never echoes other provider error bodies', async () => {
+  const load = "llama-server process has terminated: exit status 1: error loading model: check_tensor_dims: tensor 'blk.64.attn_norm.weight' not found";
+  for (const [message, expected] of [[load, load], ['invalid request: SECRET_PROMPT_TEXT', undefined]] as const) {
+    const f = await setup((_body, _req, res) => { res.writeHead(500); res.end(JSON.stringify({ error: { message } })); });
+    await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, prompt: 'hello', approve: async () => true });
+    const failure = (await events(f.config)).find(e => e.type === 'provider_http_error');
+    expect(failure).toMatchObject({ status: 500 });
+    expect(failure?.detail).toBe(expected);
+  }
+});
+
 it('keeps local inference free when providers omit usage', async () => {
   let calls = 0;
   const f = await setup((_body, _req, res) => { calls++; completion(res, { noUsage: true }); });
