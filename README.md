@@ -33,6 +33,13 @@ teapilot setup
 > ```
 > `npm start --` will work in place of `teapilot` throughout setup.
 
+> [!TIP]
+> If `npm install` fails with `EALLOWGIT` or `EALLOWREMOTE`, your npm is blocking git and remote dependencies. Allow them once, then retry:
+> ```sh
+> npm config set allow-git all
+> npm config set allow-remote all
+> ```
+
 The setup wizard will walk you through model installation, and if you plan on using Jev, you can get the API key ready while the download is running.
 
 *For advanced config, follow the `--config-dir` command printed by setup.*
