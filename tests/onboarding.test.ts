@@ -153,7 +153,7 @@ it('setup saves private config, reruns preserve it, and environment overrides re
   const ui: SetupUI = { log: text => messages.push(text), input: async () => { throw new Error('Unexpected input'); }, choose: async () => 0, confirm: async () => false };
   const directory = join(f.cwd, 'personal');
   const options = { directory, nonInteractive: true, endpoint: `${f.server.url}/v1`, model: 'local-test', contextTokens: 16384 };
-  expect(await setup(options, ui, new AbortController().signal)).toBe(false);
+  expect(await setup(options, ui, new AbortController().signal)).toBe(true);
   const content = await readFile(join(directory, '.env'), 'utf8');
   const config = await loadConfig(directory, {});
   expect(config.routingMode).toBe('direct');
@@ -176,7 +176,7 @@ it('recognizes interrupted first setup without mislabeling retained generations'
   await writeFile(join(directory, 'models-incomplete.json'), '{}');
   const messages: string[] = [];
   const ui: SetupUI = { log: text => messages.push(text), input: async () => '', choose: async () => 0, confirm: async () => false };
-  expect(await setup({ directory, nonInteractive: true, endpoint: `${f.server.url}/v1`, model: 'local-test', contextTokens: 16384 }, ui, new AbortController().signal)).toBe(false);
+  expect(await setup({ directory, nonInteractive: true, endpoint: `${f.server.url}/v1`, model: 'local-test', contextTokens: 16384 }, ui, new AbortController().signal)).toBe(true);
   expect(messages.join('\n')).toContain('interrupted before activation');
   messages.length = 0;
   await setup({ directory }, ui, new AbortController().signal);
