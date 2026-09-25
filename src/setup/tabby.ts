@@ -94,10 +94,10 @@ export class TabbyRuntime {
       try {
         const version = (await this.deps.command(candidate.executable, [...candidate.prefix, '-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'], signal)).trim();
         const match = version.match(/^3\.(\d+)$/);
-        if (match && Number(match[1]) >= 10 && Number(match[1]) < 15) return candidate;
+        if (match && Number(match[1]) >= 10 && Number(match[1]) <= 13) return candidate;
       } catch { signal.throwIfAborted(); }
     }
-    throw new RuntimeFailure('runtime_unavailable', 'Managed Optimized NVIDIA needs Python 3.10-3.14 (Python 3.12 is recommended). TeaPilot did not make any system-wide changes.');
+    throw new RuntimeFailure('runtime_unavailable', 'Managed Optimized NVIDIA needs Python 3.10-3.13 (Python 3.12 is recommended). TeaPilot did not make any system-wide changes.');
   }
 
   async ensureInstalled(hardware: HardwareReport, signal: AbortSignal): Promise<void> {
