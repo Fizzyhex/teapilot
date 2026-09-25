@@ -69,6 +69,7 @@ it('installs, starts, provisions, reuses and stops Tabby through mocked process/
   const state = await mkdtemp(join(tmpdir(), 'teapilot-tabby-'));
   cleanup.push(() => rm(state, { recursive: true, force: true }));
   let started = false, active = false;
+  const installed = new Set<string>();
   const downloads: any[] = [];
   const killed: number[] = [];
   let runtime!: TabbyRuntime;
@@ -95,9 +96,10 @@ it('installs, starts, provisions, reuses and stops Tabby through mocked process/
       if (!started) throw new TypeError('connection refused');
       return Response.json({ software: { name: 'TabbyAPI' } });
     }
-    if (url.pathname === '/v1/models') return Response.json({ data: active ? [{ id: optimizedNvidiaPreset.modelFolder }] : [] });
+    if (url.pathname === '/v1/models') return Response.json({ data: [...installed].map(id => ({ id })) });
     if (url.pathname === '/v1/download') {
-      downloads.push(JSON.parse(String(init?.body)));
+      const body = JSON.parse(String(init?.body));
+      downloads.push(body); installed.add(body.folder_name);
       return Response.json({ download_path: 'managed-model-path' });
     }
     if (url.pathname === '/v1/model/load') {
