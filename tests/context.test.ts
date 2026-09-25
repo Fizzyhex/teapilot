@@ -67,6 +67,26 @@ it('records server load failures but never echoes other provider error bodies', 
   }
 });
 
+it('lets a steadily streaming reply outlast the request timeout, but stops a stalled one', async () => {
+  const common = { id: 'slow', object: 'chat.completion.chunk', created: 1, model: 'mock-model' };
+  const f = await setup(async (body, _req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    const chunk = (value: unknown) => res.write(`data: ${JSON.stringify(value)}\n\n`);
+    const stall = JSON.stringify(body.messages).includes('stall');
+    for (let i = 0; i < 6; i++) {
+      await new Promise(done => setTimeout(done, stall && i === 1 ? 1500 : 250));
+      if (res.destroyed) return;
+      chunk({ ...common, choices: [{ index: 0, delta: { role: 'assistant', content: 'word ' }, finish_reason: null }] });
+    }
+    chunk({ ...common, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 6, total_tokens: 16 } });
+    res.end('data: [DONE]\n\n');
+  });
+  f.config.policy.limits.requestTimeoutMs = 1000;
+  const input = { ...f, tier: 'normal' as const, workload: 'ask' as const, web: false, approve: async () => true };
+  expect(await runAttempt({ ...input, prompt: 'go' })).toMatchObject({ success: true });
+  expect(await runAttempt({ ...input, prompt: 'stall' })).toMatchObject({ success: false, stopped: 'timeout' });
+});
+
 it('keeps local inference free when providers omit usage', async () => {
   let calls = 0;
   const f = await setup((_body, _req, res) => { calls++; completion(res, { noUsage: true }); });

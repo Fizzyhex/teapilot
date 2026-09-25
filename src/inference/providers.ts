@@ -182,7 +182,16 @@ export function guardedStream(
       let sent = false;
       let lexicalTokens: number | undefined;
       const observed: { cost?: number; model?: string; completeUsage?: boolean } = {};
-      const signal = AbortSignal.any([options?.signal ?? new AbortController().signal, AbortSignal.timeout(config.policy.limits.requestTimeoutMs)]);
+      // requestTimeoutMs bounds a stall, not a whole stream: long local generations keep
+      // producing tokens, and attemptTimeoutMs already bounds the attempt overall.
+      const stalled = new AbortController();
+      let stallTimer: NodeJS.Timeout | undefined;
+      const progress = () => {
+        clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => stalled.abort(new DOMException('Provider stream stalled', 'TimeoutError')), config.policy.limits.requestTimeoutMs);
+      };
+      progress();
+      const signal = AbortSignal.any([options?.signal ?? new AbortController().signal, stalled.signal]);
       try {
         const stream = openAIStream(model, context, {
           apiKey: config.secrets[profile.model] || 'local-no-key',
@@ -224,12 +233,14 @@ export function guardedStream(
           },
         });
         for await (const event of stream) {
+          progress();
           if (event.type === 'done' || event.type === 'error') {
             completed = event.type === 'done' ? event.message : event.error;
           } else output.push(event);
         }
         completed ??= await stream.result();
       } finally {
+        clearTimeout(stallTimer);
         if (reservation) {
           const usage = completed?.usage;
           const complete = completed && !['error', 'aborted', 'pending'].includes(completed.stopReason);
