@@ -14,7 +14,7 @@ import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
 import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
-import { capabilityPlanner, readRoutingPlan } from './routing/intent.js';
+import { capabilityPlanner, readRoutingPlan, readWebAutoGrant, type WebBasis } from './routing/intent.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string }
@@ -71,14 +71,25 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   let searchDisabled = false;
   let searchUnverified = false;
   let accessFailure: string | undefined;
-  const activate = async (required: Permission[], reason: string, signal = request.signal): Promise<boolean> => {
+  // Conditions under which Jev (or an explicit --web) lets web.search be granted without a prompt.
+  let webAutoBasis: WebBasis[] = request.web ? ['explicit'] : [];
+  // With `optional`, an unusable search service quietly skips the grant instead of prompting or failing the request.
+  const activate = async (required: Permission[], reason: string, signal = request.signal, optional = false): Promise<boolean> => {
     if (!request.authorization) return true;
     if (accessFailure) return false;
     if (required.some(permission => !config.policy.permissions.includes(permission))) {
       accessFailure = `Required access is disabled by configuration: ${required.filter(permission => !config.policy.permissions.includes(permission)).join(', ')}.`;
       return false;
     }
-    if (!await request.authorization.request(required, reason, dependencies.approve, signal,
+    if (optional && !request.authorization.allows('web.search')) {
+      try { await checkSearch(config, signal); } catch { signal?.throwIfAborted(); return false; }
+    }
+    // Only web.search is ever auto-approved; repository access always goes through the user.
+    const auto = webAutoBasis.length > 0 && required.every(permission => permission === 'web.search');
+    const approve: Approve = auto
+      ? async approval => { await telemetry.event('grant_auto', { permissions: approval.kind === 'capability' ? approval.permissions : required, basis: webAutoBasis }); return true; }
+      : dependencies.approve;
+    if (!await request.authorization.request(required, reason, approve, signal,
       (type, fields) => telemetry.event(type, fields))) {
       accessFailure = `Required session access was not approved: ${required.join(', ')}. Grant access interactively to continue.`;
       return false;
@@ -175,6 +186,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       }, candidates) : undefined;
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
       if (decision) receipts.push(await telemetry.receipt(decision));
+      if (router) webAutoBasis = request.web ? ['explicit'] : readWebAutoGrant(decision?.raw_jev);
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
       // An unconfident route falls back to the workload the session's mode already
@@ -212,7 +224,17 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           const preferredAssessment = preferred && decision?.decision.candidates.find(c => c.id === preferred.id);
           if (preferred && preferredAssessment && assessCandidate(config, preferred).allowed && preferredAssessment.router.allowed && !preferredAssessment.router.filtered) { selected = preferred.id; candidate = preferred; assessment = preferredAssessment; }
         }
-        if (!await activate(plan.permissions, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
+        // web.search may be auto-approved on its own; the rest of the plan is still asked of the user.
+        const web = plan.permissions.filter(permission => permission === 'web.search');
+        const rest = plan.permissions.filter(permission => permission !== 'web.search');
+        if (web.length && !await activate(web, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
+        if (rest.length && !await activate(rest, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
+      }
+      // Jev can also establish a web.search basis without a confident access plan (or when the plan
+      // did not ask for search), so grant it whenever it is usable rather than waiting for a mid-run request.
+      if (request.authorization && webAutoBasis.length && !activePermissions.includes('web.search') && config.searchUrl
+        && config.policy.permissions.includes('web.search') && modelFor(config, selected.split('.')[1] as Tier).toolCalling) {
+        await activate(['web.search'], `Web search allowed automatically (${webAutoBasis.join(', ')}): ${prompt}`, request.signal, true);
       }
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');

@@ -31,14 +31,15 @@ export async function mockServer(handler: Handler): Promise<{ url: string; close
   if (!address || typeof address === 'string') throw new Error('Missing mock server address');
   return { url: `http://127.0.0.1:${address.port}`, close: () => new Promise<void>((done, reject) => { server.close(error => error ? reject(error) : done()); server.closeAllConnections(); }) };
 }
-export function jev(response: ServerResponse, selected: string, confidence = 0.99, probabilities?: Record<string, number>): void {
+export function jev(response: ServerResponse, selected: string, confidence = 0.99, probabilities?: Record<string, number>, web: Partial<Record<'web.explicit' | 'web.volatile' | 'web.low_risk' | 'web.search', 'yes' | 'no'>> = {}, webConfidence = confidence): void {
   response.setHeader('Content-Type', 'application/json');
   const all = Object.fromEntries(['coder.fast', 'coder.normal', 'coder.reasoning', 'coder.deep', 'ask.fast', 'ask.normal', 'ask.reasoning', 'ask.deep'].map(id => [id, id === selected ? 1 : 0]));
   const choice = (value: string) => ({ type: 'choice', choice: value, probabilities: { [value]: 1 }, confidence });
   const repository = selected.startsWith('coder.');
   response.end(JSON.stringify({ answers: {
     tool: { type: 'choice', choice: selected, probabilities: { ...all, ...probabilities }, confidence },
-    'repository.read': choice(repository ? 'yes' : 'no'), 'repository.write': choice('no'), 'repository.shell': choice('no'), 'web.search': choice('no'),
+    'repository.read': choice(repository ? 'yes' : 'no'), 'repository.write': choice('no'), 'repository.shell': choice('no'), 'web.search': choice(web['web.search'] ?? 'no'),
+    ...Object.fromEntries((['web.explicit', 'web.volatile', 'web.low_risk'] as const).map(key => [key, { ...choice(web[key] ?? 'no'), confidence: webConfidence }])),
     execution_tier: choice(selected.split('.')[1] ?? 'normal'), relatedness: choice('related'),
   }, usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 } }));
 }

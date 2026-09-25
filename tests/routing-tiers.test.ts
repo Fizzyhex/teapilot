@@ -7,7 +7,7 @@ import { executionProfiles, directTier, profileAvailable } from '../src/routing/
 import { inferenceSchema, runInference } from '../src/integration/inference.js';
 import { loadConfig } from '../src/config.js';
 import { runHost } from '../src/host.js';
-import { readRoutingPlan } from '../src/routing/intent.js';
+import { readRoutingPlan, readWebAutoGrant } from '../src/routing/intent.js';
 import { completion, events, fixture, jev, mockServer } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -89,7 +89,7 @@ it('batches routing and capability questions into one Jev charge', async () => {
   const f = await fixture(); cleanups.push(f.cleanup);
   const server = await mockServer((body, request, response) => {
     if (request.url === '/jev') {
-      expect(Object.keys(body.questions)).toEqual(expect.arrayContaining(['tool', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'execution_tier', 'relatedness']));
+      expect(Object.keys(body.questions)).toEqual(expect.arrayContaining(['tool', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'web.explicit', 'web.volatile', 'web.low_risk', 'execution_tier', 'relatedness']));
       jev(response, 'ask.normal');
     } else completion(response, { text: 'answered' });
   });
@@ -112,6 +112,20 @@ it('does not expand access for uncertain or contradictory routing answers', () =
   expect(readRoutingPlan({ ...base, answers: { ...base.answers, 'repository.read': answer('unclear') } }, 0.55, 'ask')).toBeUndefined();
   expect(readRoutingPlan({ ...base, answers: { ...base.answers, 'repository.read': answer('no'), 'repository.write': answer('yes') } }, 0.55, 'coder')).toBeUndefined();
   expect(readRoutingPlan({ ...base, answers: { ...base.answers, 'repository.read': answer('yes', 0.2) } }, 0.55, 'coder')).toBeUndefined();
+});
+
+it('reads web.search auto-grant conditions independently, above 0.75 confidence only', () => {
+  const answer = (choice: string, confidence = 0.99) => ({ type: 'choice', choice, probabilities: { [choice]: 1 }, confidence });
+  const raw = (fields: Record<string, any>): any => ({ answers: { 'repository.read': answer('unclear', 0.1), ...fields } });
+  expect(readWebAutoGrant(raw({}))).toEqual([]);
+  expect(readWebAutoGrant(raw({ 'web.explicit': answer('yes', 0.76) }))).toEqual(['explicit']);
+  expect(readWebAutoGrant(raw({ 'web.volatile': answer('yes', 0.9) }))).toEqual(['volatile']);
+  expect(readWebAutoGrant(raw({ 'web.low_risk': answer('yes', 0.9) }))).toEqual(['low_risk']);
+  expect(readWebAutoGrant(raw({ 'web.explicit': answer('yes', 0.9), 'web.volatile': answer('yes', 0.9) }))).toEqual(['explicit', 'volatile']);
+  expect(readWebAutoGrant(raw({ 'web.explicit': answer('yes', 0.75) }))).toEqual([]);
+  expect(readWebAutoGrant(raw({ 'web.volatile': answer('yes', 0.6) }))).toEqual([]);
+  expect(readWebAutoGrant(raw({ 'web.explicit': answer('unclear'), 'web.volatile': answer('no'), 'web.low_risk': answer('unclear') }))).toEqual([]);
+  expect(readWebAutoGrant(undefined)).toEqual([]);
 });
 
 it('falls back to coder.normal, not ask.normal, for a low-confidence Code-mode decision, and the coder agent runs', async () => {
