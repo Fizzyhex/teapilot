@@ -1,6 +1,5 @@
 import { during, terminalHandoff } from '../activity.js';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdtemp, open, rm, statfs } from 'node:fs/promises';
 import { homedir, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
@@ -146,7 +145,7 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   try { ui.log(`GPU: ${await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]))}`); }
   catch { signal.throwIfAborted(); ui.log('GPU memory unavailable; memory guidance is approximate.'); }
   const installed = (await ollamaJSON<{ models: OllamaModel[] }>('/api/tags', signal, undefined, base)).models.filter(model => !model.remote_model && !model.name.includes('cloud'));
-  const visible = installed.filter(model => !/^teapilot-[a-f0-9]{10}-[0-9]+:latest$/.test(model.name) && !presets.some(preset => preset.id === model.name));
+  const visible = installed.filter(model => !isTeapilotAlias(model.name) && !presets.some(preset => preset.id === model.name));
   const choices = [...presets.map(p => `${p.label} - ${installed.some(model => model.name === p.id) ? 'installed' : `about ${(p.bytes / 1e9).toFixed(1)} GB download`}, ${p.memoryGiB}+ GiB RAM suggested`), ...visible.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
   const suggested = 0;
   ui.log(`Suggested: ${presets[suggested]!.id} is the default; system RAM, GPU memory and context affect fit. Coding is verified after preparation.`);
@@ -201,6 +200,17 @@ async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof pres
   return context;
 }
 
+// Namespaced so the source stays readable in `ollama list`: qwen3-coder:30b
+// becomes teapilot/qwen3-coder:30b; slashes in the source are flattened.
+export function ollamaAlias(id: string): string {
+  const split = id.lastIndexOf(':');
+  const [name, tag] = split > id.lastIndexOf('/') ? [id.slice(0, split), id.slice(split + 1)] : [id, 'latest'];
+  return `teapilot/${name.toLowerCase().replaceAll('/', '-')}:${tag}`;
+}
+
+// The second pattern matches hashed aliases created by earlier versions.
+const isTeapilotAlias = (name: string) => name.startsWith('teapilot/') || /^teapilot-[a-f0-9]{10}(-[0-9]+)?:latest$/.test(name);
+
 async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, context: number, installed: OllamaModel[], base: string, verbose: boolean): Promise<{ id: string; source: string; context: number; tools: boolean }> {
   if (!installed.some(model => model.name === id)) {
     for (;;) {
@@ -214,7 +224,7 @@ async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, 
   if (typeof maximum === 'number' && context > maximum) throw new Error(`This model supports at most ${maximum} context tokens.`);
   // A separate alias leaves the user's original model untouched and fixes the
   // context actually used by the OpenAI API, which has no num_ctx parameter.
-  const alias = `teapilot-${createHash('sha256').update(id).digest('hex').slice(0, 10)}:latest`;
+  const alias = ollamaAlias(id);
   ui.log(`Preparing ${id} with a ${context.toLocaleString('en-US')}-token context...`);
   await during(ui, `Preparing ${id}...`, () => streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose));
   await during(ui, `Loading ${id}...`, () => probeOllamaLoad(base, id, alias, signal));

@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { chooseMany, type SetupUI } from '../src/setup/terminal.js';
-import { presets, selectOllamaModel } from '../src/setup/ollama.js';
+import { ollamaAlias, presets, selectOllamaModel } from '../src/setup/ollama.js';
 
 vi.mock('node:fs/promises', async importOriginal => ({
   ...await importOriginal<typeof import('node:fs/promises')>(),
@@ -124,4 +124,10 @@ it('prunes stale generations after successful save, keeping active plus one prev
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+it('names prepared Ollama aliases after their source model', () => {
+  expect(ollamaAlias('qwen3-coder:30b')).toBe('teapilot/qwen3-coder:30b');
+  expect(ollamaAlias('llama3')).toBe('teapilot/llama3:latest');
+  expect(ollamaAlias('hf.co/Org/Model-GGUF:Q4_K_M')).toBe('teapilot/hf.co-org-model-gguf:Q4_K_M');
 });
