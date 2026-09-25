@@ -77,7 +77,7 @@ export async function configureDiscord(options: DiscordSetupOptions, ui: SetupUI
   ui.log('Discord user IDs: enable Developer Mode (Settings → Advanced), then right-click a user → Copy User ID.');
   let allowed: string[];
   for (;;) {
-    allowed = (await ui.input('User IDs allowed to use teapilot (comma-separated)', env.DISCORD_ALLOWED_USER_IDS, false, signal)).split(/[\s,]+/).filter(Boolean);
+    allowed = (await ui.input('Operator user IDs, with full access (comma-separated)', env.DISCORD_ALLOWED_USER_IDS, false, signal)).split(/[\s,]+/).filter(Boolean);
     if (allowed.length && allowed.every(isSnowflake)) break;
     ui.log('Enter one or more Discord user IDs (17–20 digit numbers).');
   }
@@ -101,7 +101,7 @@ export async function configureDiscord(options: DiscordSetupOptions, ui: SetupUI
   ui.log([
     'Ready to save',
     `  Bot: ${application.name}`,
-    `  Allowed users: ${allowed.join(', ')}`,
+    `  Operators: ${allowed.join(', ')}`,
     `  Where: DMs${channel ? ` and @mentions in channel ${channel} (each task gets a thread)` : ' only'}`,
     `  Repository root: ${root}`,
     '  Sessions start in ask mode; /mode code, shell commands and large overwrites ask for button approval.',
@@ -133,7 +133,7 @@ export async function discordStatus(directory: string, ui: SetupUI, signal: Abor
   catch (error) { if (error instanceof DiscordNotConfigured) { ui.log(error.message); return false; } throw error; }
   ui.log([
     `Discord: configured (${directory})`,
-    `  Allowed users: ${settings.allowedUserIds.length}`,
+    `  Operators: ${settings.allowedUserIds.length}`,
     `  Where: DMs${settings.channelId ? ` and channel ${settings.channelId}` : ' only'}`,
     `  Repository root: ${settings.root}`,
     `  Start mode: ${settings.startMode}`,

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultPolicy, JevRouter } from 'jevrouter';
+import type { AccessAdmin } from './agents/access.js';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type TierPreference, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
@@ -17,7 +18,7 @@ import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Per
 import { capabilityPlanner, readRoutingPlan, readWebAutoGrant, type WebBasis } from './routing/intent.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
@@ -182,7 +183,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           history: conversation.history,
           ...(scope ? { escalation: { ...scope, evidence: previous?.reason } } : {}),
         },
-        actor_permissions: config.policy.permissions,
+        actor_permissions: request.authorization?.available() ?? config.policy.permissions,
       }, candidates) : undefined;
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
       if (decision) receipts.push(await telemetry.receipt(decision));
@@ -251,7 +252,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
       previous = await runAttempt({
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
-        mode: request.mode, conversational: request.conversational, authorization: request.authorization,
+        mode: request.mode, conversational: request.conversational, authorization: request.authorization, access: request.access,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {

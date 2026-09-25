@@ -4,6 +4,7 @@ import { SessionGrants } from '../execution/grants.js';
 import { runHost } from '../host.js';
 import type { SetupUI } from '../setup/terminal.js';
 import { route, routeReply } from './access.js';
+import { AccessStore } from './access-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
 import type { GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
 import { interactionLifetimeMs } from './commands.js';
@@ -33,6 +34,9 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   const secrets = [settings.token, config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value));
   const redact = (text: string) => secrets.reduce((result, secret) => result.split(secret).join('[REDACTED]'), text);
   const log = (text: string) => ui.log(`${new Date().toLocaleTimeString()} ${redact(text)}`);
+  // Operators come from setup; whitelisted users and temporary grants live in the state directory.
+  const access = AccessStore.at(config.stateDir, settings.allowedUserIds, config.policy.permissions);
+  const allowed = (id: string) => access.roleOf(id) !== undefined;
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
 
@@ -41,7 +45,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
     const conversation = new Conversation({
-      key, transport, queue, redact, log,
+      key, transport, queue, redact, log, access,
       // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
       once: oneShot,
       request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal },
@@ -53,7 +57,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   };
 
   const handle = async (message: GatewayMessage): Promise<void> => {
-    const target = route(message, settings);
+    const target = route(message, settings, allowed);
     if (!target) return;
     if (!message.content) { await message.transport().send('teapilot reads text messages only.'); return; }
     // A running conversation already holds its earlier turns, so only a new one needs the reply chain.
@@ -66,19 +70,19 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
       key = `thread:${thread.id}`; transport = thread.transport;
     } else transport = message.transport();
     log(`${key} @${message.authorName}: ${message.content.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport)).push(prompt);
+    (await open(key, transport)).push(prompt, { sender: message.authorId });
   };
   const handleCommand = async (command: GatewayCommand): Promise<void> => {
-    const target = route(command, settings);
+    const target = route(command, settings, allowed);
     if (!target) { await command.respond('You are not allowed to use teapilot here.'); return; }
     const conversation = conversations.get(target.key);
     if (!conversation?.active) { await command.respond('No active conversation here. Send a message to start one.'); return; }
     log(`${target.key}: ${command.text}`);
-    conversation.push(command.text);
+    conversation.push(command.text, { sender: command.authorId });
     await command.respond();
   };
   const handleReply = async (reply: GatewayReply): Promise<void> => {
-    const target = routeReply(reply, settings);
+    const target = routeReply(reply, settings, allowed);
     if (!target) { await reply.respond('You are not allowed to use teapilot here.'); return; }
     if (!reply.content) { await reply.respond('teapilot reads text messages only.'); return; }
     let key = target.key;
@@ -96,7 +100,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     } else transport = reply.transport();
     await reply.respond();
     log(`${key} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly });
+    (await open(key, transport, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId });
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   // discord.js loads only here, so every other command starts without it.
@@ -107,7 +111,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     reply: reply => void handleReply(reply).catch(failed('Reply handling')),
   }, log);
 
-  log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} allowed user(s) in DMs${settings.channelId ? ` and channel ${settings.channelId}` : ''}.`);
+  log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} operator(s) and ${access.list().users.length} user(s) in DMs${settings.channelId ? ` and channel ${settings.channelId}` : ''}.`);
   log(`Repository root: ${root}. Sessions start in ${settings.startMode} mode. Press Ctrl+C to stop.`);
   if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
   log('Stopping: pending approvals are denied.');

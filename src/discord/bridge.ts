@@ -2,6 +2,7 @@ import { runSession } from '../chat.js';
 import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { EventSink } from '../integration/events.js';
+import type { AccessStore } from './access-store.js';
 import { chunk, ProgressLine, throttle } from './render.js';
 
 /** Everything the bridge needs from Discord for one conversation (a DM or a thread). */
@@ -38,6 +39,8 @@ export interface ConversationOptions {
   redact: (text: string) => string;
   /** Operator log in the terminal running teapilot discord start. */
   log: (text: string) => void;
+  /** Resolves each message's sender to a role, per-turn permissions and the access-management tools. */
+  access?: AccessStore;
   /** Answer one message and end, for transports that cannot receive follow-ups. */
   once?: boolean;
   approvalTimeoutMs?: number;
@@ -48,7 +51,9 @@ const discordHelp = 'Discord: /stop cancels the running turn; /exit ends this co
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
-  private readonly inbox: string[] = [];
+  private readonly inbox: Array<{ text: string; sender?: string }> = [];
+  /** Who sent the message the current turn is answering; a thread can have several people. */
+  private speaker?: string;
   private waiting?: { resolve(text: string): void; reject(error: Error): void };
   private turn?: AbortController;
   private sink?: EventSink;
@@ -60,8 +65,8 @@ export class Conversation {
     this.done = this.start();
   }
 
-  /** Deliver a message from an allowlisted person. Local commands take effect immediately. */
-  push(text: string, options: { answerOnly?: boolean } = {}): void {
+  /** Deliver a message from an allowed person. Local commands take effect immediately. */
+  push(text: string, options: { answerOnly?: boolean; sender?: string } = {}): void {
     // Only the next turn is answer-only, and only if nothing is running to change mid-turn.
     if (options.answerOnly && !this.turn) this.answerOnly = true;
     const trimmed = text.trim();
@@ -74,8 +79,8 @@ export class Conversation {
     if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.', true); return; }
     if (command === '/help') void this.say(discordHelp, true);
     if (this.turn && !['/exit', '/quit'].includes(command ?? '')) void this.say('Queued as your next message.', true);
-    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; waiting.resolve(text); }
-    else this.inbox.push(text);
+    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; waiting.resolve(text); }
+    else this.inbox.push({ text, sender: options.sender });
   }
 
   get active(): boolean { return !this.ended; }
@@ -88,7 +93,7 @@ export class Conversation {
 
   private input = (): Promise<string> => {
     const next = this.inbox.shift();
-    if (next !== undefined) return Promise.resolve(next);
+    if (next) { this.speaker = next.sender; return Promise.resolve(next.text); }
     const signal = this.options.request.signal;
     return new Promise((resolve, reject) => {
       const closed = () => reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' }));
@@ -113,7 +118,13 @@ export class Conversation {
 
   private onEvent: EventSink = event => this.sink?.(event);
 
-  private run = async (request: HostRequest): Promise<HostResult> => {
+  private run = async (base: HostRequest): Promise<HostResult> => {
+    // Bind this turn to its sender before anything can check a permission.
+    const { access } = this.options;
+    const admin = access && this.speaker ? access.adminFor(this.speaker) : undefined;
+    // With roles in force, a turn without a known sender holds nothing.
+    base.authorization?.setCaller(access ? this.speaker ? access.callerFor(this.speaker) : () => ({ permissions: [] }) : undefined);
+    const request: HostRequest = { ...base, access: admin };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
     const progress = new ProgressLine(this.options.redact);

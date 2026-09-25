@@ -13,15 +13,17 @@ export interface IncomingMessage {
   ownThread: boolean;
   mentionsBot: boolean;
 }
-export type Route = { key: string; kind: 'dm' | 'thread' | 'new-thread' };
+/** Whether a person may use teapilot at all: an operator, or a whitelisted user. Defaults to the operator list. */
+export type Allowed = (authorId: string) => boolean;
+export type Route ={ key: string; kind: 'dm' | 'thread' | 'new-thread' };
 
 /**
  * Fail closed: only allowlisted people, only in DMs, a thread teapilot opened (threads exist only
  * because an allowlisted person invoked teapilot), or an @mention in the configured channel.
  * Everything else is ignored silently.
  */
-export function route(message: IncomingMessage, settings: Pick<DiscordSettings, 'allowedUserIds' | 'channelId'>): Route | undefined {
-  if (message.authorIsBot || !settings.allowedUserIds.includes(message.authorId)) return undefined;
+export function route(message: IncomingMessage, settings: Pick<DiscordSettings, 'allowedUserIds' | 'channelId'>, allowed: Allowed = id => settings.allowedUserIds.includes(id)): Route | undefined {
+  if (message.authorIsBot || !allowed(message.authorId)) return undefined;
   if (!message.guildId) return { key: `dm:${message.channelId}`, kind: 'dm' };
   if (message.ownThread) return { key: `thread:${message.channelId}`, kind: 'thread' };
   if (!settings.channelId) return undefined;
@@ -30,8 +32,8 @@ export function route(message: IncomingMessage, settings: Pick<DiscordSettings, 
 }
 
 /** An explicit /reply or Reply menu invocation may start a thread in any channel the bot can post in. */
-export function routeReply(message: IncomingMessage, settings: Pick<DiscordSettings, 'allowedUserIds'>): Route | undefined {
-  if (message.authorIsBot || !settings.allowedUserIds.includes(message.authorId)) return undefined;
+export function routeReply(message: IncomingMessage, settings: Pick<DiscordSettings, 'allowedUserIds'>, allowed: Allowed = id => settings.allowedUserIds.includes(id)): Route | undefined {
+  if (message.authorIsBot || !allowed(message.authorId)) return undefined;
   if (!message.guildId) return { key: `dm:${message.channelId}`, kind: 'dm' };
   return message.ownThread ? { key: `thread:${message.channelId}`, kind: 'thread' } : { key: '', kind: 'new-thread' };
 }

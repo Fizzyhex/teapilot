@@ -39,9 +39,18 @@ export async function singleRepository(root: string): Promise<boolean> {
   return (await Promise.all(children.map(entry => hasGit(join(root, entry.name))))).filter(Boolean).length < 2;
 }
 
+/** Who is acting on a shared session right now. Re-evaluated on every check, so a lapsed grant takes effect mid-turn. */
+export interface Caller {
+  /** Everything this person may hold, within the policy ceiling; anything else is refused without a prompt. */
+  permissions: readonly Permission[];
+  /** Permissions in `permissions` that need no approval click. */
+  preapproved?: readonly Permission[];
+}
+
 /** Host-owned, in-memory authority. Never deserialize this object from model/client input. */
 export class SessionGrants {
   private granted = new Set<Permission>();
+  private caller?: () => Caller;
   private constructor(private current: string, private readonly ceiling: readonly Permission[]) {}
   get root(): string { return this.current; }
   /** Code mode grants write and shell up front only in a single repository; elsewhere they are requested on first need. */
@@ -54,16 +63,28 @@ export class SessionGrants {
     if (!state.granted.has('repository.read')) for (const permission of repositoryPermissions) state.granted.delete(permission);
     return state;
   }
-  list(): Permission[] { return permissions.filter(permission => this.granted.has(permission)); }
-  available(): Permission[] { return [...this.ceiling]; }
-  allows(permission: Permission): boolean { return this.granted.has(permission) && this.ceiling.includes(permission); }
+  /** Narrow this session to whoever is speaking. Sessions without a caller are limited only by the policy ceiling. */
+  setCaller(caller?: () => Caller): void { this.caller = caller; }
+  list(): Permission[] { return permissions.filter(permission => this.allows(permission)); }
+  available(): Permission[] {
+    const caller = this.caller?.();
+    return caller ? this.ceiling.filter(permission => caller.permissions.includes(permission)) : [...this.ceiling];
+  }
+  allows(permission: Permission): boolean { return this.granted.has(permission) && this.available().includes(permission); }
   async request(requested: Permission[], reason: string, approve: Approve, signal?: AbortSignal,
     emit?: (type: string, fields: Record<string, unknown>) => Promise<void>): Promise<boolean> {
     signal?.throwIfAborted();
     const needed = withPrerequisites(requested);
-    if (needed.some(permission => !this.ceiling.includes(permission))) return false;
+    const available = this.available();
+    if (needed.some(permission => !available.includes(permission))) return false;
     const missing = needed.filter(permission => !this.allows(permission));
     if (!missing.length) return true;
+    const preapproved = this.caller?.().preapproved ?? [];
+    if (missing.every(permission => preapproved.includes(permission))) {
+      for (const permission of missing) this.granted.add(permission);
+      await emit?.('grant_granted', { permissions: missing, cwd: this.root });
+      return true;
+    }
     await emit?.('grant_requested', { permissions: missing, cwd: this.root });
     const approved = await approve({ kind: 'capability', permissions: missing, cwd: this.root, duration: 'session',
       summary: `Allow ${missing.join(', ')} for this session?`,
