@@ -4,13 +4,13 @@ import { mkdtemp, open, rm, statfs } from 'node:fs/promises';
 import { homedir, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { exists } from '../config.js';
+import { exists, physicalModels, type PhysicalModel } from '../config.js';
 import { chooseMany, type SetupUI } from './terminal.js';
 
 export const ollamaURL = 'http://127.0.0.1:11434';
 export const presets = [
-  { label: 'Fast - Qwen3.5-9B Heretic Q4_K_M', id: 'hf.co/mradermacher/Qwen3.5-9B-heretic-GGUF:Q4_K_M', bytes: 6_600_000_000, memoryGiB: 12, context: 8192 },
-  { label: 'Capable - Qwen3.8-27B Heretic Q4_K_M', id: 'hf.co/DevJac/Qwen3.8-27B-heretic:Q4_K_M', bytes: 18_000_000_000, memoryGiB: 24, context: 32768 },
+  { label: 'Fast - Qwen3.5-9B Heretic Q4_K_M', id: 'hf.co/mradermacher/Qwen3.5-9B-heretic-GGUF:Q4_K_M', bytes: 6_600_000_000, memoryGiB: 12, context: 8192, role: 'fast' as PhysicalModel },
+  { label: 'Capable - Qwen3.8-27B Heretic Q4_K_M', id: 'hf.co/DevJac/Qwen3.8-27B-heretic:Q4_K_M', bytes: 18_000_000_000, memoryGiB: 24, context: 32768, role: 'capable' as PhysicalModel },
 ];
 export interface OllamaModel { name: string; size: number; remote_model?: string }
 
@@ -139,7 +139,11 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
   });
 }
 
-export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<{ id: string; source: string; context: number; tools: boolean }> {
+export interface PreparedModel { id: string; source: string; context: number; tools: boolean; roles: PhysicalModel[] }
+const roleChoices: PhysicalModel[][] = [['capable'], ['fast'], ['fast', 'capable']];
+const roleLabel = (roles: PhysicalModel[]) => roles.length > 1 ? 'Both fast and capable' : roles[0] === 'fast' ? 'Fast (quick answers)' : 'Capable (coding and harder work)';
+
+export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<PreparedModel[]> {
   const memory = totalmem() / 2 ** 30;
   ui.log(`System memory: ${memory.toFixed(1)} GiB. CPU inference is supported but can be slow.`);
   try { ui.log(`GPU: ${await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]))}`); }
@@ -150,14 +154,22 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   const suggested = 0;
   ui.log(`Suggested: ${presets[suggested]!.id} is the default; system RAM, GPU memory and context affect fit. Coding is verified after preparation.`);
   const selections = await chooseMany(ui, 'Local models to install (queued in selection order)', choices, suggested);
-  const queue: Array<{ id: string; preset: typeof presets[number] | undefined }> = [];
+  const queue: Array<{ id: string; preset: typeof presets[number] | undefined; roles: PhysicalModel[] }> = [];
   for (const choice of selections) {
     const preset = presets[choice];
     const id = preset?.id ?? visible[choice - presets.length]?.name ?? await ui.input('Local Ollama model name');
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(id) || id.includes('cloud')) throw new Error('Enter a local Ollama model name; cloud models are not a fully local setup.');
-    if (!queue.some(item => item.id === id)) queue.push({ id, preset });
+    if (queue.some(item => item.id === id)) continue;
+    // Presets carry their role; other models are asked, so routing knows what it can use.
+    const roles = preset ? [preset.role] : roleChoices[await ui.choose(`Role for ${id}`, roleChoices.map(roleLabel), 0)]!;
+    queue.push({ id, preset, roles });
   }
-  ui.log(`Install queue: ${queue.map(item => item.id).join(' -> ')}`);
+  for (const role of physicalModels) {
+    const claimed = queue.filter(item => item.roles.includes(role));
+    if (claimed.length > 1) throw new Error(`${claimed.map(item => item.id).join(' and ')} are both assigned the ${role} role. Rerun setup and give each role one model.`);
+  }
+  if (!queue.some(item => item.roles.includes('capable'))) ui.log('No capable model selected: coding stays disabled and only fast-tier answers are available.');
+  ui.log(`Install queue: ${queue.map(item => `${item.id} (${item.roles.join(' + ')})`).join(' -> ')}`);
   const planned = [];
   let reservedBytes = 0;
   for (const item of queue) {
@@ -170,11 +182,9 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   for (const [index, item] of planned.entries()) {
     signal.throwIfAborted();
     ui.log(`Model ${index + 1}/${queue.length}: ${item.id}`);
-    prepared.push(await prepareOllamaModel(ui, signal, item.id, item.context, installed, base, verbose));
+    prepared.push({ ...await prepareOllamaModel(ui, signal, item.id, item.context, installed, base, verbose), roles: item.roles });
   }
-  if (prepared.length === 1) return prepared[0]!;
-  ui.log('All queued models are installed. Choose the active execution model; the others remain available for future setup.');
-  return prepared[await ui.choose('Active execution model', prepared.map(model => model.source), Math.max(0, prepared.findIndex(model => model.source === presets[0]!.id)))]!;
+  return prepared;
 }
 
 async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof presets[number] | undefined, installed: OllamaModel[], memory: number, reservedBytes: number): Promise<number> {
@@ -211,7 +221,7 @@ export function ollamaAlias(id: string): string {
 // The second pattern matches hashed aliases created by earlier versions.
 const isTeapilotAlias = (name: string) => name.startsWith('teapilot/') || /^teapilot-[a-f0-9]{10}(-[0-9]+)?:latest$/.test(name);
 
-async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, context: number, installed: OllamaModel[], base: string, verbose: boolean): Promise<{ id: string; source: string; context: number; tools: boolean }> {
+async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, context: number, installed: OllamaModel[], base: string, verbose: boolean): Promise<Omit<PreparedModel, 'roles'>> {
   if (!installed.some(model => model.name === id)) {
     for (;;) {
       try { await during(ui, `Downloading ${id}...`, () => streamOperation('/api/pull', { model: id, stream: true }, signal, ui.log, base, verbose)); break; }

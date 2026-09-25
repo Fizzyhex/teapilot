@@ -36,16 +36,27 @@ function ollama(installed: string[] = [], failFirstPull = false, loadError?: str
   return operations;
 }
 
-it('downloads and prepares queued models sequentially, retries in place and selects an active model', async () => {
+it('downloads and prepares queued models sequentially, retries in place and assigns preset roles', async () => {
   const operations = ollama([], true);
   const prompts = ui(['1, 2, 1']);
-  prompts.choose = vi.fn(async () => 1);
-  const model = await selectOllamaModel(prompts, new AbortController().signal);
+  const models = await selectOllamaModel(prompts, new AbortController().signal);
   expect(operations.filter(op => op.path === '/api/pull').map(op => op.model)).toEqual([presets[0]!.id, presets[0]!.id, presets[1]!.id]);
   expect(operations.map(op => op.path)).toEqual(['/api/tags', '/api/pull', '/api/pull', '/api/show', '/api/create', '/api/generate', '/api/pull', '/api/show', '/api/create', '/api/generate']);
-  expect(model.source).toBe(presets[1]!.id);
-  expect(model.context).toBe(32768);
-  expect(prompts.choose).toHaveBeenCalledWith('Active execution model', [presets[0]!.id, presets[1]!.id], 0);
+  expect(models.map(model => [model.source, model.roles])).toEqual([[presets[0]!.id, ['fast']], [presets[1]!.id, ['capable']]]);
+  expect(models[1]!.context).toBe(32768);
+  expect(prompts.choose).not.toHaveBeenCalled();
+});
+
+it('asks for the role of a non-preset model and rejects two models claiming one role', async () => {
+  ollama(['custom:1b', presets[1]!.id]);
+  const prompts = ui(['3, 2']);
+  prompts.choose = vi.fn(async () => 0);
+  await expect(selectOllamaModel(prompts, new AbortController().signal)).rejects.toThrow(/both assigned the capable role/);
+  expect(prompts.choose).toHaveBeenCalledWith('Role for custom:1b', ['Capable (coding and harder work)', 'Fast (quick answers)', 'Both fast and capable'], 0);
+  const fastPrompts = ui(['3, 2']);
+  fastPrompts.choose = vi.fn(async () => 1);
+  const models = await selectOllamaModel(fastPrompts, new AbortController().signal);
+  expect(models.map(model => [model.source, model.roles])).toEqual([['custom:1b', ['fast']], [presets[1]!.id, ['capable']]]);
 });
 
 it('reuses the fast model and pulls the capable preset without a conversion prompt', async () => {

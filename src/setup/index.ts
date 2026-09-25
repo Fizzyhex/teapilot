@@ -3,12 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
-import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config, type Tier } from '../config.js';
-import { modelFor, profileFor } from '../routing/execution.js';
+import { configDirectory, exists, loadConfig, modelsSchema, physicalModels, policySchema, userConfigDir, type Config, type PhysicalModel, type Tier } from '../config.js';
 import { liveCheck, modelStatus, routingCheck, endpointHint, type LiveReport } from '../diagnostics.js';
 import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js';
 import type { SetupUI } from './terminal.js';
 import { configureSearch } from './search.js';
+
+// The tier each physical model is verified through during setup.
+const roleTier: Record<PhysicalModel, Tier> = { fast: 'fast', capable: 'normal' };
 
 export interface SetupOptions { directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number; verbose?: boolean }
 export interface CredentialStorage {
@@ -124,12 +126,11 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   const before = { execution: Object.values(config.models).filter(model => model.enabled).map(model => model.id).join(', '), routing: config.routingMode, search: config.searchUrl ?? 'Disabled' };
   ui.log('Model downloads and verification happen before the final settings review.');
   const choice = options.nonInteractive ? 1 : await ui.choose('Execution model', ['Local Ollama (execution runs locally; no execution API charges)', 'Existing OpenAI-compatible local endpoint']);
-  const tier: Tier = choice === 0 ? 'fast' : 'normal';
-  const previousModel = { ...modelFor(config, tier) };
+  const previousModels = structuredClone(config.models);
   let displayModel: string | undefined;
-  // A new profile enables precisely one execution tier, never a silent paid fallback.
+  // Only models assigned a role during this setup are enabled, never a silent paid fallback.
   for (const model of Object.values(config.models)) model.enabled = false;
-  config.models[profileFor(tier).model].enabled = true;
+  let roles: PhysicalModel[] = ['capable'];
   if (!hasConfiguration) config.routingMode = 'direct';
   let env: Record<string, string> = { ...savedEnv };
   if (process.env.TEAPILOT_STATE_DIR) env.TEAPILOT_STATE_DIR = config.stateDir.replace(/\\/g, '/');
@@ -155,13 +156,16 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   }
   if (choice === 0) {
     await during(ui, 'Preparing Ollama...', () => ensureOllama(ui, signal));
-    const model = await during(ui, 'Inspecting local models...', () => selectOllamaModel(ui, signal, undefined, options.verbose));
-    displayModel = model.source;
-    Object.assign(modelFor(config, tier), { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
+    const prepared = await during(ui, 'Inspecting local models...', () => selectOllamaModel(ui, signal, undefined, options.verbose));
+    displayModel = prepared.map(model => `${model.source} (${model.roles.join(' + ')})`).join(', ');
+    roles = physicalModels.filter(role => prepared.some(model => model.roles.includes(role)));
+    for (const model of prepared) for (const role of model.roles) {
+      Object.assign(config.models[role], { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
+    }
     delete env.LOCAL_API_KEY;
     config.policy.limits.requestTimeoutMs = 120000;
   } else {
-    const model = modelFor(config, tier);
+    const model = config.models.capable;
     model.baseUrl = options.endpoint ?? await ui.input('API base URL including /v1', 'http://127.0.0.1:8080/v1');
     model.id = options.model ?? await ui.input('Exact model ID');
     model.contextTokens = options.contextTokens ?? await numberInput(ui, 'Actual server context tokens', 16384, 8192);
@@ -174,24 +178,35 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   }
   config.secrets = Object.fromEntries((['fast', 'capable'] as const).map(name => [name, env[config.models[name].apiKeyEnv] || undefined])) as Config['secrets'];
   modelsSchema.parse(config.models); policySchema.parse(config.policy);
-  const status = await during(ui, 'Checking model endpoint...', () => modelStatus(config, tier, signal));
-  let report: LiveReport | undefined;
-  if (status) { ui.log(`Endpoint ${modelFor(config, tier).baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
-  else if (await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
-    report = await during(ui, 'Verifying answers and coding...', () => liveCheck(config, tier, signal, ui.log));
+  for (const role of roles) config.models[role].enabled = true;
+  const reports = new Map<PhysicalModel, LiveReport | undefined>();
+  let runLive: boolean | undefined;
+  for (const role of roles) {
+    const tier = roleTier[role];
+    const label = roles.length > 1 ? `[${role}] ` : '';
+    const status = await during(ui, `Checking ${role} model endpoint...`, () => modelStatus(config, tier, signal));
+    let report: LiveReport | undefined;
+    if (status) { ui.log(`${label}Endpoint ${config.models[role].baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
+    else if (runLive ??= await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
+      report = await during(ui, `Verifying ${role} answers and coding...`, () => liveCheck(config, tier, signal, ui.log));
+    }
+    // Failed or skipped coding validation never advertises a ready coding path.
+    config.models[role].toolCalling = Boolean(report?.tools);
+    config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
+    if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
+    ui.log(`${label}${report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.'}`);
+    reports.set(role, report);
   }
-  // Failed or skipped coding validation never advertises a ready coding path.
-  modelFor(config, tier).toolCalling = Boolean(report?.tools);
-  config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
-  if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
-  ui.log(report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.');
+  const report = reports.get('capable') ?? reports.get('fast');
   const routingReady = config.routingMode === 'direct' || await during(ui, 'Verifying hosted routing...', () => routingCheck(config, ui.confirm, ui.log, signal));
   const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, directory, ui, signal);
-  const selected = modelFor(config, tier);
+  const execution = roles.map(role => config.models[role].id).join(', ');
   ui.log('\nReady to save');
-  ui.log(`  Execution: ${displayModel ?? selected.id}${hasConfiguration && before.execution !== selected.id ? ` (was ${before.execution})` : ''}`);
-  ui.log(`  Endpoint:  ${selected.baseUrl}${hasConfiguration && previousModel.baseUrl !== selected.baseUrl ? ` (was ${previousModel.baseUrl})` : ''}`);
-  ui.log(`  Context:   ${selected.contextTokens.toLocaleString('en-US')} tokens${hasConfiguration && previousModel.contextTokens !== selected.contextTokens ? ` (was ${previousModel.contextTokens.toLocaleString('en-US')})` : ''}`);
+  ui.log(`  Execution: ${displayModel ?? execution}${hasConfiguration && before.execution !== execution ? ` (was ${before.execution})` : ''}`);
+  for (const role of roles) {
+    const selected = config.models[role]; const previous = previousModels[role];
+    ui.log(`  ${role[0]!.toUpperCase()}${role.slice(1)}: ${selected.baseUrl}${hasConfiguration && previous.baseUrl !== selected.baseUrl ? ` (was ${previous.baseUrl})` : ''} · ${selected.contextTokens.toLocaleString('en-US')} tokens${hasConfiguration && previous.contextTokens !== selected.contextTokens ? ` (was ${previous.contextTokens.toLocaleString('en-US')})` : ''}`);
+  }
   ui.log(`  Budgets:   $${config.policy.budget.requestUsd}/request · $${config.policy.budget.dailyUsd}/UTC day`);
   ui.log(`  Routing:   ${config.routingMode}${config.routingMode === 'hosted' ? ' · may incur charges' : ''}${hasConfiguration ? ` (was ${before.routing})` : ''}`);
   ui.log(`  Search:    ${searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);
