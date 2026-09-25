@@ -73,6 +73,12 @@ it('coalesces frequent progress updates and delivers the latest on flush', async
 
 it('quotes a selected message after the reply chain it answers, oldest first', () => {
   expect(quoteMessage({ author: 'bob', text: 'why?' })).toBe('Message from @bob:\nwhy?');
-  expect(quoteMessage({ author: 'bob', text: 'why?' }, [{ author: 'alice', text: 'ship it' }, { author: 'carol', text: '' }]))
+  expect(quoteMessage({ author: 'bob', text: 'why?' }, { messages: [{ author: 'alice', text: 'ship it' }, { author: 'carol', text: '' }], truncated: false }))
     .toBe('Reply chain, oldest first:\n@alice: ship it\n\n@carol: (no text)\n\nMessage from @bob:\nwhy?');
+});
+
+it('notes when the reply chain goes back further than could be fetched', () => {
+  const partial = quoteMessage({ author: 'bob', text: 'why?' }, { messages: [{ author: 'alice', text: 'ship it' }], truncated: true });
+  expect(partial).toMatch(/^Reply chain, oldest first:\nNote: .*could fetch.*\n\n@alice: ship it\n\nMessage from @bob:\nwhy\?$/);
+  expect(quoteMessage({ author: 'bob', text: 'why?' }, { messages: [], truncated: true })).toMatch(/^Reply chain, oldest first:\nNote: .*\n\nMessage from @bob:\nwhy\?$/);
 });

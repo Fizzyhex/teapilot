@@ -44,16 +44,20 @@ export function chunk(text: string, limit = MESSAGE_LIMIT): string[] {
 }
 
 export interface QuotedMessage { author: string; text: string }
+/** `messages` are oldest first; `truncated` means the chain goes back further than could be fetched. */
+export interface ReplyChain { messages: QuotedMessage[]; truncated: boolean }
+
+const truncatedNote = 'Note: this reply chain goes back further than teapilot could fetch (it may lack access to the channel, or the chain is too long), so earlier context may be missing.';
 
 /**
  * The selected message as teapilot receives it, attributed because its author may not be the invoker.
- * `chain` holds the messages it replies to, oldest first, so teapilot reads the conversation in order.
+ * The messages it replies to come first, so teapilot reads the conversation in order.
  */
-export function quoteMessage(message: QuotedMessage, chain: QuotedMessage[] = []): string {
+export function quoteMessage(message: QuotedMessage, chain: ReplyChain = { messages: [], truncated: false }): string {
   const selected = `Message from @${message.author}:\n${message.text}`;
-  if (!chain.length) return selected;
-  const earlier = chain.map(({ author, text }) => `@${author}: ${text || '(no text)'}`).join('\n\n');
-  return `Reply chain, oldest first:\n${earlier}\n\n${selected}`;
+  if (!chain.messages.length && !chain.truncated) return selected;
+  const earlier = chain.messages.map(({ author, text }) => `@${author}: ${text || '(no text)'}`);
+  return `Reply chain, oldest first:\n${[...(chain.truncated ? [truncatedNote] : []), ...earlier, selected].join('\n\n')}`;
 }
 
 /** One status message per turn: the running tool, then completed tool lines, newest last. */

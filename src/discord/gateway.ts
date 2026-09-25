@@ -3,7 +3,7 @@ import type { ActionRowBuilder, ButtonBuilder, ChatInputCommandInteraction, Mess
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
 import { commandDefinitions, commandText, interactionLifetimeMs, replyCommand, replyMenu, withoutUserInstall } from './commands.js';
-import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage } from './render.js';
+import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import type { DiscordSettings } from './settings.js';
 
 /** How far the Reply menu follows a message's replies back, and how long it may spend fetching them. */
@@ -11,7 +11,7 @@ const replyChainDepth = 10;
 const replyChainBudgetMs = 1500;
 const replyChainMessageChars = 2000;
 /** The fields teapilot reads from a message in a raw Gateway payload. */
-interface RawMessage { author?: { username?: string }; content?: string }
+interface RawMessage { author?: { username?: string }; content?: string; message_reference?: { type?: number; message_id?: string } }
 
 export interface GatewayMessage extends IncomingMessage {
   /** Message text with the bot mention removed. */
@@ -19,8 +19,8 @@ export interface GatewayMessage extends IncomingMessage {
   authorName: string;
   transport(): DiscordTransport;
   startThread(name: string): Promise<{ id: string; transport: DiscordTransport }>;
-  /** The messages this one replies to, oldest first; fetched on demand, so only routed messages pay for it. */
-  replyChain(): Promise<QuotedMessage[]>;
+  /** The messages this one replies to; fetched on demand, so only routed messages pay for it. */
+  replyChain(): Promise<ReplyChain>;
 }
 /** A slash command from an allowlisted-or-not user; `text` is the equivalent session command. */
 export interface GatewayCommand extends IncomingMessage {
@@ -135,14 +135,15 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
    * interaction unless it is answered within 3 seconds, so the walk stops at a depth and time budget,
    * and at anything it cannot fetch.
    */
-  const replyChain = async (message: Message, selfId: string, repliedTo?: RawMessage): Promise<QuotedMessage[]> => {
-    const chain: QuotedMessage[] = [];
-    const quote = (author: string | undefined, content: string | undefined) => chain.unshift({ author: author ?? 'unknown', text: strip(content ?? '', selfId).slice(0, replyChainMessageChars) });
+  const replyChain = async (message: Message, selfId: string, repliedTo?: RawMessage): Promise<ReplyChain> => {
+    const messages: QuotedMessage[] = [];
+    const quote = (author: string | undefined, content: string | undefined) => messages.unshift({ author: author ?? 'unknown', text: strip(content ?? '', selfId).slice(0, replyChainMessageChars) });
+    const replies = (reference: { type?: number; messageId?: string } | null | undefined) => reference?.type === MessageReferenceType.Default && !!reference.messageId;
     const deadline = Date.now() + replyChainBudgetMs;
     let current = message;
-    while (chain.length < replyChainDepth && current.reference?.type === MessageReferenceType.Default && current.reference.messageId) {
+    while (replies(current.reference)) {
       const left = deadline - Date.now();
-      if (left <= 0) break;
+      if (messages.length >= replyChainDepth || left <= 0) return { messages, truncated: true };
       let timer: ReturnType<typeof setTimeout> | undefined;
       const parent = await Promise.race([
         current.fetchReference(),
@@ -150,13 +151,15 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       ]).catch(() => undefined).finally(() => clearTimeout(timer));
       if (!parent) {
         // Without channel access nothing can be fetched, but Discord sent the first reply with the interaction.
-        if (current === message && repliedTo) quote(repliedTo.author?.username, repliedTo.content);
-        break;
+        if (current !== message || !repliedTo) return { messages, truncated: true };
+        quote(repliedTo.author?.username, repliedTo.content);
+        const reference = repliedTo.message_reference;
+        return { messages, truncated: replies(reference && { type: reference.type ?? MessageReferenceType.Default, messageId: reference.message_id }) };
       }
       quote(parent.author.username, parent.content);
       current = parent;
     }
-    return chain;
+    return { messages, truncated: false };
   };
 
   /** /reply and the Reply context menu: both start or continue a conversation wherever the bot may post. */
@@ -183,7 +186,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     const text = interaction.isChatInputCommand() ? interaction.options.getString('message', true).trim() : strip(target?.content ?? '', self.id);
     const repliedTo = interactionReplies.get(interaction.id);
     interactionReplies.delete(interaction.id);
-    const chain = target && text ? await replyChain(target, self.id, repliedTo) : [];
+    const chain = target && text ? await replyChain(target, self.id, repliedTo) : undefined;
     handlers.reply({
       authorId: interaction.user.id,
       authorIsBot: interaction.user.bot,
