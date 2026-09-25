@@ -38,6 +38,7 @@ it('describes a completed tool call for the progress trail', () => {
   expect(describeTool({ type: 'tool_execution_end', tool: 'powershell', command: 'mkdir x', isError: true })).toBe('shell: mkdir x — failed');
   expect(describeTool({ type: 'tool_execution_end', tool: 'bash', command: 'npm test' })).toBe('shell: npm test');
   expect(describeTool({ type: 'tool_execution_end', tool: 'repo_list' })).toBe('repo_list');
+  expect(describeTool({ type: 'tool_execution_end', tool: 'web_search', isError: true, refused: true })).toBe('web_search — refused');
 });
 it('prints one progress line per finished tool call, plain without colour, none under --json', () => {
   vi.stubEnv('NO_COLOR', undefined);

@@ -114,7 +114,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     const usedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
     const actions: Record<string, string> = {
       approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
-      provider_error: 'Run teapilot doctor --live with this configuration to check the execution model. A very large single reply can also hit the maxOutputTokens limit and be rejected by the server; raise it in the models config.',
+      provider_error: 'Run teapilot doctor --live with this configuration to check the execution model. A very large single reply can also hit the output token cap and be rejected by the server; ask for large files in smaller pieces, or raise maxOutputTokens in the models config.',
       unsupported: 'Check model context and tool support with teapilot doctor --live.',
       context_limit: 'Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
       payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',
@@ -230,14 +230,14 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         // web.search may be auto-approved on its own; the rest of the plan is still asked of the user.
         const web = plan.permissions.filter(permission => permission === 'web.search');
         const rest = plan.permissions.filter(permission => permission !== 'web.search');
-        if (web.length && !await activate(web, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
-        if (rest.length && !await activate(rest, `Access needed for your request: ${prompt}`)) return await finish(false, 'approval_denied', accessFailure!);
+        if (web.length && !await activate(web, 'Planned for your request before starting.')) return await finish(false, 'approval_denied', accessFailure!);
+        if (rest.length && !await activate(rest, 'Planned for your request before starting.')) return await finish(false, 'approval_denied', accessFailure!);
       }
       // Jev can also establish a web.search basis without a confident access plan (or when the plan
       // did not ask for search), so grant it whenever it is usable rather than waiting for a mid-run request.
       if (request.authorization && webAutoBasis.length && !activePermissions.includes('web.search') && config.searchUrl
         && config.policy.permissions.includes('web.search') && modelFor(config, selected.split('.')[1] as Tier).toolCalling) {
-        await activate(['web.search'], `Web search allowed automatically (${webAutoBasis.join(', ')}): ${prompt}`, request.signal, true);
+        await activate(['web.search'], `Web search allowed automatically (${webAutoBasis.join(', ')}).`, request.signal, true);
       }
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
@@ -267,7 +267,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           }
           return activate(required, reason, signal);
         } : undefined,
-        unresolvedChecks: previous?.unresolvedChecks,
+        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled,
         history: conversation.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
           const approved = await dependencies.approve(approval);
@@ -281,6 +281,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
       for (const [path, size] of Object.entries(previous.fileSizes ?? {})) fileSizes.set(path, size);
       shellRan ||= Boolean(previous.shellRan);
+      // A later attempt in the same request gains nothing from searching a dead or exhausted service again.
+      if (previous.searchExhausted) {
+        searchDisabled = true;
+        if (activePermissions.includes('web.search')) activePermissions.splice(activePermissions.indexOf('web.search'), 1);
+      }
       if (accessFailure) return await finish(false, 'approval_denied', incomplete(previous, accessFailure));
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check });
       if (previous.success) return await finish(true, 'completed', previous.text);

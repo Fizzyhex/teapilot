@@ -19,12 +19,21 @@ export class Evidence {
   private inspectionWarning = false;
   // Set once a search repeats after its warning: further searches are refused so the model answers instead.
   searchExhausted = false;
+  // Calls refused before execution (unknown tool, invalid arguments, host refusal) never reach observe().
+  // A streak of them first withdraws tools so the model answers, then stops the attempt.
+  refused = 0;
+  answerNow = false;
   private repeated = new Map<string, number>();
   constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = []) {
     this.unresolvedChecks = new Set(unresolvedChecks);
   }
+  refuse(): void {
+    if (++this.refused < this.thresholds.repeatedToolCalls) return;
+    if (this.answerNow) this.reason = 'ineffective_calls';
+    else { this.answerNow = true; this.refused = 0; }
+  }
   observe(name: string, args: unknown, failed: boolean, result?: string): void {
-    this.warning = undefined;
+    this.warning = undefined; this.refused = 0;
     const data = args as { path?: string; command?: string };
     this.observations.push({ tool: name, failed, detail: (result ?? '').slice(0, 700) });
     this.observations = this.observations.slice(-6);

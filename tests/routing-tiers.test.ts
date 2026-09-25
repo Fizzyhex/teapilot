@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionGrants } from '../src/execution/grants.js';
-import { executionProfiles, directTier, profileAvailable } from '../src/routing/execution.js';
+import { executionProfiles, directTier, effectiveProfile, profileAvailable } from '../src/routing/execution.js';
 import { inferenceSchema, runInference } from '../src/integration/inference.js';
 import { loadConfig } from '../src/config.js';
 import { runHost } from '../src/host.js';
@@ -24,6 +24,15 @@ it('defines the four profiles from two physical models', async () => {
   f.config.models.capable.reasoningEfforts = ['off', 'medium'];
   expect(profileAvailable(f.config, 'reasoning').available).toBe(true);
   expect(profileAvailable(f.config, 'deep')).toMatchObject({ available: false, reason: expect.stringContaining('xhigh') });
+});
+
+it('gives the highest runnable tier on a model its configured limits', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  Object.assign(f.config.models.capable, { contextTokens: 32768, maxOutputTokens: 16384, reasoningEfforts: ['off'] });
+  expect(effectiveProfile(f.config, 'normal')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 16384 });
+  f.config.models.capable.reasoningEfforts = ['off', 'medium'];
+  expect(effectiveProfile(f.config, 'normal')).toMatchObject({ contextTokens: 16384, maxOutputTokens: 4096 });
+  expect(effectiveProfile(f.config, 'reasoning')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 16384 });
 });
 
 it('selects conservatively and keeps related capable work on 27B', () => {
@@ -206,4 +215,27 @@ it('activates direct-mode repository tools in place without restarting the turn'
   expect(result).toMatchObject({ success: true, attempts: 1, capability: 'ask.normal' });
   expect(await readFile(join(f.cwd, 'granted.txt'), 'utf8')).toBe('approved\n');
   expect(grants.list()).toEqual(['inference', 'repository.read', 'repository.write']);
+});
+
+it('answers a request for already-active access without asking or re-sending instructions', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  const payloads: any[] = [];
+  const server = await mockServer((body, _request, response) => {
+    payloads.push(body);
+    if (payloads.length <= 2) completion(response, { tool: { name: 'request_capabilities', arguments: { permissions: ['repository.read'] } } });
+    else completion(response, { text: 'done' });
+  });
+  cleanups.push(server.close);
+  f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url;
+  const grants = await SessionGrants.create(f.cwd, f.config, 'code');
+  const approvals: string[] = [];
+  const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Look around', mode: 'code', authorization: grants }, {
+    localProbe: async () => true,
+    approve: async approval => { approvals.push(approval.kind); return true; },
+  });
+  expect(result).toMatchObject({ success: true });
+  expect(approvals.filter(kind => kind === 'capability').length).toBeLessThanOrEqual(1);
+  const last = JSON.stringify(payloads.at(-1).messages);
+  expect(last).toContain('Already active: repository.read');
+  expect(last.split('[host notice]').length - 1).toBe(1);
 });

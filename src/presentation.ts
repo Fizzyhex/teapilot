@@ -15,7 +15,7 @@ const paint = (text: string, code: string, enabled: boolean) => enabled ? `\x1b[
 /** One line summarising a completed tool call, for a per-call progress trail. */
 export function describeTool(event: HostEvent): string {
   const tool = String(event.tool ?? '');
-  const suffix = event.isError ? ' — failed' : '';
+  const suffix = event.refused ? ' — refused' : event.isError ? ' — failed' : '';
   const path = typeof event.path === 'string' ? event.path : undefined;
   if ((tool === 'write' || tool === 'edit') && path) {
     const size = typeof event.size === 'number' ? ` (${formatSize(event.size)})` : '';

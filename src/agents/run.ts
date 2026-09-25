@@ -28,6 +28,8 @@ export interface AttemptInput {
   requestCapabilities?: (required: Permission[], reason: string, signal?: AbortSignal) => Promise<boolean>;
   onAgenticWork?: () => void;
   unresolvedChecks?: string[];
+  /** Search already failed or ran dry earlier in this request; this attempt runs without it. */
+  searchUnavailable?: boolean;
 }
 export interface AttemptResult {
   success: boolean; text: string; reason?: EscalationReason;
@@ -36,6 +38,7 @@ export interface AttemptResult {
   changedFiles?: string[]; fileSizes?: Record<string, number>; shellRan?: boolean;
   largestToolResult?: { tool: string; chars: number };
   unresolvedChecks?: string[];
+  searchExhausted?: boolean;
 }
 
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
@@ -62,7 +65,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${inventory.content.filter(part => part.type === 'text').map(part => part.text).join('\n')}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
       await telemetry.event('repository_inventory', { succeeded: true });
     }
-    const setup = ask(effectiveConfig, effectiveConfig.policy.permissions.includes('web.search'), repository);
+    const setup = ask(effectiveConfig, effectiveConfig.policy.permissions.includes('web.search'), repository, input.searchUnavailable);
     if (repository && repositorySetup) {
       // Rebuild declarations after additional grants without rereading instructions
       // or reinventorying. Tool execution still checks the current effective policy.
@@ -104,12 +107,18 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       const allowed = ['repository.read', 'repository.write', 'repository.shell', 'web.search'] as Permission[];
       if (!Array.isArray(requested) || requested.some(value => typeof value !== 'string' || !allowed.includes(value as Permission))) return { content: [{ type: 'text', text: 'Invalid capability request.' }], details: {} };
       const required = withPrerequisites(requested as Permission[]);
-      if (!await input.requestCapabilities!(required, `Additional access requested to complete your current task:\n${input.prompt.split('\nPrevious attempt stopped:')[0]}`, signal)) {
+      // Re-requesting held access must not re-send instructions; that invites a request loop.
+      if (required.every(permission => effectiveConfig.policy.permissions.includes(permission))) {
+        return { content: [{ type: 'text', text: `Already active: ${required.join(', ')}. Nothing more to grant; continue with the tools you have.` }], details: {} };
+      }
+      if (!await input.requestCapabilities!(required, 'Teapilot asked for this mid-task to continue your current request.', signal)) {
         capabilityDenied = true;
         return { content: [{ type: 'text', text: 'Required access was not granted. This turn stops; no dependent tools will execute.' }], details: {} };
       }
       // The host owns the active set, including explicit search-unavailable
       // continuation. A successful callback must not bypass that decision.
+      const missing = required.filter(permission => !effectiveConfig.policy.permissions.includes(permission));
+      if (missing.length) return { content: [{ type: 'text', text: `Unavailable for this request: ${missing.join(', ')}. Continue without it, clearly stating any gaps.` }], details: {} };
       toolsChanged = true;
       return { content: [{ type: 'text', text: `Active access: ${effectiveConfig.policy.permissions.join(', ')}. Continue with the tools provided on the next turn.` }], details: {} };
     },
@@ -125,6 +134,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // Populated in afterToolCall (which has args) and consumed once by the matching
   // tool_execution_end event below (which only carries the result).
   const toolDetails = new Map<string, { path?: string; size?: number; command?: string }>();
+  // Calls that ran, or that the host stopped; any other finished call was refused before execution.
+  const settled = new Map<string, 'ran' | 'stopped'>();
   const agent = new Agent({
     initialState: { model: piModel(model, profile), systemPrompt: setup.systemPrompt, tools: setup.tools, thinkingLevel: profile.thinking, messages: history },
     streamFn: (...args) => {
@@ -133,6 +144,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     toolExecution: 'sequential',
     prepareNextTurnWithContext: async ({ context }) => {
+      if (evidence.answerNow && context.tools?.length) {
+        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: '[host notice] Those calls could not run, so tools are withdrawn for this attempt. Answer now from what you already have, clearly stating any gaps.', timestamp: Date.now() }] };
+      }
       // Once search is exhausted or down, take the tool away: a refusal message alone does not stop a model retrying it.
       const withoutSearch = <T extends { name: string }>(tools: T[]) => evidence.searchExhausted ? tools.filter(tool => tool.name !== 'web_search') : tools;
       if (!toolsChanged) return evidence.searchExhausted && context.tools?.some(tool => tool.name === 'web_search') ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
@@ -141,12 +155,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[host notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
     },
     beforeToolCall: async ({ toolCall }) => {
-      if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) return { block: true, terminate: true, reason: 'Attempt stopped' };
+      if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) { settled.set(toolCall.id, 'stopped'); return { block: true, terminate: true, reason: 'Attempt stopped' }; }
       if (evidence.searchExhausted && toolCall.name === 'web_search') return { block: true, reason: 'Search refused: search is unavailable or repeated searches found no new evidence. Continue without it, clearly stating any gaps.' };
-      if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
+      if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
       return undefined;
     },
     afterToolCall: async ({ toolCall, args, isError, result }) => {
+      settled.set(toolCall.id, 'ran');
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
       evidence.observe(toolCall.name, args, isError, result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
@@ -181,8 +196,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       input.onEvent?.({ type: 'message_end' });
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
       if (event.type === 'tool_execution_start') input.onActivity?.({ kind: 'waiting', label: `Running ${event.toolName}...` });
-      let detail: { path?: string; size?: number; command?: string } | undefined;
-      if (event.type === 'tool_execution_end') { detail = toolDetails.get(event.toolCallId); toolDetails.delete(event.toolCallId); }
+      let detail: { path?: string; size?: number; command?: string; refused?: boolean } | undefined;
+      if (event.type === 'tool_execution_end') {
+        const state = settled.get(event.toolCallId); settled.delete(event.toolCallId);
+        if (!state) evidence.refuse();
+        detail = { ...toolDetails.get(event.toolCallId), ...(state !== 'ran' ? { refused: true } : {}) }; toolDetails.delete(event.toolCallId);
+      }
       input.onEvent?.({ type: event.type, tool: event.toolName, ...('isError' in event ? { isError: event.isError } : {}), ...detail });
     }
   });
@@ -218,6 +237,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     fileSizes,
     largestToolResult: evidence.largestResult,
     unresolvedChecks: [...evidence.unresolvedChecks],
+    searchExhausted: evidence.searchExhausted || searchFailed,
     shellRan: policy.shellRan,
     handoff: telemetry.redact(handoff),
     reason: stopped === 'approval_denied' ? undefined : reason,

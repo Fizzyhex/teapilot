@@ -41,6 +41,41 @@ it('a search outage during execution cannot produce a successful unverified answ
   expect(result.text).toContain('Check the search service');
 });
 
+const downSearch = async (model: (body: any) => Parameters<typeof completion>[1]) => {
+  const f = await fixture(); cleanup.push(f.cleanup);
+  const bodies: any[] = []; let searches = 0;
+  const server = await mockServer((body, req, res) => {
+    if (req.url?.startsWith('/search?')) { if (req.url.includes('otto')) searches++; res.end('{"results":[],"unresponsive_engines":[["brave","Suspended"]]}'); }
+    else if (!body.messages) res.end('{}');
+    else { bodies.push(body); completion(res, model(body)); }
+  }); cleanup.push(server.close);
+  f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url; f.config.searchUrl = server.url;
+  return { f, bodies, searches: () => searches };
+};
+const offersSearch = (body: any) => (body.tools ?? []).some((tool: any) => tool.function.name === 'web_search');
+
+it('withdraws tools after a streak of calls that cannot run, so the model answers', async () => {
+  // The model keeps calling web_search after it was taken away, as small local models do.
+  const { f, bodies, searches } = await downSearch(body => body.tools?.length ? { tool: { name: 'web_search', arguments: { query: 'otto' } } } : { text: 'search is down; here is what i know' });
+  const ends: any[] = [];
+  const result = await runHost(f.config, { cwd: f.cwd, workload: 'ask', web: true, prompt: 'Tell me about otto' }, { approve: async () => true, onEvent: event => { if (event.type === 'tool_execution_end') ends.push(event); } });
+  expect(result).toMatchObject({ success: true, attempts: 1 });
+  expect(searches()).toBe(1);
+  expect(ends.map(event => Boolean(event.refused))).toEqual([false, true, true, true]);
+  expect(bodies).toHaveLength(5);
+  expect(JSON.stringify(bodies.at(-1).messages)).toContain('tools are withdrawn');
+});
+
+it('keeps search off for later attempts once it was unavailable', async () => {
+  const { f, bodies, searches } = await downSearch(body => offersSearch(body) ? { tool: { name: 'web_search', arguments: { query: 'otto' } } } : { tool: { name: 'request_escalation', arguments: { reason: 'uncertainty' } } });
+  f.config.policy.escalation.maxEscalations = 1;
+  await runHost(f.config, { cwd: f.cwd, workload: 'ask', web: true, prompt: 'Tell me about otto' }, { approve: async () => true });
+  expect(searches()).toBe(1);
+  const later = bodies.filter(body => body.messages[0].content.includes('already failed'));
+  expect(later.length).toBeGreaterThan(0);
+  expect(later.some(offersSearch)).toBe(false);
+});
+
 const routed = async (web: Parameters<typeof jev>[4], webConfidence: number, ceiling = true) => {
   const f = await fixture(); cleanup.push(f.cleanup);
   const server = await mockServer((_body, req, res) => {
