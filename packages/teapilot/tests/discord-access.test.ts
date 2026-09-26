@@ -156,6 +156,18 @@ it('offers management tools to operators only, each behind an approval', async (
   expect(access.roleOf(eve)).toBe('user');
 });
 
+it('snaps a rounded user ID to the mention written in the prompt', async () => {
+  const { access } = await store();
+  const approve = vi.fn<Approve>(async () => true);
+  const add = accessTools(access.adminFor(op)!, approve, 'grant <@271788139381653514> access for 12h').find(value => value.name === 'access_add_user')!;
+  await add.execute('1', { userId: '271788139381653500', duration: '12h' }, undefined as never, undefined as never);
+  expect(approve.mock.calls[0]![0].summary).toContain('<@271788139381653514>');
+  expect(access.roleOf('271788139381653514')).toBe('user');
+  const far = await add.execute('2', { userId: '999999999999999999' }, undefined as never, undefined as never);
+  expect(JSON.stringify(far)).toContain('does not match');
+  expect(approve).toHaveBeenCalledTimes(1);
+});
+
 it('lets a user request access, which lands only if an operator approves', async () => {
   const { access } = await store();
   access.addUser(bob, op);

@@ -20,14 +20,26 @@ export interface AccessAdmin {
 const text = (value: string) => ({ content: [{ type: 'text' as const, text: value }], details: {} });
 const grantable = permissions.filter(permission => !['inference', 'web.search'].includes(permission));
 const permissionSchema = Type.Union(grantable.map(permission => Type.Literal(permission)));
-const idSchema = Type.String({ description: 'Discord user ID (17–20 digits), e.g. from a <@id> mention.' });
+const idSchema = Type.String({ description: 'Discord user ID (17–20 digits) copied character for character from a <@id> mention in the message. Always a string; never round or retype it.' });
 
 /**
  * Natural-language access management. Operators get management tools; everyone else may only ask.
  * Every change needs an approval click, and only operators can click, so text in a quoted message or
  * tool result cannot change access on its own. Roles are checked here, not by the model.
  */
-export function accessTools(access: AccessAdmin, approve: Approve): AgentTool[] {
+export function accessTools(access: AccessAdmin, approve: Approve, prompt = ''): AgentTool[] {
+  const known = [...new Set(prompt.match(/\d{17,20}/g) ?? [])];
+  /** Models emit long IDs as rounded numbers (…653500 for …653514); snap to the ID actually written in the message. */
+  const resolveId = (value: unknown): string => {
+    const id = String(value).trim().replace(/^<@!?(\d+)>$/, '$1');
+    if (known.length === 0 || known.includes(id)) return id;
+    if (!/^\d+$/.test(id)) throw new Error(`"${String(value)}" is not a Discord user ID. IDs in the message: ${known.join(', ')}.`);
+    const distance = (other: string) => { const gap = BigInt(other) - BigInt(id); return gap < 0n ? -gap : gap; };
+    const ranked = known.map(other => ({ other, gap: distance(other) })).sort((a, b) => (a.gap < b.gap ? -1 : a.gap > b.gap ? 1 : 0));
+    const [best, next] = ranked;
+    if (best!.gap > 1_000_000n || (next && next.gap === best!.gap)) throw new Error(`User ID ${id} does not match any ID in the message (${known.join(', ')}). Retry with the exact ID.`);
+    return best!.other;
+  };
   const confirm = (summary: string, details: string, signal?: AbortSignal) => approve({ kind: 'access', summary, details, signal });
   const guard = async (run: () => Promise<string> | string) => { try { return text(await run()); } catch (error) { return text(error instanceof Error ? error.message : String(error)); } };
 
@@ -66,7 +78,7 @@ export function accessTools(access: AccessAdmin, approve: Approve): AgentTool[] 
       description: 'Whitelist a Discord user so they can use teapilot with inference and web search. Use when an operator asks to let someone in. Give a duration when they should only have temporary access; without one the access is permanent. Calling it again for a whitelisted user changes their expiry.',
       parameters: Type.Object({ userId: idSchema, duration: Type.Optional(Type.String({ description: 'e.g. 2h, 1d (max 30d). Omit for permanent access.' })) }),
       execute: async (_id, args, signal) => guard(async () => {
-        const { userId, duration } = args as { userId: string; duration?: string };
+        const { duration } = args as { duration?: string }; const userId = resolveId((args as { userId: unknown }).userId);
         const durationMs = duration === undefined ? undefined : access.parseDuration(duration);
         const name = await access.username?.(userId).catch(() => undefined);
         const label = `<@${userId}>${name ? ` (@${name})` : ''}`;
@@ -80,7 +92,7 @@ export function accessTools(access: AccessAdmin, approve: Approve): AgentTool[] 
       description: 'Remove a whitelisted user and all of their grants. Operators cannot be removed this way.',
       parameters: Type.Object({ userId: idSchema }),
       execute: async (_id, args, signal) => guard(async () => {
-        const { userId } = args as { userId: string };
+        const userId = resolveId((args as { userId: unknown }).userId);
         if (!await confirm(`Remove <@${userId}>?`, 'Their whitelist entry and grants will be deleted.', signal)) return 'An operator did not approve this.';
         return access.removeUser(userId) ? `<@${userId}> was removed.` : `<@${userId}> was not a whitelisted user.`;
       }),
@@ -90,7 +102,7 @@ export function accessTools(access: AccessAdmin, approve: Approve): AgentTool[] 
       description: 'Give a whitelisted user an extra permission, for a limited time or, if no duration is given, until revoked.',
       parameters: Type.Object({ userId: idSchema, permission: permissionSchema, duration: Type.Optional(Type.String({ description: 'e.g. 30m, 2h, 1d (max 30d). Omit for access until revoked.' })) }),
       execute: async (_id, args, signal) => guard(async () => {
-        const { userId, permission, duration } = args as { userId: string; permission: Permission; duration?: string };
+        const { permission, duration } = args as { permission: Permission; duration?: string }; const userId = resolveId((args as { userId: unknown }).userId);
         if (!grantable.includes(permission)) return 'Only repository permissions can be granted; users already have inference and web search.';
         const ms = duration === undefined ? undefined : access.parseDuration(duration);
         if (!await confirm(`Give <@${userId}> ${permission} ${duration ? `for ${duration.trim()}` : 'until revoked'}?`, duration ? 'Access lapses automatically at the expiry time.' : 'Access lasts until an operator revokes it.', signal)) return 'An operator did not approve this.';
@@ -103,7 +115,7 @@ export function accessTools(access: AccessAdmin, approve: Approve): AgentTool[] 
       description: 'End a user’s extra permission grant early: one permission, or all when none is named.',
       parameters: Type.Object({ userId: idSchema, permission: Type.Optional(permissionSchema) }),
       execute: async (_id, args, signal) => guard(async () => {
-        const { userId, permission } = args as { userId: string; permission?: Permission };
+        const { permission } = args as { permission?: Permission }; const userId = resolveId((args as { userId: unknown }).userId);
         if (!await confirm(`Revoke ${permission ?? 'all extra access'} from <@${userId}>?`, 'Takes effect immediately, including mid-conversation.', signal)) return 'An operator did not approve this.';
         return `Revoked ${access.revoke(userId, permission)} grant(s) from <@${userId}>.`;
       }),
