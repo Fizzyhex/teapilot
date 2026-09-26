@@ -57,6 +57,24 @@ it('prints one progress line per finished tool call, plain without colour, none 
   new TerminalPresentation(true, true).event({ type: 'tool_execution_end', tool: 'write', path: 'index.html', size: 13312 });
   expect(write).not.toHaveBeenCalled();
 });
+it('paints gossip and logs grey until gossip ends', () => {
+  vi.stubEnv('NO_COLOR', undefined);
+  vi.stubEnv('TERM', 'xterm');
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
+  Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: true });
+  const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  const presentation = new TerminalPresentation(false, true);
+  const written = () => write.mock.calls.map(call => String(call[0])).join('');
+  const view = presentation.gossip();
+  view.line('gossip · teapilot:pip', 'header'); view.line('it went fine', 'thought'); view.line('teapilot:pip → #ysk: hi', 'post'); view.line('gossip paused'); presentation.log('Teachat on.');
+  const grey = written().split('\n').filter(Boolean);
+  expect(grey.map(strip)).toEqual(['gossip · teapilot:pip', 'it went fine', 'teapilot:pip → #ysk: hi', 'gossip paused', 'Teachat on.']);
+  for (const line of grey) expect(line).toMatch(/^\x1b\[(\d;)?38;2;139;148;158m/);
+  write.mockClear();
+  view.end();
+  presentation.log('Teachat off.');
+  expect(written()).toBe('\x1b[32mTeachat off.\x1b[0m\n');
+});
 it('clears activity for approvals and cancellation and honours no-motion and JSON', () => {
   vi.useFakeTimers();
   vi.stubEnv('TERM', 'xterm');
