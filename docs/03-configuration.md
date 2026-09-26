@@ -57,8 +57,8 @@ Normal, Reasoning, and Deep share one model identity. Related agentic work stays
 Copy the examples for personal overrides:
 
 ```sh
-cp config/models.example.json config/models.json
-cp config/policy.example.json config/policy.json
+cp packages/teapilot/config/models.example.json packages/teapilot/config/models.json
+cp packages/teapilot/config/policy.example.json packages/teapilot/config/policy.json
 ```
 
 On PowerShell, use `Copy-Item`. Set `TEAPILOT_MODELS_FILE` and `TEAPILOT_POLICY_FILE` in `.env`.

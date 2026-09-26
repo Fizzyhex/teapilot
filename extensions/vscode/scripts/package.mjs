@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const extension = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const root = resolve(extension, '../..');
+const teapilot = join(root, 'packages', 'teapilot');
 const temporary = mkdtempSync(join(tmpdir(), 'teapilot-vsix-'));
 const npm = process.env.npm_execpath;
 if (!npm) throw new Error('Run through npm run package');
@@ -24,7 +25,8 @@ function pruneRuntime(directory) {
   }
 }
 try {
-  runNpm(['pack', '--pack-destination', temporary], root);
+  runNpm(['run', 'build'], teapilot);
+  execFileSync(process.execPath, [join(teapilot, 'scripts', 'pack.mjs'), '--pack-destination', temporary], { cwd: teapilot, stdio: 'inherit', windowsHide: true });
   mkdirSync(runtime, { recursive: true });
   writeFileSync(join(runtime, 'package.json'), JSON.stringify({ name: 'teapilot-vscode-runtime', private: true, version: '0.0.0' }));
   const packageFile = readdirSync(temporary).find(name => name.endsWith('.tgz'));

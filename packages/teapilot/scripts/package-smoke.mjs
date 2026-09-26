@@ -56,7 +56,7 @@ const server = createServer(async (request, response) => {
 });
 try {
   console.log('Packing and checking package contents...');
-  const packed = JSON.parse(await run([npm, 'pack', '--json', '--ignore-scripts', '--pack-destination', scratch], root, process.env))[0];
+  const packed = JSON.parse(await run([join(root, 'scripts/pack.mjs'), '--json', '--pack-destination', scratch], root, process.env))[0];
   for (const name of ['typing', 'pawing', 'tea-break']) assert(packed.files.some(file => file.path === `dist/art/ascii-${name}.json`));
   assert(packed.bundled.includes('jevrouter') && packed.bundled.includes('yaml'));
   assert(packed.files.some(file => file.path === 'node_modules/jevrouter/LICENSE'));
