@@ -180,7 +180,15 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (evidence.warning) return { content: [...result.content, { type: 'text' as const, text: evidence.warning }] };
       return undefined;
     },
-    finishTurn: () => capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted ? { action: 'end' } : undefined,
+    finishTurn: ({ toolResults }) => {
+      if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
+      // Tool results should always reach a follow-up model turn. Standards-compliant
+      // backends already schedule that from finish_reason=tool_calls; some compatible
+      // servers emit structured tool calls with finish_reason=stop, so make the
+      // continuation explicit. pi treats an already-scheduled continuation as
+      // satisfying this decision, avoiding a duplicate request.
+      return toolResults.length ? { action: 'continue' } : undefined;
+    },
   });
   const redactor = new StreamRedactor([input.config.router.apiKey ?? '', ...Object.values(input.config.secrets).map(value => value ?? '')]);
   agent.subscribe(event => {
