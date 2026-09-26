@@ -70,7 +70,7 @@ For a built JavaScript checkout:
 
 ```sh
 npm run build
-node dist/cli.js ask "prompt"
+node packages/teapilot/dist/cli.js ask "prompt"
 ```
 
 [Back to README](../README.md)

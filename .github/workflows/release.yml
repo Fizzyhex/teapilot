@@ -23,9 +23,10 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - name: Verify version tag
-        run: node --input-type=module -e "import p from './package.json' with {type:'json'}; if (process.env.GITHUB_REF_NAME !== 'v' + p.version) throw Error('Tag must match package.json version')"
+        run: node --input-type=module -e "import p from './packages/teapilot/package.json' with {type:'json'}; if (process.env.GITHUB_REF_NAME !== 'v' + p.version) throw Error('Tag must match package.json version')"
       - run: npm ci
-      - run: npm pack
+      - run: npm run build
+      - run: node packages/teapilot/scripts/pack.mjs --pack-destination .
       - uses: actions/upload-artifact@v4
         with:
           name: npm-package

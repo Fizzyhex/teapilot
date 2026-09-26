@@ -1,0 +1,62 @@
+{
+  "name": "teapilot",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "bin": {
+    "teapilot": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "config/*.example.json",
+    "README.md",
+    "docs/*.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE"
+  ],
+  "bundleDependencies": [
+    "jevrouter"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fizzyhex/teapilot.git"
+  },
+  "description": "A small JevRouter-controlled personal agent host",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "node --import tsx --conditions=teapilot-source src/cli.ts",
+    "doctor": "npm start -- doctor",
+    "setup": "npm start -- setup",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-art.mjs",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepack": "node scripts/pack.mjs --refuse",
+    "test:package": "node scripts/package-smoke.mjs",
+    "test:ollama": "node scripts/ollama-smoke.mjs",
+    "term": "node scripts/agent-terminal.mjs",
+    "pack": "npm run build && node scripts/pack.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.87.0",
+    "@earendil-works/pi-ai": "0.87.0",
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "discord.js": "14.27.0",
+    "dotenv": "17.3.1",
+    "ignore": "7.0.8",
+    "jevrouter": "git+https://github.com/BillionsBobby/JevRouter.git#f944acb6530621bced023352e2358a63218bf4d9",
+    "ws": "8.21.3",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
+    "@types/node": "^22.19.0",
+    "@types/ws": "8.18.1",
+    "@xterm/headless": "^6.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

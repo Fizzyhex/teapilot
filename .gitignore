@@ -7,7 +7,9 @@ dist/
 .teapilot/
 .jevrouter/
 config/models.json
+packages/*/config/models.json
 config/policy.json
+packages/*/config/policy.json
 /models-*.json
 /policy-*.json
 *.tgz
