@@ -30,7 +30,7 @@ export async function completeMention(text: string, cursor: number, cwd: string)
 }
 
 export function isPromptSubmit(key: Key): boolean {
-  return key.sequence === '\x1b[13;2u' || key.sequence === '\x1b[27;2;13~' || key.sequence === '\x1b\r' || Boolean(key.shift && key.name === 'return');
+  return key.sequence === '\x1b[13;2u' || key.sequence === '\x1b[27;2;13~' || key.sequence === '\x1b\r' || key.sequence === '\x13' || Boolean(key.shift && key.name === 'return');
 }
 
 const COMPOSER_COLOUR = '\x1b[48;2;232;234;246m\x1b[38;2;35;38;52m';
@@ -128,7 +128,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
   // The spacer row separates the composer from any artwork above it.
   const open = () => { if (context) { art?.begin(() => ({ rows: 1 + row, cols: cursorCols })); write('\r\n'); } };
   if (context) open();
-  else write('\n\x1b[2mShift+Enter or Alt+Enter: send · Ctrl+D: exit\x1b[0m\n');
+  else write('\n\x1b[2mShift+Enter, Alt+Enter or Ctrl+S: send · Ctrl+D: exit\x1b[0m\n');
   // Kitty disambiguation and bracketed paste; pop the keyboard mode on exit.
   write('\x1b[>1u\x1b[?2004h');
   const raw = process.stdin.isRaw;

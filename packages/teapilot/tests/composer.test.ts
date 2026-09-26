@@ -67,7 +67,7 @@ it('shows the dark panel immediately and matches the three-line reference layout
   expect(screen).toHaveLength(5);
   expect(screen[0]!.trim()).toMatch(/^~ +Session: \$0\.000000$/);
   expect(screen.slice(1, 4).map(line => line.trimEnd())).toEqual(text.split('\n').map(line => `│ ${line}`));
-  expect(screen[4]).toContain('@ files · Tab: complete · Enter: newline · Shift+Enter or Alt+Enter: send');
+  expect(screen[4]).toContain('@ files · Tab: complete · Enter: newline · Shift+Enter, Alt+Enter or Ctrl+S: send');
   expect(screen[4]!.trimEnd()).toMatch(/Auto$/);
   expect(rendered.output).toContain('\x1b[48;2;55;61;66m');
   expect(screen.every(line => cellWidth(line) === 100)).toBe(true);
@@ -75,7 +75,7 @@ it('shows the dark panel immediately and matches the three-line reference layout
 
 it('degrades the composer hint sensibly as width shrinks, keeping Alt+Enter as a send fallback', () => {
   const footer = (width: number) => lines(frame('', 0, width).output).at(-1)!;
-  expect(footer(100)).toContain('@ files · Tab: complete · Enter: newline · Shift+Enter or Alt+Enter: send');
+  expect(footer(100)).toContain('@ files · Tab: complete · Enter: newline · Shift+Enter, Alt+Enter or Ctrl+S: send');
   expect(footer(45)).toContain('@ files · Shift+Enter or Alt+Enter: send');
   expect(footer(40)).toContain('@ files · Shift+Enter: send');
   expect(footer(40)).not.toContain('Alt+Enter');
@@ -91,6 +91,14 @@ it('accepts Alt+Enter as a submit sequence, same as Shift+Enter', async () => {
   await ui.flush();
   ui.keys('\x1b\r');
   expect(await ui.result).toBe('typed with alt enter');
+});
+
+it('accepts Ctrl+S as a submit key for terminals that swallow modified Enter', async () => {
+  const ui = await editor();
+  ui.keys('typed with ctrl s');
+  await ui.flush();
+  ui.keys('\x13');
+  expect(await ui.result).toBe('typed with ctrl s');
 });
 
 it('wraps at content-cell boundaries and tracks wide and combining characters', () => {

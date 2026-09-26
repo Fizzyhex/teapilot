@@ -107,7 +107,7 @@ export function composerFrame(text: string, cursor: number, width: number, heigh
   if (metadataRows) {
     const mode = `${context.mode ? context.mode[0]!.toUpperCase() + context.mode.slice(1) + ' · ' : ''}${context.routingMode === 'hosted' ? 'Auto' : 'Direct'}`;
     const model = context.lastModel ? `${mode} · Last: ${plain(context.lastModel)}` : mode;
-    const hints = ['@ files · Tab: complete · Enter: newline · Shift+Enter or Alt+Enter: send', '@ files · Shift+Enter or Alt+Enter: send', '@ files · Shift+Enter: send', 'Shift+Enter: send', '@ files'];
+    const hints = ['@ files · Tab: complete · Enter: newline · Shift+Enter, Alt+Enter or Ctrl+S: send', '@ files · Shift+Enter or Alt+Enter: send', '@ files · Shift+Enter: send', 'Shift+Enter: send', '@ files'];
     const hint = hints.find(value => cellWidth(value) + Math.min(cellWidth(model), Math.floor(columns / 3)) + 1 <= columns) ?? '';
     const access = context.grants?.filter(value => value !== 'inference').map(value => value.replace('repository.', 'repo.')).join(', ') || 'none';
     output.unshift(muted + information(directoryLabel(context.cwd ?? cwd) + (context.mode ? ` · Access: ${access}` : ''), `Session: $${context.spentUsd.toFixed(6)}`, columns) + reset);
