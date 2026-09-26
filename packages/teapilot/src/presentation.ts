@@ -6,6 +6,8 @@ import { cellWidth, graphemes } from './composer.js';
 
 const ACTIVITY_COLOUR = '38;2;186;187;241'; // #babbf1
 // this is catpuccin lavender :3
+/** Gossip is background chatter: everything, art included, in the composer's light grey. */
+const GOSSIP_COLOUR = '38;2;139;148;158';
 
 export function terminalColour(tty: boolean | undefined, env = process.env): boolean {
   return Boolean(tty && env.TERM !== 'dumb' && env.NO_COLOR === undefined);
@@ -228,7 +230,7 @@ export class TerminalPresentation implements ActivityUI {
     if (!this.artRows.length) {
       // A block is allocated only when a clip starts, never inside a response.
       if (!this.fresh || this.messageOpen) return;
-      process.stderr.write(paint(rows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n');
+      process.stderr.write(paint(rows.join('\n'), this.artColour, this.colour) + '\n');
       this.fresh = false; this.belowRows = 0; this.tail = '';
     } else if (this.artRows.length === rows.length) {
       // Output below is stable between events. Change only artwork rows.
@@ -236,7 +238,7 @@ export class TerminalPresentation implements ActivityUI {
       rows.forEach((row, index) => {
         if (row !== this.artRows[index]) {
           const distance = this.belowRows + rows.length - index;
-          update += `\r\x1b[${distance}A\x1b[2K${paint(row, ACTIVITY_COLOUR, this.colour)}\r\x1b[${distance}B`;
+          update += `\r\x1b[${distance}A\x1b[2K${paint(row, this.artColour, this.colour)}\r\x1b[${distance}B`;
         }
       });
       if (update) process.stderr.write(update);
@@ -289,7 +291,20 @@ export class TerminalPresentation implements ActivityUI {
     this.contextRows += terminalRows(text, process.stderr.columns || 80) ?? process.stderr.rows ?? 36;
     this.draw();
   }
-  log(text: string): void { this.write(`${paint(text, '32', this.colour && !this.json)}\n`); }
+  log(text: string): void { this.write(`${paint(text, this.muted ? GOSSIP_COLOUR : '32', this.colour && !this.json)}\n`); }
+
+  private muted = false;
+  private get artColour(): string { return this.muted ? GOSSIP_COLOUR : ACTIVITY_COLOUR; }
+  /** Gossip mode until the returned function is called: grey text and art, with the tea-break clip while agents think. */
+  gossip(): { line(text: string, kind?: 'header' | 'thought' | 'post' | 'status'): void; activity(label: string | undefined): void; end(): void } {
+    this.pause(); this.endMessage(); this.muted = true;
+    const style = { header: `1;${GOSSIP_COLOUR}`, thought: `3;${GOSSIP_COLOUR}`, post: GOSSIP_COLOUR, status: `2;${GOSSIP_COLOUR}` };
+    return {
+      line: (text, kind = 'status') => { if (!this.closed && !this.json) this.write(`${paint(text, style[kind], this.colour)}\n`); },
+      activity: label => this.setActivity(label ? { kind: 'reasoning', label } : undefined),
+      end: () => { this.pause(); this.muted = false; },
+    };
+  }
   approval(text: string): void {
     this.endMessage(); this.clipKind = undefined; this.collapse(); this.contextRows = 0;
     this.write(`${paint('Approval', '1;33', this.colour && !this.json)}\n${text}\n`);
@@ -312,7 +327,7 @@ export class TerminalPresentation implements ActivityUI {
       // move relative to readline's public cursor position, never saved cursors.
       this.artRows = [...clips.pawing.frames[2]!.split('\n'), 'Waiting for your input...'];
       process.stderr.write(
-        paint(this.artRows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n'
+        paint(this.artRows.join('\n'), this.artColour, this.colour) + '\n'
       );
       this.playback.play(clips.pawing, [2, 3]);
     }
@@ -328,7 +343,7 @@ export class TerminalPresentation implements ActivityUI {
       this.listen();
       const sip = clips['tea-break'];
       this.artRows = sip.frames[0]!.split('\n');
-      process.stderr.write(paint(this.artRows.join('\n'), ACTIVITY_COLOUR, this.colour) + '\n');
+      process.stderr.write(paint(this.artRows.join('\n'), this.artColour, this.colour) + '\n');
       this.playback.play(sip, undefined, false, 0, () => this.playback.play(clips.pawing, [2, 3]));
     }
   }
@@ -345,7 +360,7 @@ export class TerminalPresentation implements ActivityUI {
     const distance = rows.length + position.rows;
     process.stderr.write(
       `\r\x1b[${distance}A` +
-      paint(rows.join('\n'), ACTIVITY_COLOUR, this.colour) +
+      paint(rows.join('\n'), this.artColour, this.colour) +
       `\r\x1b[${position.rows + 1}B` +
       (position.cols ? `\x1b[${position.cols}C` : '')
     );

@@ -10,6 +10,20 @@ import { isTierPreference, tierPreferences, type Tier, type TierPreference } fro
 
 const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /exit, /quit`;
 
+/** Optional behaviour layered on a session, such as teachat. Every hook is awaited in turn order. */
+export interface SessionExtension {
+  /** Runs before any command or turn: background work must get out of the way first. */
+  busy?(): Promise<void>;
+  /** Extra fields for each turn's request. */
+  request?(): Partial<HostRequest>;
+  turnEnd?(turn: ConversationTurn, result: HostResult): Promise<void>;
+  /** The conversation was cleared with /new. */
+  reset?(): Promise<void>;
+  /** Handles a slash command it owns; false leaves it to the session. */
+  command?(command: string, args: string): Promise<boolean>;
+  help?: string;
+}
+
 /**
  * One session loop for every mode (chat, ask, code). The mode selects instructions
  * and default access; history, tiers, grants and commands behave identically.
@@ -24,7 +38,10 @@ export async function runSession(options: {
   approve?: Approve;
   log?: (text: string) => void;
   onEvent?: EventSink;
+  extension?: SessionExtension;
 }): Promise<number> {
+  const extension = options.extension;
+  const help = sessionHelp + (extension?.help ? `, ${extension.help}` : '');
   let history: ConversationTurn[] = options.request.history ?? [];
   let mode: Mode = options.request.mode ?? 'chat';
   const grants = options.request.authorization;
@@ -47,6 +64,7 @@ export async function runSession(options: {
     prompt = prompt.trim();
     if (['/exit', '/quit'].includes(prompt)) break;
     if (!prompt) continue;
+    await extension?.busy?.();
     if (prompt.startsWith('/')) {
       const [command, value, extra] = prompt.split(/\s+/);
       if (command === '/cd') {
@@ -73,21 +91,21 @@ export async function runSession(options: {
       } else if (command === '/tier' && !extra && isTierPreference(value)) {
         tier = value; options.log?.(`Tier preference: ${tier}`);
       } else if (command === '/new' && !value) {
-        history = []; correction = undefined; relatedTier = undefined; tier = 'auto'; options.log?.('Started a new task. Session access and spending remain available.');
+        history = []; correction = undefined; relatedTier = undefined; tier = 'auto'; await extension?.reset?.(); options.log?.('Started a new task. Session access and spending remain available.');
       } else if (command === '/mode' && !extra && isMode(value)) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,
           async (type, fields) => { options.onEvent?.({ type, ...fields }); });
         if (approved) { mode = value; options.log?.(`Mode: ${mode}`); }
         else options.log?.('Code access was not approved; mode unchanged.');
-      } else options.log?.(sessionHelp);
+      } else if (!await extension?.command?.(command!, prompt.slice(command!.length).trim())) options.log?.(help);
       prompt = '';
       if (options.once) break;
       continue;
     }
     // With session grants the host routes by mode and activates access on demand;
     // without them the mode's workload is fixed for the turn.
-    const result = await options.run({ ...options.request, cwd, prompt, correction, tier, relatedTier, history,
+    const result = await options.run({ ...options.request, ...extension?.request?.(), cwd, prompt, correction, tier, relatedTier, history,
       mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode) });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
@@ -97,6 +115,7 @@ export async function runSession(options: {
     // A failed turn's text is the host's diagnostic, not a reply; models imitate it on the next turn.
     const assistant = result.success ? result.text : `[that request stopped before finishing: ${result.status.replaceAll('_', ' ')}]`;
     history = prepareConversation('', [], [...history, { user, assistant }], options.maxPromptChars).history;
+    await extension?.turnEnd?.({ user, assistant }, result);
     correction = undefined;
     prompt = '';
     if (options.once) break;

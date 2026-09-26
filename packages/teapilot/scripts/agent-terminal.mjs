@@ -99,7 +99,7 @@ async function client(argv) {
     for (const path of [paths.meta, paths.log, paths.daemonLog]) rmSync(path, { force: true });
     const args = rest.slice(boundary + 1);
     const spec = { name: values.name, cols, rows, ttl, cwd: resolve(values.cwd), args,
-      argv: [...(values.built ? [] : ['--import', import.meta.resolve('tsx')]), entry, ...args] };
+      argv: [...(values.built ? [] : ['--import', import.meta.resolve('tsx'), '--conditions=teapilot-source']), entry, ...args] };
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', Buffer.from(JSON.stringify(spec)).toString('base64url')],
       { detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();

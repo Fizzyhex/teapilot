@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as dotenv } from 'dotenv';
+import { readTeachatSettings, type TeachatSettings } from './teachat/settings.js';
 import { z } from 'zod';
 
 const money = z.number().finite().nonnegative();
@@ -50,6 +51,7 @@ export interface Config {
   routingMode?: 'hosted' | 'direct'; models: ModelSet; policy: Policy; stateDir: string;
   router: { provider: 'typesafe' | 'openrouter'; model?: string; apiKey?: string; endpoint?: string; maxCallUsd: number; usdPerMillionTokens?: number };
   searchUrl?: string;
+  teachat?: TeachatSettings;
   secrets: Record<PhysicalModel, string | undefined>;
 }
 
@@ -89,7 +91,7 @@ function applyOverride(model: ModelConfig, env: NodeJS.ProcessEnv, prefix: strin
 
 export async function loadConfig(root?: string, env = process.env): Promise<Config> {
   const explicit = Boolean(root); root = await configDirectory(root); dotenv({ path: resolve(root, '.env'), processEnv: env, quiet: true });
-  const overrides = Object.keys(env).filter(key => /^(TEAPILOT_|JEV_|LOCAL_|ECONOMY_|STRONG_|FAST_|CAPABLE_|SEARCH_BASE_URL$|REQUEST_BUDGET_USD$|DAILY_BUDGET_USD$|TYPESAFE_API_KEY$|OPENROUTER_API_KEY$)/.test(key) && env[key] !== undefined).sort();
+  const overrides = Object.keys(env).filter(key => /^(TEAPILOT_|JEV_|LOCAL_|ECONOMY_|STRONG_|FAST_|CAPABLE_|TEACHAT_|SEARCH_BASE_URL$|REQUEST_BUDGET_USD$|DAILY_BUDGET_USD$|TYPESAFE_API_KEY$|OPENROUTER_API_KEY$)/.test(key) && env[key] !== undefined).sort();
   const select = async (override: string | undefined, name: string): Promise<string> => {
     if (override) return resolve(root!, override);
     for (const path of [`${name}.json`, `config/${name}.json`, `config/${name}.example.json`]) if (await exists(resolve(root!, path))) return resolve(root!, path);
@@ -113,6 +115,6 @@ export async function loadConfig(root?: string, env = process.env): Promise<Conf
   if (env.DAILY_BUDGET_USD) policy.budget.dailyUsd = money.parse(Number(env.DAILY_BUDGET_USD));
   const provider = z.enum(['typesafe', 'openrouter']).parse(env.JEV_PROVIDER || 'typesafe');
   const secrets = Object.fromEntries(physicalModels.map(key => [key, env[models[key].apiKeyEnv] || undefined])) as Config['secrets'];
-  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, secrets };
+  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, teachat: readTeachatSettings(env, root), secrets };
 }
 export { modelSchema };

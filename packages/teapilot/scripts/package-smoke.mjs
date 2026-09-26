@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), 'teapilot-package-'));
 const home = join(scratch, 'home'), workspace = join(scratch, 'workspace');
 await mkdir(home); await mkdir(workspace);
-const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TEAPILOT_|LOCAL_|ECONOMY_|STRONG_|JEV_|TYPESAFE_|OPENROUTER_|REQUEST_BUDGET_USD|DAILY_BUDGET_USD)/.test(key)));
+const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(TEAPILOT_|TEACHAT_|LOCAL_|ECONOMY_|STRONG_|JEV_|TYPESAFE_|OPENROUTER_|REQUEST_BUDGET_USD|DAILY_BUDGET_USD)/.test(key)));
 const env = { ...cleanEnv, HOME: home, USERPROFILE: home, TEAPILOT_STATE_DIR: join(home, '.teapilot'), npm_config_git: 'teapilot-git-must-not-run', NO_COLOR: '1' };
 const npm = process.env.npm_execpath ?? join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
 function run(args, cwd = workspace, runEnv = env) {
@@ -58,7 +58,8 @@ try {
   console.log('Packing and checking package contents...');
   const packed = JSON.parse(await run([join(root, 'scripts/pack.mjs'), '--json', '--pack-destination', scratch], root, process.env))[0];
   for (const name of ['typing', 'pawing', 'tea-break']) assert(packed.files.some(file => file.path === `dist/art/ascii-${name}.json`));
-  assert(packed.bundled.includes('jevrouter') && packed.bundled.includes('yaml'));
+  assert(packed.bundled.includes('jevrouter') && packed.bundled.includes('yaml') && packed.bundled.includes('teachat'));
+  assert(packed.files.some(file => file.path === 'node_modules/teachat/dist/index.js') && !packed.files.some(file => file.path.startsWith('node_modules/teachat/src/')));
   assert(packed.files.some(file => file.path === 'node_modules/jevrouter/LICENSE'));
   assert(!packed.files.some(file => /(^|\/)\.env($|\.)/.test(file.path) || /^config\/(models|policy)\.json$/.test(file.path)));
   console.log('Installing packed artifact with Git disabled...');

@@ -6,6 +6,7 @@ import { defaultPolicy, JevRouter, validateManifest } from 'jevrouter';
 import { tiers, type Config, type Tier } from '../config.js';
 import { budgetedJev, guardedStream, piModel, type InferenceState } from '../inference/providers.js';
 import { callCeiling, lockState, SpendGovernor } from '../inference/budget.js';
+import { markWork } from '../teachat/busy.js';
 import { assessCandidate } from '../routing/selection.js';
 import { directTier, effectiveProfile, modelFor, profileAvailable, profileFor } from '../routing/execution.js';
 import { Telemetry } from '../telemetry/outcome.js';
@@ -69,7 +70,9 @@ export function inferenceContext(request: InferenceRequest, config: Config, tier
 export async function runInference(config: Config, request: InferenceRequest, dependencies: HostDependencies, signal?: AbortSignal) {
   request = inferenceSchema.parse(request);
   if (request.toolMode === 'required' && !request.tools.length) throw new Error('Required tool mode needs tools');
-  const unlock = await lockState(config.stateDir);
+  const idle = await markWork(config);
+  let unlock: () => Promise<void>;
+  try { unlock = await lockState(config.stateDir); } catch (error) { await idle(); throw error; }
   const requestId = randomUUID();
   const secrets = [config.router.apiKey ?? '', ...Object.values(config.secrets).map(s => s ?? '')];
   const telemetry = new Telemetry(config.stateDir, requestId, secrets, dependencies.onEvent);
@@ -144,5 +147,5 @@ export async function runInference(config: Config, request: InferenceRequest, de
   } catch (error) {
     await telemetry.event('request_end', { requestId, status: signal?.aborted ? 'cancelled' : 'error', spentUsd: budget.spent().request });
     throw error;
-  } finally { await unlock(); }
+  } finally { try { await unlock(); } finally { await idle(); } }
 }

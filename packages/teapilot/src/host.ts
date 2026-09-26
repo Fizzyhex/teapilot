@@ -15,15 +15,19 @@ import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
 import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
-import { capabilityPlanner, readRoutingPlan, readWebAutoGrant, type WebBasis } from './routing/intent.js';
+import { capabilityPlanner, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
+import { markWork } from './teachat/busy.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string }
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+  /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
+  teachatIdentities?: Record<string, string> }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
   check?: 'passed' | 'failed'; models?: string[];
   tier?: Tier;
+  teachatIdentity?: TeachatIdentityAnswer;
 }
 export interface HostDependencies {
   approve: Approve;
@@ -56,8 +60,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     dependencies.onActivity?.({ kind: 'waiting', label: 'Checking web search...' });
     await checkSearch(config, request.signal);
   }
-  const unlock = await lockState(config.stateDir);
+  const idle = await markWork(config);
+  let unlock: () => Promise<void>;
+  try { unlock = await lockState(config.stateDir); } catch (error) { await idle(); throw error; }
   const requestId = randomUUID();
+  let teachatIdentity: TeachatIdentityAnswer | undefined;
   const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value)), dependencies.onEvent);
   const budget = new SpendGovernor(join(config.stateDir, 'spend.jsonl'), requestId, config.policy.budget);
   const receipts: string[] = [];
@@ -138,7 +145,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   };
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
-    const result = { requestId, success, status, text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models };
+    const result = { requestId, success, status, text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }) };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
   };
@@ -149,7 +156,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     if (request.authorization && !request.authorization.allows('inference')) return await finish(false, 'blocked', 'Inference access is not granted. Start a new session to restore it.');
     if (request.authorization && request.web && !await activate(['web.search'], 'You requested web research with --web.')) return await finish(false, 'approval_denied', accessFailure!);
     const provider = config.routingMode === 'direct' ? undefined : budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
-    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
+    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
     const physicalOnline = dependencies.localProbe
       ? { fast: await dependencies.localProbe(), capable: await dependencies.localProbe() }
       : { fast: await localAvailable(config, 'fast'), capable: await localAvailable(config, 'capable') };
@@ -189,6 +196,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
       if (decision) receipts.push(await telemetry.receipt(decision));
       if (router) webAutoBasis = request.web ? ['explicit'] : readWebAutoGrant(decision?.raw_jev);
+      if (request.teachatIdentities) teachatIdentity ??= readTeachatIdentity(decision?.raw_jev);
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
       // An unconfident route falls back to the workload the session's mode already
@@ -319,5 +327,5 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
     await telemetry.event('request_error', { name: error instanceof Error ? error.name : 'Error' });
     throw error;
-  } finally { try { await unlock(); } finally { dependencies.onActivity?.(undefined); } }
+  } finally { try { await unlock(); } finally { await idle(); dependencies.onActivity?.(undefined); } }
 }

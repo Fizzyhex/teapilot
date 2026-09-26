@@ -49,7 +49,9 @@ async function hostBridge(port: number, { directory, cwd, ui, signal, tailscale,
   const redact = (text: string) => secrets.reduce((result, secret) => result.split(secret).join('[REDACTED]'), text);
   const log = (text: string) => ui.log(`${new Date().toLocaleTimeString()} ${redact(text)}`);
   const { token, created } = requireToken || rotateToken ? await loadToken(config.stateDir, rotateToken) : { token: undefined, created: false };
-  const host = await startBridgeHost({ config, root, port, token, signal, log, redact });
+  const { openHeadlessTeachat } = await import('../teachat/session.js');
+  const teachat = await openHeadlessTeachat(config, log);
+  const host = await startBridgeHost({ config, root, port, token, signal, log, redact, teachat });
   ui.log(`Bridge listening on 127.0.0.1:${host.port} for ${root}`);
   if (token === undefined) ui.log('No token required: access is limited to this computer and whatever you publish, so on a shared tailnet restrict who can reach it with your Tailscale access rules, or restart with --token.');
   else ui.log(created ? `New bridge token (shown once, also stored in ${tokenPath(config.stateDir)}):
@@ -70,6 +72,7 @@ async function hostBridge(port: number, { directory, cwd, ui, signal, tailscale,
     published?.stop();
     log('Stopping: pending approvals are denied.');
     await host.close();
+    await teachat?.close();
   }
   return true;
 }

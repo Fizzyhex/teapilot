@@ -156,15 +156,27 @@ async function main(): Promise<void> {
     };
     if (mode) {
       const authorization = await SessionGrants.create(request.cwd, config, mode, Boolean(values.web));
+      const once = Boolean(values.once || values.json || !interactive);
       if (interactive && !values.json && !values.once) presentation.log(`${mode[0]!.toUpperCase()}${mode.slice(1)} session started. Type /exit or /quit to leave.`);
+      // Teachat only runs where someone can see it and press a key to stop it.
+      const teachat = ui && !once ? await openTeachat(config, ui, presentation) : undefined;
       process.exitCode = await runSession({ request: { ...request, authorization, mode }, maxPromptChars: config.policy.limits.maxPromptChars,
-        input: state => ui ? ui.prompt('>', state.cwd ?? resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted' }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
-        run: execute, once: Boolean(values.once || values.json || !interactive), approve, log: message => presentation.log(message), onEvent: dependencies.onEvent });
+        input: state => ui ? ui.prompt('>', state.cwd ?? resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted', idle: teachat?.composerIdle() }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
+        run: execute, once, approve, log: message => presentation.log(message), onEvent: dependencies.onEvent, extension: teachat });
+      await teachat?.close(controller.signal);
     } else {
       const result = await execute(request);
       process.exitCode = result.success ? 0 : 2;
     }
   } finally { presentation.close(); ui?.close(); process.removeListener('SIGINT', onInterrupt); }
+}
+
+async function openTeachat(config: Awaited<ReturnType<typeof loadConfig>>, ui: NonNullable<ReturnType<typeof terminalUI>>, presentation: TerminalPresentation) {
+  const [{ TeachatService }, { terminalTeachat }] = await Promise.all([import('./teachat/service.js'), import('./teachat/session.js')]);
+  let service;
+  try { service = await TeachatService.open(config); }
+  catch (error) { presentation.log(`Teachat is unavailable this session: ${error instanceof Error ? error.message : String(error)}`); }
+  return terminalTeachat(config, service, { view: () => presentation.gossip(), log: message => presentation.log(message) });
 }
 
 main().catch(error => {

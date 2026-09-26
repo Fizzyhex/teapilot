@@ -14,7 +14,8 @@
     "LICENSE"
   ],
   "bundleDependencies": [
-    "jevrouter"
+    "jevrouter",
+    "teachat"
   ],
   "repository": {
     "type": "git",
@@ -47,6 +48,7 @@
     "dotenv": "17.3.1",
     "ignore": "7.0.8",
     "jevrouter": "git+https://github.com/BillionsBobby/JevRouter.git#f944acb6530621bced023352e2358a63218bf4d9",
+    "teachat": "0.1.0",
     "ws": "8.21.3",
     "zod": "4.3.6"
   },
