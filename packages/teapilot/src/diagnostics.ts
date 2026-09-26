@@ -18,13 +18,13 @@ import { effectiveProfile, modelFor, profileFor } from './routing/execution.js';
 export async function endpointHint(config: Config, tier: Tier, log: (text: string) => void, signal?: AbortSignal): Promise<void> {
   try {
     const response = await fetch('http://127.0.0.1:11434/api/version', { redirect: 'error', signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(1500)]) });
-    if (response.ok) log(`Ollama detected at http://127.0.0.1:11434; configured endpoint: ${modelFor(config, tier).baseUrl}. To choose installed models, run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and select Reconfigure, then Local Ollama. No endpoint was changed.`);
+    if (response.ok) log(`Ollama detected at http://127.0.0.1:11434; configured endpoint: ${modelFor(config, tier).baseUrl}. To choose installed models, run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and select Locally via Ollama. No endpoint was changed.`);
   } catch { signal?.throwIfAborted(); }
 }
 
 export async function routingCheck(config: Config, consent: (message: string) => Promise<boolean>, log: (text: string) => void, signal?: AbortSignal): Promise<boolean> {
   if (!config.router.apiKey) { log('Hosted routing: FAIL (missing key). Run teapilot setup to configure routing.'); return false; }
-  if (!await consent(`Verify hosted routing with one paid routing call (maximum $${config.router.maxCallUsd}, within request/day budgets)? No execution model will be called.`)) {
+  if (!await consent(`Verify hosted routing with one paid routing call (maximum $${config.router.maxCallUsd}, within request/day budgets)? No local model will be called.`)) {
     log('Hosted routing: NOT TESTED (paid check declined).'); return false;
   }
   signal?.throwIfAborted();

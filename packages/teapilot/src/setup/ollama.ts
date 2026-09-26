@@ -142,14 +142,21 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
 }
 
 export interface PreparedModel { id: string; source: string; context: number; tools: boolean; roles: PhysicalModel[] }
-const roleChoices: PhysicalModel[][] = [['capable'], ['fast'], ['fast', 'capable']];
-const roleLabel = (roles: PhysicalModel[]) => roles.length > 1 ? 'Both fast and capable' : roles[0] === 'fast' ? 'Fast (quick answers)' : 'Capable (coding and harder work)';
+export const roleChoices: PhysicalModel[][] = [['capable'], ['fast'], ['fast', 'capable']];
+export const roleLabel = (roles: PhysicalModel[]) => roles.length > 1 ? 'Both fast and capable' : roles[0] === 'fast' ? 'Fast (quick answers)' : 'Capable (coding and harder work)';
+
+/** Memory in GiB, and lines describing the hardware models will run on. */
+export async function hardware(signal: AbortSignal): Promise<{ memory: number; lines: string[] }> {
+  const memory = totalmem() / 2 ** 30;
+  const lines = [`System memory: ${memory.toFixed(1)} GiB. CPU inference is supported but can be slow.`];
+  try { lines.push(`GPU: ${await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]))}`); }
+  catch { signal.throwIfAborted(); lines.push('GPU memory unavailable; memory guidance is approximate.'); }
+  return { memory, lines };
+}
 
 export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<PreparedModel[]> {
-  const memory = totalmem() / 2 ** 30;
-  ui.log(`System memory: ${memory.toFixed(1)} GiB. CPU inference is supported but can be slow.`);
-  try { ui.log(`GPU: ${await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]))}`); }
-  catch { signal.throwIfAborted(); ui.log('GPU memory unavailable; memory guidance is approximate.'); }
+  const { memory, lines } = await hardware(signal);
+  for (const line of lines) ui.log(line);
   const installed = (await ollamaJSON<{ models: OllamaModel[] }>('/api/tags', signal, undefined, base)).models.filter(model => !model.remote_model && !model.name.includes('cloud'));
   const visible = installed.filter(model => !isTeapilotAlias(model.name) && !presets.some(preset => preset.id === model.name));
   const choices = [...presets.map(p => `${p.label} - ${installed.some(model => model.name === p.id) ? 'installed' : `about ${(p.bytes / 1e9).toFixed(1)} GB download`}, ${p.memoryGiB}+ GiB RAM suggested`), ...visible.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
@@ -189,7 +196,7 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   return prepared;
 }
 
-async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof presets[number] | undefined, installed: OllamaModel[], memory: number, reservedBytes: number): Promise<number> {
+export async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof presets[number] | undefined, installed: OllamaModel[], memory: number, reservedBytes: number): Promise<number> {
   ui.log('Context is how much text the model can work with at once. Larger values use more memory; Enter accepts the suggested value.');
   let context: number;
   for (;;) {
@@ -221,9 +228,9 @@ export function ollamaAlias(id: string): string {
 }
 
 // The second pattern matches hashed aliases created by earlier versions.
-const isTeapilotAlias = (name: string) => name.startsWith('teapilot/') || /^teapilot-[a-f0-9]{10}(-[0-9]+)?:latest$/.test(name);
+export const isTeapilotAlias = (name: string) => name.startsWith('teapilot/') || /^teapilot-[a-f0-9]{10}(-[0-9]+)?:latest$/.test(name);
 
-async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, context: number, installed: OllamaModel[], base: string, verbose: boolean): Promise<Omit<PreparedModel, 'roles'>> {
+export async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: string, context: number, installed: OllamaModel[], base: string, verbose: boolean): Promise<Omit<PreparedModel, 'roles'>> {
   if (!installed.some(model => model.name === id)) {
     for (;;) {
       try { await during(ui, `Downloading ${id}...`, () => streamOperation('/api/pull', { model: id, stream: true }, signal, ui.log, base, verbose)); break; }

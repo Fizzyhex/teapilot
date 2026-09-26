@@ -3,20 +3,15 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
-import { configDirectory, exists, loadConfig, modelsSchema, physicalModels, policySchema, userConfigDir, type Config, type PhysicalModel, type Tier } from '../config.js';
-import { liveCheck, modelStatus, routingCheck, endpointHint, type LiveReport } from '../diagnostics.js';
-import { command, ensureOllama, ollamaURL, selectOllamaModel } from './ollama.js';
+import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config, type PhysicalModel } from '../config.js';
+import { routingCheck } from '../diagnostics.js';
+import { applyEndpoint, applyOllama, applyReports, askEndpoint, checkModels, checksLine, configureRouting, finishModels, loadDraft, persist, summaryLines, type CredentialStorage, type Draft } from './draft.js';
+import { command, ensureOllama, selectOllamaModel } from './ollama.js';
 import type { SetupUI } from './terminal.js';
 import { configureSearch } from './search.js';
 
-// The tier each physical model is verified through during setup.
-const roleTier: Record<PhysicalModel, Tier> = { fast: 'fast', capable: 'normal' };
-
+export type { CredentialStorage } from './draft.js';
 export interface SetupOptions { directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number; verbose?: boolean }
-export interface CredentialStorage {
-  load(): Promise<Record<string, string>>;
-  save(credentials: Record<string, string>): Promise<void>;
-}
 
 async function privateWrite(path: string, contents: string, signal: AbortSignal): Promise<void> {
   const handle = await open(path, 'wx', 0o600);
@@ -89,142 +84,59 @@ export async function saveConfiguration(directory: string, config: Config, env: 
   await pruneGenerations(directory);
 }
 
-async function numberInput(ui: SetupUI, label: string, fallback: number | undefined, minimum: number): Promise<number> {
-  for (;;) {
-    const value = Number(await ui.input(label, fallback === undefined ? undefined : String(fallback)));
-    if (Number.isFinite(value) && value >= minimum) return value;
-    ui.log(`Enter a number of at least ${minimum}.`);
-  }
-}
-
 export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSignal, credentials?: CredentialStorage): Promise<boolean> {
   if (options.nonInteractive && (!options.endpoint || !options.model || !Number.isInteger(options.contextTokens))) throw new Error('Unattended setup requires --endpoint, --model, and integer --context-tokens.');
   const directory = resolve(options.directory ?? userConfigDir());
-  ui.log(`Configuration: ${directory} (${options.directory ? 'explicit --config-dir' : 'personal profile'}). Repository selection is separate: use --cwd for coding.`);
+  ui.log(`Configuration: ${directory} (${options.directory ? 'explicit --config-dir' : 'personal profile'}).`);
   const launchDirectory = await configDirectory();
   const nextCommand = `teapilot ask --config-dir "${directory}" "Explain dependency injection"`;
   if (launchDirectory !== directory) ui.log(`Commands launched here select ${launchDirectory}, which shadows this setup. Use: ${nextCommand}`);
   const hasConfiguration = await exists(resolve(directory, '.env'));
   const files = await readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
   if (!hasConfiguration && files.some(file => /^(models-|policy-|\.env-)/.test(file))) ui.log('Setup was interrupted before activation. Recovery will create a complete profile and reuse installed models.');
-  if (hasConfiguration) {
-    if (options.nonInteractive) throw new Error('Configuration already exists. Rerun teapilot setup interactively to retain or replace it.');
-    if (await ui.choose(`Configuration exists at ${directory}.`, ['Keep settings and verify', 'Reconfigure (confirm before saving)']) === 0) {
-      const { doctor } = await import('../diagnostics.js');
-      const ready = await doctor(await loadConfig(directory, { ...process.env, ...await credentials?.load() }), process.cwd(), { live: true, signal, consent: ui.confirm, log: ui.log, activity: ui.activity });
-      ui.log(`Next: ${nextCommand}`);
-      return ready;
-    }
-  }
-  // Start from existing policy/settings when available. Environment is cloned so
-  // setup never mutates the running process or leaks secrets to installer children.
-  let savedEnv: Record<string, string> = {};
-  if (hasConfiguration) savedEnv = parse(await readFile(resolve(directory, '.env')));
-  Object.assign(savedEnv, await credentials?.load());
-  const config = await loadConfig(directory, { ...savedEnv });
-  if (process.env.TEAPILOT_STATE_DIR) config.stateDir = resolve(process.env.TEAPILOT_STATE_DIR);
-  const before = { execution: Object.values(config.models).filter(model => model.enabled).map(model => model.id).join(', '), routing: config.routingMode, search: config.searchUrl ?? 'Disabled' };
+  if (hasConfiguration && options.nonInteractive) throw new Error('Configuration already exists. Rerun teapilot setup interactively to change it.');
+  const draft = await loadDraft(directory, hasConfiguration, credentials);
+  // The tabbed screen needs a real terminal with room for it; otherwise questions come one after another.
+  const screen = options.nonInteractive ? undefined : ui.screen?.();
+  const outcome = screen
+    ? await (await import('./tabs.js')).tabbedSetup(draft, screen, ui, signal, { verbose: options.verbose, credentials })
+    : await linearSetup(draft, options, ui, signal, credentials);
+  if (!outcome) return false;
+  ui.log(outcome.coding ? 'Model checks passed. See the routing and search results above.' : 'Partial: configuration saved; some model checks remain unverified.');
+  ui.log(`Next: ${nextCommand}`);
+  if (outcome.coding) ui.log(`Then: teapilot code --config-dir "${directory}" --cwd "${process.cwd()}" "Describe this project"`);
+  return outcome.ready;
+}
+
+/** One question after another: unattended setup, small terminals and scripted interfaces. */
+async function linearSetup(draft: Draft, options: SetupOptions, ui: SetupUI, signal: AbortSignal, credentials?: CredentialStorage): Promise<{ ready: boolean; coding: boolean } | undefined> {
+  const { config, env } = draft;
   ui.log('Model downloads and verification happen before the final settings review.');
-  const choice = options.nonInteractive ? 1 : await ui.choose('Execution model', ['Local Ollama (execution runs locally; no execution API charges)', 'Existing OpenAI-compatible local endpoint']);
-  const previousModels = structuredClone(config.models);
+  const choice = options.nonInteractive ? 1 : await ui.choose('Model source', ['Locally via Ollama', 'An existing local OpenAI-compatible endpoint']);
   let displayModel: string | undefined;
-  // Only models assigned a role during this setup are enabled, never a silent paid fallback.
-  for (const model of Object.values(config.models)) model.enabled = false;
   let roles: PhysicalModel[] = ['capable'];
-  if (!hasConfiguration) config.routingMode = 'direct';
-  let env: Record<string, string> = { ...savedEnv };
-  if (process.env.TEAPILOT_STATE_DIR) env.TEAPILOT_STATE_DIR = config.stateDir.replace(/\\/g, '/');
-  // Remove old overrides for settings the wizard owns; otherwise saved .env
-  // values would silently undo the newly written JSON configuration.
-  for (const key of Object.keys(env)) {
-    if (/^(LOCAL|ECONOMY|STRONG)_(ENABLED|MODEL|BASE_URL|INPUT_USD_PER_MILLION|OUTPUT_USD_PER_MILLION)$/.test(key) || ['REQUEST_BUDGET_USD', 'DAILY_BUDGET_USD'].includes(key)) delete env[key];
-  }
-  ui.log('The router chooses a model; the execution model does the work. Direct routing needs no routing key.');
-  if (config.routingMode === 'hosted') ui.log('Hosted routing may still incur charges, including when execution runs locally.');
-  if (!options.nonInteractive) {
-    const routing = await ui.choose('Routing', [`Keep current: ${config.routingMode}${config.routingMode === 'hosted' ? ' (may incur charges)' : ' (no routing charges)'}`, 'Direct (no hosted routing charges)', 'Hosted Jev (paid routing)']);
-    if (routing !== 0) config.routingMode = routing === 1 ? 'direct' : 'hosted';
-    if (routing === 2) {
-      const provider = await ui.choose('Jev provider:', ['TypeSafe', 'OpenRouter']) === 0 ? 'typesafe' : 'openrouter';
-      const keyName = provider === 'typesafe' ? 'TYPESAFE_API_KEY' : 'OPENROUTER_API_KEY';
-      env.JEV_PROVIDER = provider;
-      env[keyName] = await ui.input('Routing API key (hidden; blank keeps existing)', env[keyName] ?? '', true);
-      config.router.provider = provider;
-      config.router.apiKey = env[keyName] || undefined;
-      if (!config.router.apiKey) throw new Error('Hosted routing needs a routing key. Rerun setup and choose direct or provide a key.');
-    }
-  }
+  if (!options.nonInteractive) await configureRouting(config, env, ui);
   if (choice === 0) {
     await during(ui, 'Preparing Ollama...', () => ensureOllama(ui, signal));
     const prepared = await during(ui, 'Inspecting local models...', () => selectOllamaModel(ui, signal, undefined, options.verbose));
-    displayModel = prepared.map(model => `${model.source} (${model.roles.join(' + ')})`).join(', ');
-    roles = physicalModels.filter(role => prepared.some(model => model.roles.includes(role)));
-    for (const model of prepared) for (const role of model.roles) {
-      Object.assign(config.models[role], { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: role === 'capable' ? Math.min(16384, Math.floor(model.context / 2)) : 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
-    }
-    delete env.LOCAL_API_KEY;
-    config.policy.limits.requestTimeoutMs = 120000;
+    ({ roles, displayModel } = applyOllama(config, env, prepared));
   } else {
-    const model = config.models.capable;
-    model.baseUrl = options.endpoint ?? await ui.input('API base URL including /v1', 'http://127.0.0.1:8080/v1');
-    model.id = options.model ?? await ui.input('Exact model ID');
-    model.contextTokens = options.contextTokens ?? await numberInput(ui, 'Actual server context tokens', 16384, 8192);
-    model.maxOutputTokens = Math.min(16384, Math.floor(model.contextTokens / 4));
-    model.toolCalling = true;
-    model.provider = 'local';
-    const key = options.nonInteractive ? process.env.LOCAL_API_KEY ?? '' : await ui.input('API key if required (hidden; blank keeps existing)', env[model.apiKeyEnv] ?? '', true);
-    if (key) env[model.apiKeyEnv] = key;
-    model.inputUsdPerMillion = 0; model.outputUsdPerMillion = 0; model.reasoningEfforts = ['off'];
+    const endpoint = await askEndpoint(ui, env, config, { baseUrl: options.endpoint, id: options.model, contextTokens: options.contextTokens, ...options.nonInteractive ? { key: process.env.LOCAL_API_KEY } : {} });
+    applyEndpoint(config, env, endpoint);
   }
-  config.secrets = Object.fromEntries((['fast', 'capable'] as const).map(name => [name, env[config.models[name].apiKeyEnv] || undefined])) as Config['secrets'];
-  modelsSchema.parse(config.models); policySchema.parse(config.policy);
-  for (const role of roles) config.models[role].enabled = true;
-  const reports = new Map<PhysicalModel, LiveReport | undefined>();
-  let runLive: boolean | undefined;
-  for (const role of roles) {
-    const tier = roleTier[role];
-    const label = roles.length > 1 ? `[${role}] ` : '';
-    const status = await during(ui, `Checking ${role} model endpoint...`, () => modelStatus(config, tier, signal));
-    let report: LiveReport | undefined;
-    if (status) { ui.log(`${label}Endpoint ${config.models[role].baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
-    else if (runLive ??= await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
-      report = await during(ui, `Verifying ${role} answers and coding...`, () => liveCheck(config, tier, signal, ui.log));
-    }
-    // Failed or skipped coding validation never advertises a ready coding path.
-    config.models[role].toolCalling = Boolean(report?.tools);
-    config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
-    if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
-    ui.log(`${label}${report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.'}`);
-    reports.set(role, report);
-  }
+  finishModels(config, env, roles);
+  const reports = await checkModels(config, roles, ui, signal);
+  applyReports(config, roles, reports);
   const report = reports.get('capable') ?? reports.get('fast');
   const routingReady = config.routingMode === 'direct' || await during(ui, 'Verifying hosted routing...', () => routingCheck(config, ui.confirm, ui.log, signal));
-  const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, directory, ui, signal);
-  const execution = roles.map(role => config.models[role].id).join(', ');
+  const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, draft.directory, ui, signal);
   ui.log('\nReady to save');
-  ui.log(`  Execution: ${displayModel ?? execution}${hasConfiguration && before.execution !== execution ? ` (was ${before.execution})` : ''}`);
-  for (const role of roles) {
-    const selected = config.models[role]; const previous = previousModels[role];
-    ui.log(`  ${role[0]!.toUpperCase()}${role.slice(1)}: ${selected.baseUrl}${hasConfiguration && previous.baseUrl !== selected.baseUrl ? ` (was ${previous.baseUrl})` : ''} · ${selected.contextTokens.toLocaleString('en-US')} tokens${hasConfiguration && previous.contextTokens !== selected.contextTokens ? ` (was ${previous.contextTokens.toLocaleString('en-US')})` : ''}`);
+  for (const line of summaryLines(draft, config, roles, { displayModel, checks: checksLine(report), routingReady, searchStatus })) ui.log(line);
+  if (!options.nonInteractive && !await ui.confirm(draft.hasConfiguration ? 'Save these settings? The previous configuration will be kept for rollback.' : 'Save these settings?')) {
+    ui.log('Existing settings were retained');
+    return undefined;
   }
-  ui.log(`  Budgets:   $${config.policy.budget.requestUsd}/request · $${config.policy.budget.dailyUsd}/UTC day`);
-  ui.log(`  Routing:   ${config.routingMode}${config.routingMode === 'hosted' ? ' · may incur charges' : ''}${hasConfiguration ? ` (was ${before.routing})` : ''}`);
-  ui.log(`  Search:    ${searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);
-  ui.log(`  Checks:    answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'}`);
-  ui.log(`  Routing check: ${config.routingMode === 'direct' ? 'Not needed' : routingReady ? 'Passed' : 'Not verified; see routing result above'}`);
-  if (!options.nonInteractive && !await ui.confirm(hasConfiguration ? 'Save these settings? The previous configuration will be kept for rollback.' : 'Save these settings?')) {
-    ui.log('Settings were not saved. Completed downloads and any local search service are retained.');
-    return false;
-  }
-  if (credentials) {
-    const keys = new Set([...Object.values(config.models).map(model => model.apiKeyEnv), 'JEV_API_KEY', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY']);
-    await credentials.save(Object.fromEntries(Object.entries(env).filter(([key]) => keys.has(key))));
-    env = Object.fromEntries(Object.entries(env).filter(([key]) => !keys.has(key)));
-  }
-  await during(ui, 'Saving configuration...', () => saveConfiguration(directory, config, env, signal));
-  ui.log(`Configuration saved in ${directory}. Environment variables still override saved settings.`);
-  ui.log(report?.coding ? 'Model checks passed. See the routing and search results above.' : 'Partial: configuration saved; some model checks remain unverified.');
-  ui.log(`Next: ${nextCommand}`);
-  if (report?.coding) ui.log(`Then: teapilot code --config-dir "${directory}" --cwd "${process.cwd()}" "Describe this project"`);
-  return Boolean(report?.ask && report.coding && routingReady);
+  await persist(draft, config, env, ui, signal, credentials);
+  ui.log(`Configuration saved in ${draft.directory}. Environment variables still override saved settings.`);
+  return { ready: Boolean(report?.ask && report.coding && routingReady), coding: Boolean(report?.coding) };
 }

@@ -121,7 +121,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     const usedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
     const actions: Record<string, string> = {
       approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
-      provider_error: 'Run teapilot doctor --live with this configuration to check the execution model. A very large single reply can also hit the output token cap and be rejected by the server; ask for large files in smaller pieces, or raise maxOutputTokens in the models config.',
+      provider_error: 'Run teapilot doctor --live with this configuration to check the models. A very large single reply can also hit the output token cap and be rejected by the server; ask for large files in smaller pieces, or raise maxOutputTokens in the models config.',
       unsupported: 'Check model context and tool support with teapilot doctor --live.',
       context_limit: 'Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
       payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',

@@ -2,7 +2,7 @@ import type { Config } from './config.js';
 
 export class SearchSetupError extends Error {}
 export function searchRepair(config: Config): string {
-  return `Configuration: ${config.source?.directory ?? 'provided settings'}. Run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and choose Reconfigure, then configure search. See docs/02-commands.md#web-research.`;
+  return `Configuration: ${config.source?.directory ?? 'provided settings'}. Run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and configure search. See docs/02-commands.md#web-research.`;
 }
 export async function searchQuery(base: string, query: string, signal?: AbortSignal): Promise<Array<{ title: string; url: string; snippet: string }> & { unresponsive?: string[] }> {
   try {

@@ -140,6 +140,10 @@ export class TerminalPresentation implements ActivityUI {
   private readonly drain = () => { if (!this.closed) this.draw(); };
   constructor(private readonly json: boolean, private readonly noMotion: boolean, private readonly random = Math.random) { }
 
+  /** Whether animation is allowed at all, before terminal size is considered. */
+  get motion(): boolean {
+    return !this.json && !this.noMotion && process.env.TEAPILOT_NO_MOTION === undefined && !process.env.CI;
+  }
   private eligible(): boolean {
     return !this.closed && !this.json && !this.noMotion && this.stream && Boolean(process.stdin.isTTY)
       && process.env.TEAPILOT_NO_MOTION === undefined && !process.env.CI && !this.suppressed

@@ -4,12 +4,15 @@ import { stripVTControlCharacters, styleText } from 'node:util';
 import { terminalColour, terminalRows, type TerminalPresentation } from '../presentation.js';
 import type { ActivityUI } from '../activity.js';
 import type { ComposerContext } from '../composer.js';
+import { SetupScreen } from './screen.js';
 
 export interface SetupUI extends ActivityUI {
   input(message: string, fallback?: string, secret?: boolean, signal?: AbortSignal): Promise<string>;
   choose(message: string, choices: string[], fallback?: number): Promise<number>;
   confirm(message: string, signal?: AbortSignal): Promise<boolean>;
   log(message: string): void;
+  /** Take over the terminal for tabbed setup, when it is interactive and large enough. */
+  screen?(): SetupScreen | undefined;
 }
 
 export async function chooseMany(ui: SetupUI, message: string, choices: string[], fallback = 0): Promise<number[]> {
@@ -28,6 +31,8 @@ export async function chooseMany(ui: SetupUI, message: string, choices: string[]
 export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentation): SetupUI & { close(): void; prompt(message: string, cwd: string, context?: ComposerContext): Promise<string> } {
   const colour = terminalColour(process.stderr.isTTY) && !process.env.NODE_DISABLE_COLORS;
   const paint = (format: Parameters<typeof styleText>[0], text: string) => colour ? styleText(format, text, { validateStream: false }) : text;
+  // `£` marks anything that can incur charges.
+  const charge = paint(['bold', 'yellow'], '£');
   let hidden = false;
   const output = new Writable({ write(chunk, _encoding, callback) {
     if (!hidden) process.stderr.write(chunk);
@@ -109,6 +114,17 @@ export function terminalUI(signal: AbortSignal, presentation?: TerminalPresentat
       const art = presentation && context ? { begin: presentation.beginComposer.bind(presentation), end: presentation.endPrompt.bind(presentation) } : undefined;
       try { return await promptInput(message, cwd, signal, context, art); }
       finally { process.stdin.on('data', forward); }
+    },
+    screen: () => {
+      if (!process.stdin.isTTY || !process.stderr.isTTY || process.env.TERM === 'dumb' || (process.stderr.columns || 0) < 60 || (process.stderr.rows || 0) < 24) return undefined;
+      presentation?.pause();
+      terminal.pause();
+      // The screen reads keys itself until it closes.
+      process.stdin.removeListener('data', forward);
+      process.stdin.removeListener('data', touch);
+      const screen = new SetupScreen({ colour, motion: presentation?.motion ?? false, onClose: () => { process.stdin.on('data', forward); process.stdin.prependListener('data', touch); } });
+      screen.open();
+      return screen;
     },
     close: () => { process.stdin.removeListener('data', forward); input.destroy(); process.stdin.pause(); process.stdin.removeListener('data', touch); process.stderr.removeListener('resize', resize); terminal.close(); },
   };

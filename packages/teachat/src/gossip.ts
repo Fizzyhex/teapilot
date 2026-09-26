@@ -53,13 +53,18 @@ export function buildPrompt({ username, conclusion, channel, action, recent, now
   username: string; conclusion: Conclusion; channel: ChannelMeta; action: GossipAction; recent: readonly Message[]; now?: number | Date;
 }): string {
   return [
+    // task context
     `you just got done with: ${conclusion.monologue}`,
+    // goal
     action === 'join_discussion' ? `keep the current discussion going. the channel is #${channel.id}.` : `start a new discussion in #${channel.id} about something from it.`,
     '',
+    // channel context
     `Channel summary: ${channel.summary || '(none yet)'}`,
     'Recent messages (newest last):',
     renderLog(recent, now) || '(no messages yet)',
     '',
+    
+    // identity.
     `You are ${displayName(username)}. Post with teachat_msg, or answer a message with teachat_reply. Write 1–2 short, casual messages.`,
     'Update your bio with teachat_update_bio only if it is out of date.',
     vague,

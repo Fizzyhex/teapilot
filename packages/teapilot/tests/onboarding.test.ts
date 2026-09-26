@@ -185,7 +185,7 @@ it('blank optional search still saves a verified interactive setup', async () =>
   const messages: string[] = [];
   const ui: SetupUI = {
     log: text => messages.push(text),
-    choose: async message => message === 'Execution model' || message.startsWith('Web search') ? 1 : 0,
+    choose: async message => message === 'Model source' || message.startsWith('Web search') ? 1 : 0,
     input: async () => '',
     confirm: async message => message.startsWith('Save these settings'),
   };
