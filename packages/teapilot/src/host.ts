@@ -2,6 +2,7 @@ import type { ActivitySink } from './activity.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { Message } from '@earendil-works/pi-ai';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import type { AccessAdmin } from './agents/access.js';
 import type { PlayContext } from './agents/play.js';
@@ -29,6 +30,8 @@ export interface HostResult {
   check?: 'passed' | 'failed'; models?: string[];
   tier?: Tier;
   teachatIdentity?: TeachatIdentityAnswer;
+  /** What the tools did before the final reply; kept with the turn so later turns can replay it. */
+  steps?: Message[];
 }
 export interface HostDependencies {
   approve: Approve;
@@ -144,9 +147,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       `Next: ${actions[stop] ?? 'Review the partial work, then retry with a smaller task.'}${largest}`,
       attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
   };
+  let previous: AttemptResult | undefined;
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
-    const result = { requestId, success, status, text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }) };
+    const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }) };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
   };
@@ -159,6 +163,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     // discord.play is open to everyone in Discord and needs no prompt; once a conversation has it, it stays active.
     const playable = Boolean(request.play && request.authorization?.available().includes('discord.play'));
     if (playable && request.authorization!.allows('discord.play')) activePermissions.push('discord.play');
+    // Apps outlive a conversation's history (a restart starts it over), so one with an app still running keeps discord.play.
+    else if (playable && request.play!.runtime.list(request.play!.conversation).some(app => app.status === 'running')) await activate(['discord.play'], 'An app started in this conversation is still running.');
     const provider = config.routingMode === 'direct' ? undefined : budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
     const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, { ...(request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)), ...(playable ? playQuestion : {}) }) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
     const physicalOnline = dependencies.localProbe
@@ -166,7 +172,6 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       : { fast: await localAvailable(config, 'fast'), capable: await localAvailable(config, 'capable') };
     const localOnline = physicalOnline.fast || physicalOnline.capable;
     let scope: { workload: Workload; tier: Tier } | undefined;
-    let previous: AttemptResult | undefined;
     const basePrompt = conversation.current;
     for (let index = 0; index <= config.policy.escalation.maxEscalations; index++) {
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
@@ -192,7 +197,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           mode: request.mode,
           granted_access: request.authorization?.list(),
           web_enabled: Boolean(request.web),
-          history: conversation.history,
+          history: conversation.history.map(({ user, assistant }) => ({ user, assistant })),
           ...(scope ? { escalation: { ...scope, evidence: previous?.reason } } : {}),
         },
         actor_permissions: request.authorization?.available() ?? config.policy.permissions,
@@ -281,7 +286,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           return activate(required, reason, signal);
         } : undefined,
         unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled,
-        history: conversation.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
+        // Each attempt fits earlier turns, with their steps, to its own model's context.
+        history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
           const approved = await dependencies.approve(approval);
           await telemetry.event('approval', { kind: approval.kind, approved });
@@ -333,4 +339,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     await telemetry.event('request_error', { name: error instanceof Error ? error.name : 'Error' });
     throw error;
   } finally { try { await unlock(); } finally { await idle(); dependencies.onActivity?.(undefined); } }
+}
+
+/** Steps outlive the request (Discord keeps them on disk), so secrets are masked like the answer text; if masking breaks them they are dropped. */
+function redactSteps(steps: Message[], redact: (text: string) => string): Message[] | undefined {
+  try { return JSON.parse(redact(JSON.stringify(steps))) as Message[]; } catch { return undefined; }
 }

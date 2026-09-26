@@ -46,11 +46,11 @@ The endpoint must provide `/models` and streaming `/chat/completions`. Coding re
 | Profile | Physical model | Native effort | Context | Output |
 | --- | --- | --- | ---: | ---: |
 | Fast | Qwen3.5-9B | off | 8,192 | 2,048 |
-| Normal | Qwen3.8-27B | off | 16,384 | 4,096 |
-| Reasoning | Qwen3.8-27B | `medium` | 24,576 | 8,192 |
+| Normal | Qwen3.8-27B | off | 32,768 | 4,096 |
+| Reasoning | Qwen3.8-27B | `medium` | 32,768 | 8,192 |
 | Deep | Qwen3.8-27B | `xhigh` | 32,768 | 16,384 |
 
-Normal, Reasoning, and Deep share one model identity. Related agentic work stays on that identity while effort changes. Unsupported native efforts remain unavailable; TeaPilot does not translate `xhigh` or emulate it in prompt text. Physical endpoints are checked independently, and execution models must have zero API cost.
+Normal, Reasoning, and Deep share one model identity and its configured context. Related agentic work stays on that identity while effort changes. Unsupported native efforts remain unavailable; TeaPilot does not translate `xhigh` or emulate it in prompt text. Physical endpoints are checked independently, and execution models must have zero API cost.
 
 ## Teachat
 

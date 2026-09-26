@@ -50,6 +50,68 @@ it('gives the play tools to a Discord conversation holding discord.play, and sta
   expect(f.runtime.list('dm:1')).toHaveLength(1);
 });
 
+it('updates the newest app with small edits to its current source', async () => {
+  const bodies: any[] = [];
+  const steps = [
+    { tool: { name: 'play_start', arguments: { title: 'Counter', source } } },
+    { tool: { name: 'play_update', arguments: { edits: [{ find: "'Count '", replace: "'Total '" }] } } },
+    { tool: { name: 'play_update', arguments: { edits: [{ find: 'no such text', replace: 'x' }] } } },
+    { text: 'Renamed it.' },
+    { tool: { name: 'play_inspect', arguments: {} } },
+    { text: 'It counts.' },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make me a counter, then call it a total', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[2].messages)).toContain('Total 0');
+  expect(JSON.stringify(bodies[3].messages)).toContain('occurs 0 times in the current source');
+  const [app] = f.runtime.list('dm:1');
+  expect(f.runtime.source(app!.id, 'dm:1')).toMatchObject({ code: expect.stringContaining("'Total '") });
+  // A later turn without the earlier calls still learns the app from the prompt, and play_inspect shows its code.
+  await runAttempt({ ...f, ...f.base, prompt: 'what does it do?', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(JSON.stringify(bodies[4].messages)).toContain(`Running here: ${app!.id} \\"Counter\\"`);
+  expect(JSON.stringify(bodies[5].messages)).toMatch(/Current source:.*'Total '/);
+});
+
+it('takes app code from the code block in the reply, and leaves it out of the answer', async () => {
+  const bodies: any[] = [];
+  const block = '```js\n' + source + '\n```';
+  const steps = [
+    { tool: { name: 'play_start', arguments: { title: 'Counter' } } },
+    { text: `Here it is:\n${block}`, tool: { name: 'play_start', arguments: { title: 'Counter' } } },
+    { text: `Done:\n${block}\nPress Add.` },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[1].messages)).toContain('No app code found in your reply');
+  expect(bodies[0].tools.find((tool: any) => tool.function.name === 'play_start').function.parameters.properties).not.toHaveProperty('source');
+  expect(f.posts).toEqual(['Count 0']);
+  expect(result.text).toBe('Done:\n\nPress Add.');
+  // The steps keep the block and the call, for the next turn to replay.
+  expect(JSON.stringify(result.steps)).toContain('```js');
+  expect(result.steps!.filter(step => step.role === 'toolResult')).toHaveLength(2);
+});
+
+it('replays the tool calls of earlier turns, so a follow-up knows the app and its code', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => {
+    bodies.push(body);
+    completion(res, bodies.length === 1 ? { text: '```js\n' + source + '\n```', tool: { name: 'play_start', arguments: { title: 'Counter' } } } : { text: 'Your counter is up.' });
+  });
+  const play = { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } };
+  const first = await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'], play });
+  await runAttempt({ ...f, ...f.base, prompt: 'make it count down', activePermissions: ['inference', 'discord.play'], play,
+    history: [{ user: 'make me a counter', assistant: first.text, steps: first.steps }] });
+  const replayed = JSON.stringify(bodies[2].messages);
+  expect(replayed).toContain('play_start');
+  expect(replayed).toMatch(/Started app [a-z0-9]+/);
+  expect(replayed).toContain("'Count '");
+});
+
 it('returns app mistakes as results to fix, not tool failures', async () => {
   const bodies: any[] = [];
   const f = await setup((body, _req, res) => {

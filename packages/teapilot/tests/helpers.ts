@@ -46,7 +46,7 @@ export function jev(response: ServerResponse, selected: string, confidence = 0.9
 export function completion(response: ServerResponse, options: { text?: string; tool?: { name: string; arguments: unknown }; cost?: number; noUsage?: boolean; model?: string }): void {
   response.setHeader('Content-Type', 'text/event-stream');
   const common = { id: 'mock-chat', object: 'chat.completion.chunk', created: 1, model: options.model ?? 'mock-model' };
-  const delta = options.tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${Date.now()}`, type: 'function', function: { name: options.tool.name, arguments: JSON.stringify(options.tool.arguments) } }] } : { role: 'assistant', content: options.text ?? 'Done.' };
+  const delta = options.tool ? { role: 'assistant', ...(options.text !== undefined ? { content: options.text } : {}), tool_calls: [{ index: 0, id: `call-${Date.now()}`, type: 'function', function: { name: options.tool.name, arguments: JSON.stringify(options.tool.arguments) } }] } : { role: 'assistant', content: options.text ?? 'Done.' };
   const chunk = (value: unknown) => response.write(`data: ${JSON.stringify(value)}\n\n`);
   chunk({ ...common, choices: [{ index: 0, delta, finish_reason: null }] });
   chunk({ ...common, choices: [{ index: 0, delta: {}, finish_reason: options.tool ? 'tool_calls' : 'stop' }], ...(!options.noUsage ? { usage: { prompt_tokens: 120, completion_tokens: 20, total_tokens: 140, ...(options.cost !== undefined ? { cost: options.cost } : {}) } } : {}) });

@@ -2,6 +2,7 @@ import { button, embed, field, modal, row, select } from '@teapilot/discord-play
 import { expect, it } from 'vitest';
 import { describe as preview, findControl, parseCustomId, renderModal, renderView } from '../src/discord/play/render.js';
 import { checkMessage, checkModal } from '../scripts/discord-sim/validate.js';
+import { unfence } from '../src/discord/play/consult.js';
 
 it('renders a view as Discord API JSON with namespaced custom ids', () => {
   const payload = renderView('abc123', {
@@ -81,4 +82,10 @@ it('finds controls and previews a view as text', () => {
   expect(findControl(view, 's')?.type).toBe('select');
   expect(findControl(view, 'missing')).toBeUndefined();
   expect(preview(view)).toBe('Pick\n[A](a → modal m) [Site](https://example.com)\n<select s: x|y>');
+});
+
+it('hands a consult reply that is one fenced block to the app as its contents', () => {
+  expect(unfence('```json\n{"a":1}\n```')).toBe('{"a":1}');
+  expect(unfence('  ```\nplain\n```\n')).toBe('plain');
+  expect(unfence('Here you go:\n```json\n{}\n```')).toBe('Here you go:\n```json\n{}\n```');
 });

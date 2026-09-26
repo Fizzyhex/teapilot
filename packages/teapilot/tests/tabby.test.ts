@@ -280,8 +280,8 @@ it('sets up Optimized NVIDIA end to end: only verified reasoning tiers are enabl
   expect(JSON.stringify(saved.models)).not.toContain((await install(h.root)).keys.api);
   // Every probe carried the template switch for its tier; nothing was appended to prompts.
   expect(h.tabby.state.chats.map(body => body.chat_template_kwargs)).toEqual(expect.arrayContaining([{ enable_thinking: false }, { enable_thinking: true, reasoning_effort: 'medium' }, { enable_thinking: true, reasoning_effort: 'xhigh' }]));
-  // The review shows the normal tier dropping to its own caps once reasoning verifies.
-  expect(prompts.lines.join('\n')).toContain('Tiers:     normal 16,384 / 4,096 output · reasoning 24,576 / 8,192 output · deep 32,768 / 16,384 output');
+  // The review shows the normal tier dropping to its own reply length once reasoning verifies; context is shared.
+  expect(prompts.lines.join('\n')).toContain('Tiers:     normal 32,768 / 4,096 output · reasoning 32,768 / 8,192 output · deep 32,768 / 16,384 output');
   expect(await manageRuntimes('status', saved, prompts, signal(), runtimes)).toBe(true);
 });
 

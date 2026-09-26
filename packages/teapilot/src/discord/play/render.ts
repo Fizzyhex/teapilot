@@ -25,6 +25,8 @@ export function parseCustomId(value: string): { playId: string; id: string } | u
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+/** A short sample of a wrong value, for error messages. */
+const shown = (value: unknown) => { const text = JSON.stringify(value) ?? String(value); return text.length > 80 ? `${text.slice(0, 79)}…` : text; };
 function string(value: unknown, what: string, max: number, required = false): string | undefined {
   if (value === undefined || value === null || value === '') { if (required) throw new PlayError(`${what} is required.`); return undefined; }
   if (typeof value !== 'string') throw new PlayError(`${what} must be a string.`);
@@ -89,7 +91,7 @@ export function renderEmbeds(value: unknown): Array<Record<string, unknown>> {
 }
 
 function renderControl(playId: string, control: unknown, disabled: boolean, seen: Set<string>): Record<string, unknown> {
-  if (!isRecord(control)) throw new PlayError('Rows hold controls built with button() or select().');
+  if (!isRecord(control)) throw new PlayError(`Rows hold controls built with button() or select(), not ${shown(control)}.`);
   if (control.type === 'button') {
     // Discord rejects blank labels; an emoji-only button often arrives with a space as its label.
     const label = string(control.label, 'Button label', limits.label)?.trim() ? control.label as string : undefined;
@@ -122,19 +124,45 @@ function renderControl(playId: string, control: unknown, disabled: boolean, seen
     if (max < Math.max(min, 1)) throw new PlayError('Select max must be at least min and at least 1.');
     return compact({ type: 3, custom_id: customId(playId, key), options, placeholder: string(control.placeholder, 'Select placeholder', limits.placeholder), min_values: min, max_values: max, disabled: disabled || control.disabled === true || undefined });
   }
-  throw new PlayError('Rows hold controls built with button() or select().');
+  throw new PlayError(`Rows hold controls built with button() or select(), not ${shown(control)}.`);
+}
+
+/**
+ * Accepts the shapes a view is easily mistaken for when what they mean is clear: a bare string,
+ * embed or row, a list of those, a lone embed as embeds, and a row given as a list of controls or one control.
+ */
+export function normalizeView(value: unknown): unknown {
+  const asRow = (part: unknown) => Array.isArray(part) ? { type: 'row', controls: part }
+    : isRecord(part) && (part.type === 'button' || part.type === 'select') ? { type: 'row', controls: [part] } : part;
+  let view = value;
+  if (typeof view === 'string' || Array.isArray(view) || isRecord(view) && typeof view.type === 'string') {
+    const parts: unknown[] = Array.isArray(view) ? view : [view];
+    const isEmbed = (part: unknown) => isRecord(part) && part.type === 'embed';
+    const content = parts.filter((part): part is string => typeof part === 'string');
+    const embeds = parts.filter(isEmbed);
+    const rows = parts.filter(part => typeof part !== 'string' && !isEmbed(part)).map(asRow);
+    view = { ...(content.length ? { content: content.join('\n') } : {}), ...(embeds.length ? { embeds } : {}), ...(rows.length ? { rows } : {}) };
+  }
+  if (isRecord(view) && isRecord(view.embeds)) view = { ...view, embeds: [view.embeds] };
+  // A row inside a row, or a list of controls inside one, still means those controls side by side.
+  const flat = (part: unknown) => isRecord(part) && part.type === 'row' && Array.isArray(part.controls)
+    ? { ...part, controls: part.controls.flatMap(control => Array.isArray(control) ? control : isRecord(control) && control.type === 'row' && Array.isArray(control.controls) ? control.controls : [control]) } : part;
+  if (isRecord(view) && Array.isArray(view.rows)) view = { ...view, rows: view.rows.map(part => flat(asRow(part))) };
+  return view;
 }
 
 /** Checks a view against Discord's limits and renders it; `disabled` greys out every control, for a finished app. */
 export function renderView(playId: string, view: unknown, disabled = false): MessagePayload {
-  if (!isRecord(view)) throw new PlayError('view() must return an object such as { content, embeds, rows }.');
+  if (!isRecord(view) || view.type !== undefined) throw new PlayError(`view() must return a message object { content?, embeds?, rows? }${isRecord(view) && typeof view.type === 'string' ? `, not a bare ${view.type}; wrap it, as in { ${view.type === 'embed' ? 'embeds' : 'rows'}: [...] }` : Array.isArray(view) ? ', not an array' : ''}.`);
   const content = string(view.content, 'Message content', limits.content) ?? '';
   const embeds = renderEmbeds(view.embeds);
   const seen = new Set<string>();
-  const components = list(view.rows, 'rows', limits.rows).map((value, index) => {
+  // An empty row() is usually a conditional control that is hidden right now, so it is dropped.
+  const rows = list(view.rows, 'rows', Infinity).filter(value => !(isRecord(value) && value.type === 'row' && Array.isArray(value.controls) && !value.controls.length));
+  if (rows.length > limits.rows) throw new PlayError(`rows has ${rows.length} entries; Discord allows ${limits.rows}.`);
+  const components = rows.map((value, index) => {
     if (!isRecord(value) || value.type !== 'row') throw new PlayError(`Row ${index + 1} must be built with row().`);
     const controls = list(value.controls, `Row ${index + 1}`, limits.buttons);
-    if (!controls.length) throw new PlayError(`Row ${index + 1} is empty.`);
     if (controls.some(control => isRecord(control) && control.type === 'select') && controls.length > 1) throw new PlayError(`Row ${index + 1}: a select must be alone in its row.`);
     return { type: 1 as const, components: controls.map(control => renderControl(playId, control, disabled, seen)) };
   });

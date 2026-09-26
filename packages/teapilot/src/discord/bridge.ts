@@ -1,7 +1,7 @@
 import { runSession, type SessionExtension } from '../chat.js';
 import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
-import type { EventSink } from '../integration/events.js';
+import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
 import type { PlayRuntime } from './play/runtime.js';
 import { chunk, ProgressLine, throttle } from './render.js';
@@ -47,6 +47,8 @@ export interface ConversationOptions {
   approvalTimeoutMs?: number;
   progressIntervalMs?: number;
   extension?: SessionExtension;
+  /** Receives the conversation's turns after each change, so they survive a restart. */
+  onHistory?: (history: ConversationTurn[]) => void;
   /** discord.play apps; `channelId` is where they post, absent where teapilot cannot keep a message alive. */
   play?: { runtime: PlayRuntime; channelId?: string };
 }
@@ -175,7 +177,7 @@ export class Conversation {
   private async start(): Promise<void> {
     try {
       await runSession({ request: this.options.request, once: this.options.once, maxPromptChars: this.options.maxPromptChars, input: this.input, run: this.run,
-        approve: this.approve, log: text => void this.say(text), onEvent: this.onEvent, extension: this.options.extension });
+        approve: this.approve, log: text => void this.say(text), onEvent: this.onEvent, extension: this.options.extension, onHistory: this.options.onHistory });
       if (!this.options.request.signal?.aborted && !this.options.once) await this.say('Session ended. Send a message to start a new one.');
     } catch (error) {
       if (!this.options.request.signal?.aborted) {

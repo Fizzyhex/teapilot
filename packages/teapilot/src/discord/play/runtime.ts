@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Action, Effect, Embed, Participants, User, View } from '@teapilot/discord-play';
 import { maxOutputChars, type CallInput, type ContextData, type PlayEngine } from './engine.js';
-import { describe, findControl, PlayError, renderEmbeds, renderModal, renderView, type MessagePayload, type ModalPayload } from './render.js';
+import { describe, findControl, normalizeView, PlayError, renderEmbeds, renderModal, renderView, type MessagePayload, type ModalPayload } from './render.js';
 import { sandbox } from './sandbox.js';
 import type { PlayRecord, PlayStore } from './store.js';
 import { trusted, type DiscordRequest } from './trusted.js';
@@ -112,6 +112,8 @@ export class PlayRuntime {
   constructor(private readonly options: {
     store: PlayStore; surface: PlaySurface; log: (text: string) => void;
     consult?: Consultant; clock?: Clock;
+    /** Try every control before an app is posted or replaced (default true). */
+    probe?: boolean;
   }) {}
 
   private get clock(): Clock { return this.options.clock ?? systemClock; }
@@ -147,7 +149,8 @@ export class PlayRuntime {
     const checked = checkEffects(effects);
     const shown = await engine.call('view', { state, ctx: { ...input.ctx, seed: result.seed } });
     const finish = checked.find(effect => effect.type === 'finish');
-    const payload = renderView(record.id, shown.value, Boolean(finish));
+    const view = normalizeView(shown.value);
+    const payload = renderView(record.id, view, Boolean(finish));
     const timers = new Map(record.timers.map(timer => [timer.id, timer.dueAt]));
     for (const effect of checked) {
       if (effect.type === 'after') timers.set(effect.id, input.ctx.now + effect.ms);
@@ -155,7 +158,56 @@ export class PlayRuntime {
     }
     if (finish) timers.clear();
     if (timers.size > playLimits.timers) throw new PlayError(`An app may have ${playLimits.timers} timers pending.`);
-    return { state, seed: shown.seed, view: shown.value as View, payload: withNote(payload, finish?.summary), effects: checked, timers: [...timers].map(([id, dueAt]) => ({ id, dueAt })), finished: finish ? { summary: finish.summary } : undefined };
+    return { state, seed: shown.seed, view: view as View, payload: withNote(payload, finish?.summary), effects: checked, timers: [...timers].map(([id, dueAt]) => ({ id, dueAt })), finished: finish ? { summary: finish.summary } : undefined };
+  }
+
+  /**
+   * Uses every enabled control once from a step's state, as its owner would, then lets what that
+   * sets off run for a while: timers fire and consults get an unhelpful answer. Nothing is
+   * committed. A control that would break when someone uses it stops the app before anyone sees it;
+   * finishing while controls are still on show is only returned as a note, since it may be intended.
+   */
+  private async probe(engine: PlayEngine, record: PlayRecord, from: Advance): Promise<string[]> {
+    if (this.options.probe === false) return [];
+    const problems: string[] = [];
+    const notes = new Set<string>();
+    let budget = 60;
+    let timed = from.timers.length > 0;
+    const base: PlayRecord = { ...record, state: from.state, seed: from.seed, timers: from.timers };
+    for (const control of (from.view.rows ?? []).flatMap(row => row.controls)) {
+      if (control.disabled || (control.type === 'button' && control.url)) continue;
+      const name = control.type === 'button' ? `[${control.label || control.emoji || control.id}]` : `select ${control.id}`;
+      const action: Action = control.type === 'select'
+        ? { kind: 'select', id: control.id, user: record.owner, values: control.options.slice(0, 1).map(option => option.value) }
+        : control.opens
+          ? { kind: 'modal', id: control.opens.id, user: record.owner, fields: Object.fromEntries(control.opens.fields.map(field => [field.id, 'test'])) }
+          : { kind: 'button', id: control.id, user: record.owner };
+      let current = base;
+      let pending: Action[] = [action];
+      let label = control.type === 'button' && control.opens ? `submitting the form behind ${name}` : `using ${name}`;
+      for (let round = 0; round < 6 && pending.length && budget > 0; round++, budget--) {
+        const next = pending.shift()!;
+        if (round) label += next.kind === 'timer' ? `, then timer ${next.id}` : `, then an answer to consult ${next.id}`;
+        let step: Advance;
+        try { step = await this.advance(engine, current, next); }
+        catch (error) { problems.push(`${label}: ${errorText(error)}`); break; }
+        if (step.timers.length) timed = true;
+        if (next.kind !== 'button' && next.kind !== 'select' && next.kind !== 'modal' && step.effects.some(effect => effect.type === 'ephemeral')) notes.add(`${label} returns ephemeral(), but no one pressed anything, so no one sees it. Show that message in the view instead.`);
+        if (step.finished) {
+          const left = (step.view.rows ?? []).flatMap(row => row.controls).filter(shown => !shown.disabled && !(shown.type === 'button' && shown.url));
+          if (left.length) notes.add(`${label} calls finish(), which ends the app and disables ${left.map(shown => shown.type === 'button' ? `[${shown.label || shown.emoji || shown.id}]` : `select ${shown.id}`).join(', ')} for good. If people should still use them (to play again, say), return a state instead of finish().`);
+          break;
+        }
+        const consult = step.effects.find(effect => effect.type === 'consult');
+        const timer = [...step.timers].sort((a, b) => a.dueAt - b.dueAt)[0];
+        current = { ...current, state: step.state, seed: step.seed, timers: step.timers.filter(entry => entry !== timer) };
+        pending = consult ? [{ kind: 'consult', id: consult.id, text: 'Sorry, I cannot help with that.' }] : timer ? [{ kind: 'timer', id: timer.id }] : [];
+      }
+      if (problems.length >= 3) break;
+    }
+    if (problems.length) throw new PlayError(`People using the app would hit these errors:\n${problems.map(problem => `- ${clip(problem, 400)}`).join('\n')}`);
+    if (!timed && record.source.kind === 'sandbox' && /\bafter\s*\(/.test(record.source.code)) notes.add('The code uses after(), but no timer is pending and using each control did not schedule one, so nothing will move on its own. Schedule the first one from init (return step(state, after(...))) or from the control that starts things.');
+    return [...notes].slice(0, 3);
   }
 
   private remember(record: PlayRecord, action: string, error?: string): void {
@@ -231,7 +283,11 @@ export class PlayRuntime {
     live.consulting = true;
     void this.options.consult({ title: record.title, owner: record.owner, channelId: record.channelId }, effect.prompt)
       .then(text => ({ text: clip(text, 4000) }), error => ({ error: errorText(error) }))
-      .then(result => { live.consulting = false; answer(result); });
+      .then(result => {
+        live.consulting = false;
+        this.options.log(`play ${record.id}: consult ${effect.id} ${'text' in result ? `answered: ${clip(JSON.stringify(result.text), 300)}` : `failed: ${result.error}`}`);
+        answer(result);
+      });
   }
 
   private release(live: Live): void {
@@ -278,11 +334,12 @@ export class PlayRuntime {
       const meta = (await engine.call('meta', { ctx: this.context(record) })).value as { participants?: unknown } | null;
       record.participants = checkParticipants(options.participants ?? meta?.participants ?? 'everyone');
       const step = await this.advance(engine, record);
+      const notes = await this.probe(engine, record, step);
       const live: Live = { record, engine, timers: new Map(), consulting: false, chain: Promise.resolve() };
       record.messageId = await this.options.surface.post(record.channelId, step.payload);
       this.live.set(record.id, live);
       this.commit(live, step, 'start');
-      return { record, preview: describe(step.view) };
+      return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
     } catch (error) { engine.dispose(); throw error; }
   }
 
@@ -295,14 +352,16 @@ export class PlayRuntime {
       try {
         const step = reset ? await this.advance(engine, record) : await (async () => {
           const shown = await engine.call('view', { state: record.state, ctx: this.context(record) });
-          return { state: record.state, seed: shown.seed, view: shown.value as View, payload: renderView(record.id, shown.value), effects: [], timers: record.timers } satisfies Advance;
+          const view = normalizeView(shown.value);
+          return { state: record.state, seed: shown.seed, view: view as View, payload: renderView(record.id, view), effects: [], timers: record.timers } satisfies Advance;
         })();
+        const notes = await this.probe(engine, record, step);
         if (live.engine !== engine) live.engine?.dispose();
         live.engine = engine;
         live.record = record;
         this.commit(live, step, reset ? 'restart' : 'update');
         if (record.messageId) await this.options.surface.edit(record.channelId, record.messageId, step.payload);
-        return { record, preview: describe(step.view) };
+        return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
       } catch (error) { if (live.engine !== engine) engine.dispose(); throw error; }
     });
   }
@@ -334,6 +393,9 @@ export class PlayRuntime {
     const { record } = this.owned(id, conversation);
     return JSON.stringify({ id: record.id, title: record.title, status: record.status, note: record.note, participants: record.participants, source: record.source.kind === 'trusted' ? { trusted: record.source.path } : 'sandbox', timers: record.timers, state: record.state, recentActions: record.log });
   }
+
+  /** The code an app runs now, so a change can be made as small edits to it. */
+  source(id: string, conversation: string): Source { return this.owned(id, conversation).record.source; }
 
   list(conversation: string): Array<{ id: string; title: string; status: string }> {
     return [...this.live.values()].map(live => live.record).filter(record => record.conversation === conversation).map(({ id, title, status }) => ({ id, title, status }));

@@ -28,17 +28,19 @@ export function calibratedTokens(estimate: number, observed?: { estimated: numbe
   return Math.min(estimate * 2, Math.max(Math.ceil(estimate * 0.6), scaled));
 }
 
+/** The same lexical estimate over any JSON value: strings, plus keys and structure. */
+export function estimateValueTokens(value: unknown): number {
+  if (typeof value === 'string') return estimateTextTokens(value);
+  if (Array.isArray(value)) return value.reduce<number>((sum, item) => sum + estimateValueTokens(item) + 2, 0);
+  if (value && typeof value === 'object') return Object.entries(value).reduce((sum, [key, item]) => sum + estimateTextTokens(key) + estimateValueTokens(item) + 4, 0);
+  return estimateTextTokens(String(value));
+}
+
 export function estimateInputTokens(body: string): number {
   const payload = JSON.parse(body) as { messages?: unknown[]; tools?: unknown[] };
   if (!Array.isArray(payload.messages)) throw new Error('Missing chat messages');
   // Count the model-bearing fields, not escaped transport JSON or sampling
   // options. Retain schema keys and structure because tools enter the prompt.
-  const count = (value: unknown): number => {
-    if (typeof value === 'string') return estimateTextTokens(value);
-    if (Array.isArray(value)) return value.reduce<number>((sum, item) => sum + count(item) + 2, 0);
-    if (value && typeof value === 'object') return Object.entries(value).reduce((sum, [key, item]) => sum + estimateTextTokens(key) + count(item) + 4, 0);
-    return estimateTextTokens(String(value));
-  };
   // Template/tool rendering headroom plus per-message role/turn delimiters.
-  return 2048 + payload.messages.length * 32 + count(payload.messages) + count(payload.tools ?? []);
+  return 2048 + payload.messages.length * 32 + estimateValueTokens(payload.messages) + estimateValueTokens(payload.tools ?? []);
 }

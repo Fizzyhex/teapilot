@@ -1,3 +1,4 @@
+import type { Message } from '@earendil-works/pi-ai';
 import { z } from 'zod';
 
 export interface HostEvent { type: string; [key: string]: unknown }
@@ -11,7 +12,11 @@ export function formatSize(bytes: number): string {
 }
 export const historySchema = z.array(z.object({ user: z.string().max(20_000), assistant: z.string().max(20_000) }).strict()).max(100);
 export const contextSchema = z.array(z.object({ name: z.string().max(1000), text: z.string().max(1_000_000), path: z.string().max(4096).optional() }).strict()).max(50);
-export type ConversationTurn = z.infer<typeof historySchema>[number];
+/**
+ * `steps` are the tool calls and results between the request and the reply, kept inside teapilot so a later
+ * turn still has what the tools did (ids, code, results); the integration protocol carries text only.
+ */
+export type ConversationTurn = z.infer<typeof historySchema>[number] & { steps?: Message[] };
 export type TextContext = z.infer<typeof contextSchema>[number];
 
 /** Keep complete recent turns; never truncate the user's current request. */
@@ -21,7 +26,8 @@ export function prepareConversation(prompt: string, context: TextContext[], hist
   const selected: ConversationTurn[] = [];
   let size = current.length;
   for (const turn of [...history].reverse()) {
-    const length = JSON.stringify(turn).length + 100;
+    // Only the text counts here; each attempt fits the steps to its own model's context.
+    const length = JSON.stringify({ user: turn.user, assistant: turn.assistant }).length + 100;
     if (size + length > limit) break;
     selected.unshift(turn); size += length;
   }

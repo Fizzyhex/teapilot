@@ -22,7 +22,8 @@ export const maxOutputChars = 256_000;
 
 /**
  * Runs inside the app's realm. `app` is the module the model wrote; `__play` is the only entry point.
- * random() is mulberry32 over a persisted seed, so it continues across calls and restarts.
+ * random() is mulberry32 over a persisted seed, so it continues across calls and restarts. Math.random
+ * is the same generator, so apps that reach for it stay reproducible too.
  */
 export const harness = (awaitResult: boolean) => `
 const definition = app && typeof app === 'object' ? app : undefined;
@@ -33,6 +34,7 @@ globalThis.__play = ${awaitResult ? 'async ' : ''}(method, input, discord) => {
   const ctx = { now: data.now, invoker: data.invoker, participants: data.participants, emojis: data.emojis,
     random() { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; },
     emoji(name) { return Object.prototype.hasOwnProperty.call(data.emojis, name) ? data.emojis[name] : ':' + name + ':'; } };
+  Math.random = ctx.random;
   if (discord) ctx.discord = discord;
   let value;
   if (method === 'meta') value = { participants: definition.participants === undefined ? null : definition.participants };

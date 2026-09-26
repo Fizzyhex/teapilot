@@ -38,7 +38,7 @@ export default app({
   ] }),
 });`;
 
-async function setup(options: { consult?: Consultant; clock?: Clock; directory?: string } = {}) {
+async function setup(options: { consult?: Consultant; clock?: Clock; directory?: string; probe?: boolean } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'teapilot-play-'));
   if (!options.directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const posts: MessagePayload[] = [];
@@ -50,7 +50,7 @@ async function setup(options: { consult?: Consultant; clock?: Clock; directory?:
   };
   const log = vi.fn();
   const store = new PlayStore(directory);
-  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, clock: options.clock });
+  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, clock: options.clock, probe: options.probe ?? false });
   cleanups.push(() => runtime.close());
   return { directory, store, runtime, surface, posts, edits, log };
 }
@@ -229,6 +229,35 @@ it('refuses a broken app before posting anything', async () => {
   await expect(start(runtime, { code: counter.replace("content: state.count + ' ' + state.said", "content: 5") })).rejects.toThrow(/Message content must be a string/);
   await expect(start(runtime, { code: 'export default {' })).rejects.toThrow();
   expect(posts).toEqual([]);
+});
+
+it('accepts views in shapes whose meaning is clear, and drops empty rows', async () => {
+  const { runtime, posts } = await setup();
+  const loose = counter.replace(/view: state => \(\{[\s\S]*\}\),\n\}\);/, "view: state => [embed({ title: 'n' + state.count }), [button('add', 'Add')], row(), button('end', 'End')],\n});").replace('finish, modal', 'finish, modal, embed');
+  const { record } = await start(runtime, { code: loose });
+  expect(posts[0]!.embeds).toHaveLength(1);
+  expect(posts[0]!.components.map(row => row.components.length)).toEqual([1, 1]);
+  await runtime.interact(act(record.id, 'add').interaction);
+  expect(runtime.inspect(record.id, 'dm:1')).toContain('"count":1');
+});
+
+it('tries every control, and what it sets off, before posting or replacing an app', async () => {
+  const { runtime, posts } = await setup({ probe: true });
+  await expect(start(runtime)).rejects.toThrow(/using \[Boom\]: update\(\) threw: Error: kaboom/);
+  const late = counter.replace("return { ...state, count: state.count + 100 }", "throw new Error('late')");
+  await expect(start(runtime, { code: late.replace("button('boom', 'Boom'), ", '') })).rejects.toThrow(/using \[Soon\], then timer tick: .*late/);
+  const trusting = counter.replace("said: action.text ?? 'error: ' + action.error", "said: JSON.parse(action.text).word");
+  await expect(start(runtime, { code: trusting.replace("button('boom', 'Boom'), ", '') })).rejects.toThrow(/using \[Ask\], then an answer to consult judge: .*SyntaxError/);
+  expect(posts).toEqual([]);
+  const { record, preview } = await start(runtime, { code: counter.replace("button('boom', 'Boom'), ", '') });
+  expect(preview).toContain('Note: using [End] calls finish(), which ends the app and disables [Add], [Hint]');
+  expect(preview).not.toContain('nothing will move on its own');
+  const still = counter.replace("button('boom', 'Boom'), ", '').replace("button('soon', 'Soon'), button('never', 'Never')", "button('hint2', 'Hint 2')");
+  expect((await start(runtime, { code: still })).preview).toContain('Note: The code uses after(), but no timer is pending');
+  const whisper = counter.replace("button('boom', 'Boom'), ", '').replace("return { ...state, count: state.count + 100 }", "return step(state, ephemeral('tick'))");
+  expect((await start(runtime, { code: whisper })).preview).toContain('Note: using [Soon], then timer tick returns ephemeral(), but no one pressed anything');
+  await expect(runtime.update(record.id, 'dm:1', { kind: 'sandbox', code: counter }, false)).rejects.toThrow(/kaboom/);
+  expect(posts).toHaveLength(3);
 });
 
 it('dry-runs an app with scripted actions', async () => {

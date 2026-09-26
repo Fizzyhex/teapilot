@@ -10,6 +10,8 @@ import { isTierPreference, tierPreferences, type Tier, type TierPreference } fro
 
 const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /exit, /quit`;
 
+const keptSteps = 6;
+
 /** Optional behaviour layered on a session, such as teachat. Every hook is awaited in turn order. */
 export interface SessionExtension {
   /** Runs before any command or turn: background work must get out of the way first. */
@@ -39,6 +41,8 @@ export async function runSession(options: {
   log?: (text: string) => void;
   onEvent?: EventSink;
   extension?: SessionExtension;
+  /** The conversation's turns after each change, for surfaces that keep them across restarts; empty once cleared. */
+  onHistory?: (history: ConversationTurn[]) => void;
 }): Promise<number> {
   const extension = options.extension;
   const help = sessionHelp + (extension?.help ? `, ${extension.help}` : '');
@@ -62,7 +66,7 @@ export async function runSession(options: {
       }
     }
     prompt = prompt.trim();
-    if (['/exit', '/quit'].includes(prompt)) break;
+    if (['/exit', '/quit'].includes(prompt)) { options.onHistory?.([]); break; }
     if (!prompt) continue;
     await extension?.busy?.();
     if (prompt.startsWith('/')) {
@@ -91,7 +95,7 @@ export async function runSession(options: {
       } else if (command === '/tier' && !extra && isTierPreference(value)) {
         tier = value; options.log?.(`Tier preference: ${tier}`);
       } else if (command === '/new' && !value) {
-        history = []; correction = undefined; relatedTier = undefined; tier = 'auto'; await extension?.reset?.(); options.log?.('Started a new task. Session access and spending remain available.');
+        history = []; options.onHistory?.(history); correction = undefined; relatedTier = undefined; tier = 'auto'; await extension?.reset?.(); options.log?.('Started a new task. Session access and spending remain available.');
       } else if (command === '/mode' && !extra && isMode(value)) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,
@@ -114,7 +118,10 @@ export async function runSession(options: {
     const user = prompt + (correction ? `\nUser correction:\n${correction}` : '');
     // A failed turn's text is the host's diagnostic, not a reply; models imitate it on the next turn.
     const assistant = result.success ? result.text : `[that request stopped before finishing: ${result.status.replaceAll('_', ' ')}]`;
-    history = prepareConversation('', [], [...history, { user, assistant }], options.maxPromptChars).history;
+    // Only recent turns keep their steps: fitting history to a model replays older ones as text anyway.
+    const turns = [...history, { user, assistant, ...(result.steps?.length ? { steps: result.steps } : {}) }];
+    history = prepareConversation('', [], turns.map((turn, index) => index < turns.length - keptSteps ? { user: turn.user, assistant: turn.assistant } : turn), options.maxPromptChars).history;
+    options.onHistory?.(history);
     await extension?.turnEnd?.({ user, assistant }, result);
     correction = undefined;
     prompt = '';

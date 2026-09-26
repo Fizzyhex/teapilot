@@ -383,6 +383,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
       else if (req.url?.endsWith('/models')) res.end('{}');
       else completion(res, { text: 'unused' });
     });
+    f.config.models.capable.contextTokens = 16384;
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'x!'.repeat(6000) }, { approve: async () => false });
     expect(result.status).toBe('context_limit');
     expect(result.text).toContain('Next: Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.');

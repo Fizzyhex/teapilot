@@ -22,7 +22,8 @@ export function effectiveProfile(config: Config, tier: Tier): ExecutionProfile {
   const ceiling = !escalationOrder.slice(escalationOrder.indexOf(tier) + 1)
     .some(next => profileFor(next).model === profile.model && profileAvailable(config, next).available);
   if (ceiling) return { ...profile, contextTokens: model.contextTokens, maxOutputTokens: model.maxOutputTokens };
-  return { ...profile, contextTokens: Math.min(profile.contextTokens, model.contextTokens), maxOutputTokens: Math.min(profile.maxOutputTokens, model.maxOutputTokens) };
+  // Tiers on one model share the context its server holds anyway; a tier sets reasoning and reply length.
+  return { ...profile, contextTokens: model.contextTokens, maxOutputTokens: Math.min(profile.maxOutputTokens, model.maxOutputTokens) };
 }
 export function modelFor(config: Config, tier: Tier): ModelConfig { return config.models[profileFor(tier).model]; }
 export function profileAvailable(config: Config, tier: Tier): { available: boolean; reason?: string } {

@@ -126,7 +126,8 @@ export async function serve(input: NodeJS.ReadableStream = process.stdin, output
           if (action.path) await review?.capture(action.path);
         } });
         routingSessions.set(sessionId, { taskId, relatedTier: result.tier && result.tier !== 'fast' ? result.tier : relatedTier });
-        return result;
+        // The protocol carries text history only; steps stay inside teapilot.
+        return { ...result, steps: undefined };
       } finally {
         if (review) {
           try { onEvent({ type: 'review', review: await review.finish() }); }

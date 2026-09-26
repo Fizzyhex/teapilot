@@ -11,6 +11,7 @@ const callMs = 200;
 let wasm: Promise<QuickJSWASMModule> | undefined;
 let sdkSource: string | undefined;
 const loadSdk = () => sdkSource ??= toJavaScript(readFileSync(sdkPath(), 'utf8'), 'discord-play.ts');
+const sdkExports = () => [...loadSdk().matchAll(/^export (?:function|const) (\w+)/gm)].map(match => match[1]!);
 
 /**
  * Runs model-written apps in QuickJS compiled to WebAssembly: no process, require, fetch, timers or
@@ -29,13 +30,15 @@ class SandboxEngine implements PlayEngine {
     runtime.setModuleLoader(name => {
       if (name === sdkName) return loadSdk();
       if (name === 'app') return this.code;
+      // Every SDK export is also a global, so an app that forgets an import still runs.
+      if (name === 'prelude') return `import * as sdk from '${sdkName}';\nfor (const [key, value] of Object.entries(sdk)) if (!(key in globalThis)) globalThis[key] = value;`;
       return { error: new Error(`Sandboxed apps can import only "${sdkName}", not "${name}".`) };
     });
     const context = runtime.newContext();
     this.realm = { runtime, context };
     try {
       runtime.setInterruptHandler(shouldInterruptAfterDeadline(Date.now() + loadMs));
-      const result = context.evalCode(`import app from 'app';\n${harness(false)}`, 'harness.js', { type: 'module' });
+      const result = context.evalCode(`import 'prelude';\nimport app from 'app';\n${harness(false)}`, 'harness.js', { type: 'module' });
       if (result.error) { const error = context.dump(result.error); result.error.dispose(); throw new PlayError(`The app failed to load: ${message(error)}`); }
       result.value.dispose();
       const pending = runtime.executePendingJobs();
@@ -76,6 +79,8 @@ function message(error: unknown): string {
     if (name === 'InternalError' && text === 'interrupted') return 'it ran too long (each call gets 200 ms; the app may be looping forever).';
     if (text === 'out of memory' || name === 'InternalError' && /memory/i.test(text ?? '')) return 'it ran out of memory (32 MB).';
     if (/export 'default'/.test(text ?? '')) return 'the app module must "export default app({ init, update, view })".';
+    const missing = /Could not find export '([^']+)' in module '@teapilot\/discord-play'/.exec(text ?? '');
+    if (missing) return `"${missing[1]}" is not part of @teapilot/discord-play. It exports ${sdkExports().join(', ')}.`;
     return `${name ?? 'Error'}: ${text ?? ''}${stack ? `\n${stack.trim().split('\n').slice(0, 4).join('\n')}` : ''}`;
   }
   return String(error);

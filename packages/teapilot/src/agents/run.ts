@@ -3,7 +3,7 @@ import { stat } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
 import { Type, type Message } from '@earendil-works/pi-ai';
-import { emptyUsage } from '../integration/inference.js';
+import { estimateValueTokens } from '../inference/context.js';
 import type { Config, Tier, Workload } from '../config.js';
 import { modelFor, effectiveProfile } from '../routing/execution.js';
 import { modeFor, withPrerequisites, type Mode, type Permission } from '../execution/grants.js';
@@ -16,7 +16,8 @@ import type { Telemetry } from '../telemetry/outcome.js';
 import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
 import { coder } from './coder.js';
-import { play, type PlayContext } from './play.js';
+import { fitHistory, turnSteps } from './history.js';
+import { latestCode, play, withoutCode, type PlayContext } from './play.js';
 
 export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
@@ -42,6 +43,8 @@ export interface AttemptResult {
   largestToolResult?: { tool: string; chars: number };
   unresolvedChecks?: string[];
   searchExhausted?: boolean;
+  /** Tool calls and results before the final reply, for later turns to replay. */
+  steps?: Message[];
 }
 
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
@@ -58,6 +61,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let toolLimit = false, timeout = false, searchFailed = false, capabilityDenied = false;
   let repositorySetup: Awaited<ReturnType<typeof coder>> | undefined;
   const controlTools: AgentTool[] = [];
+  // discord.play takes an app's code from the newest code block in this request's replies, so code never
+  // has to be escaped into JSON arguments; blocks it used are left out of the answer shown to people.
+  let messages = (): Message[] => [];
+  const drafts = { latest: () => latestCode(messages()), used: new Set<string>() };
   const compose = async () => {
     const repository = effectiveConfig.policy.permissions.includes('repository.read');
     if (repository && !repositorySetup) {
@@ -82,7 +89,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       : mode === 'ask' ? '\nAsk mode: give focused answers, research, and plans. Ask questions only when needed to answer accurately.'
       : '\nCode mode: complete requested repository work and report changes and verification; answer ordinary questions directly without unnecessary repository inspection.';
     if (input.play && effectiveConfig.policy.permissions.includes('discord.play')) {
-      const apps = play(input.play, effectiveConfig, policy, input.approve);
+      const apps = play(input.play, effectiveConfig, policy, input.approve, drafts);
       setup.tools.push(...apps.tools);
       setup.systemPrompt += '\n' + apps.systemPrompt;
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
@@ -136,10 +143,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   if (input.access && model.toolCalling) controlTools.push(...accessTools(input.access, input.approve, input.prompt));
   const setup = await compose();
   if (!model.toolCalling && setup.tools.length) throw new Error('Selected model cannot use the required tools');
-  const history: Message[] = (input.history ?? []).flatMap(turn => [
-    { role: 'user' as const, content: turn.user, timestamp: Date.now() },
-    { role: 'assistant' as const, content: [{ type: 'text' as const, text: turn.assistant }], api: 'openai-completions' as const, provider: model.provider, model: model.id, timestamp: Date.now(), usage: emptyUsage(), stopReason: 'stop' as const },
-  ]);
+  // Earlier turns get at most half of what the instructions, tools and request leave, so this turn's own
+  // calls and results still fit. The admission check at the provider remains the exact limit.
+  const fixed = 2048 + estimateValueTokens([setup.systemPrompt, input.prompt]) + estimateValueTokens(setup.tools.map(({ name, description, parameters }) => ({ name, description, parameters })));
+  const history = fitHistory(input.history ?? [], Math.floor((profile.contextTokens - profile.maxOutputTokens - fixed) / 2), model);
   const stream = guardedStream(config, tier, input.budget, telemetry, inference);
   // Populated in afterToolCall (which has args) and consumed once by the matching
   // tool_execution_end event below (which only carries the result).
@@ -192,6 +199,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     finishTurn: () => capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted ? { action: 'end' } : undefined,
   });
+  const start = history.length + 1;
+  messages = () => agent.state.messages.slice(start) as Message[];
   const redactor = new StreamRedactor([input.config.router.apiKey ?? '', ...Object.values(input.config.secrets).map(value => value ?? '')]);
   agent.subscribe(event => {
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_start') {
@@ -226,8 +235,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     clearTimeout(timer);
     input.signal?.removeEventListener('abort', cancel);
   }
-  const last = agent.state.messages.findLast(message => message.role === 'assistant');
+  const last = messages().findLast(message => message.role === 'assistant');
   const text = last?.role === 'assistant' ? last.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '';
+  const turn = messages();
+  // A final reply without calls is the answer itself; everything before it is what the tools did.
+  const steps = turnSteps(last?.role === 'assistant' && last === turn.at(-1) && !last.content.some(part => part.type === 'toolCall') ? turn.slice(0, -1) : turn);
+  const shown = drafts.used.size ? withoutCode(text, drafts.used) : text;
   const stopped = capabilityDenied || policy.denied ? 'approval_denied' : input.signal?.aborted ? 'cancelled' : searchFailed ? 'search_unavailable' : timeout ? 'timeout' : toolLimit ? 'tool_limit' : inference.stop;
   const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? 'unsupported' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
     ?? (evidence.unresolvedChecks.size || evidence.lastCheck === 'failed' ? 'test_failures' : evidence.failures ? 'tool_failures' : undefined);
@@ -243,7 +256,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   });
   return {
     success,
-    text,
+    text: shown.trim() ? shown : text,
+    steps,
     changedFiles,
     fileSizes,
     largestToolResult: evidence.largestResult,

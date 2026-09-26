@@ -31,7 +31,8 @@ it('gives the highest runnable tier on a model its configured limits', async () 
   Object.assign(f.config.models.capable, { contextTokens: 32768, maxOutputTokens: 16384, reasoningEfforts: ['off'] });
   expect(effectiveProfile(f.config, 'normal')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 16384 });
   f.config.models.capable.reasoningEfforts = ['off', 'medium'];
-  expect(effectiveProfile(f.config, 'normal')).toMatchObject({ contextTokens: 16384, maxOutputTokens: 4096 });
+  // A lower tier keeps its own reply length, but shares the context the model's server holds.
+  expect(effectiveProfile(f.config, 'normal')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 4096 });
   expect(effectiveProfile(f.config, 'reasoning')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 16384 });
 });
 

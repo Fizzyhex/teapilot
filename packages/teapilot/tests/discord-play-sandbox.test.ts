@@ -39,6 +39,16 @@ export default app({ init: ctx => [ctx.random(), ctx.random()], update: s => s, 
   } finally { engine.dispose(); }
 });
 
+it('runs Math.random from the same seed, and forgives forgotten SDK imports', async () => {
+  const engine = await sandbox(`export default app({ init: ctx => [Math.random(), ctx.random()], update: s => s, view: () => ({ rows: [row(button('go', 'Go'))] }) });`);
+  try {
+    const first = await engine.call('init', { ctx });
+    expect((await engine.call('init', { ctx })).value).toEqual(first.value);
+    expect((await engine.call('view', { state: null, ctx })).value).toEqual({ rows: [{ type: 'row', controls: [{ type: 'button', id: 'go', label: 'Go' }] }] });
+  } finally { engine.dispose(); }
+  await expect(sandbox(`import { app, short } from '@teapilot/discord-play'; export default app({});`)).rejects.toThrow(/"short" is not part of @teapilot\/discord-play\. It exports app, step, .*button/);
+});
+
 it('has no process, require, fetch or timers', async () => {
   const engine = await sandbox(`import { app } from '@teapilot/discord-play';
 export default app({ init: () => [typeof process, typeof require, typeof fetch, typeof setTimeout, typeof globalThis.Deno], update: s => s, view: () => ({ content: 'x' }) });`);

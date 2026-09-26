@@ -6,6 +6,7 @@ import { headlessTeachat, openHeadlessTeachat } from '../teachat/session.js';
 import type { SetupUI } from '../setup/terminal.js';
 import { route, routeReply } from './access.js';
 import { AccessStore } from './access-store.js';
+import { HistoryStore } from './history-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
 import { consultant } from './play/consult.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
@@ -65,6 +66,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   const allowed = (id: string) => access.roleOf(id) !== undefined;
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
+  const histories = HistoryStore.at(stateDir);
   const teachat = withTeachat ? await openHeadlessTeachat(config, log) : undefined;
   const run = (request: HostRequest, dependencies: Parameters<typeof runHost>[2]) => teachat ? teachat.work(() => runHost(config, request, dependencies)) : runHost(config, request, dependencies);
   // The surface is bound once the gateway connects; apps only post after a message arrives or on recovery, both later.
@@ -85,7 +87,10 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       key, transport, queue, redact, log, access,
       // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
       once: oneShot,
-      request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal },
+      request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
+        // A conversation picks up where it was before a restart; a one-shot reply has nothing to continue.
+        history: oneShot ? undefined : histories.load(key) },
+      onHistory: oneShot ? undefined : history => { try { histories.save(key, history); } catch (error) { log(`${key}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
       maxPromptChars: config.policy.limits.maxPromptChars,
       run,
       extension: teachat && headlessTeachat(teachat, key),
