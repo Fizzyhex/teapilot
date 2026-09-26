@@ -40,3 +40,27 @@ it('does not size a failed write and records no observed edit', async () => {
   expect(result.changedFiles).toEqual([]);
   expect(result.fileSizes).toEqual({});
 });
+
+/** A reply that ends to call a tool but carries no call, as a model server sends when it cannot parse one. */
+function lostCall(res: import('node:http').ServerResponse) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  const common = { id: 'mock-chat', object: 'chat.completion.chunk', created: 1, model: 'mock-model' };
+  res.write(`data: ${JSON.stringify({ ...common, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ ...common, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+  res.end('data: [DONE]\n\n');
+}
+
+it('asks again after a tool call the server announced but did not send, then gives up as a provider error', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => { bodies.push(body); if (bodies.length === 1) lostCall(res); else completion(res, { text: 'Hello.' }); });
+  const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'hello' });
+  expect(result.success).toBe(true);
+  expect(JSON.stringify(bodies[1].messages)).toContain('could not read your last tool call');
+
+  const stuck = await setup((_body, _req, res) => lostCall(res));
+  const failed = await runAttempt({ ...stuck, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'hello' });
+  expect(failed.success).toBe(false);
+  expect(failed.reason).toBe('provider_error');
+  expect(failed.turns).toBe(3);
+  expect(failed.ending).toMatchObject({ stopReason: 'toolUse', textChars: 0 });
+});

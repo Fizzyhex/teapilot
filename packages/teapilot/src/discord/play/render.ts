@@ -66,20 +66,22 @@ function url(value: unknown, what: string): string | undefined {
   if (text && !/^https?:\/\//i.test(text)) throw new PlayError(`${what} must be an http(s) URL.`);
   return text;
 }
+/** Discord's own { text } / { url } shapes, which models often write for footer, image and thumbnail. */
+const unwrap = (value: unknown, key: 'text' | 'url') => isRecord(value) && typeof value[key] === 'string' ? value[key] : value;
 const compact = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 
 function renderEmbed(value: unknown, index: number): { json: Record<string, unknown>; size: number } {
   if (!isRecord(value)) throw new PlayError(`Embed ${index + 1} must be built with embed().`);
   const title = string(value.title, 'Embed title', limits.title);
   const description = string(value.description, 'Embed description', limits.description);
-  const footer = string(value.footer, 'Embed footer', limits.footer);
+  const footer = string(unwrap(value.footer, 'text'), 'Embed footer', limits.footer);
   const fields = list(value.fields, 'Embed fields', limits.fields).map((field, number) => {
     if (!isRecord(field)) throw new PlayError(`Embed field ${number + 1} must be { name, value, inline? }.`);
     return compact({ name: string(field.name, 'Embed field name', limits.fieldName, true), value: string(field.value, 'Embed field value', limits.fieldValue, true), inline: field.inline === true ? true : undefined });
   });
   const size = (title?.length ?? 0) + (description?.length ?? 0) + (footer?.length ?? 0) + fields.reduce((sum, field) => sum + String(field.name).length + String(field.value).length, 0);
   if (!size && !value.image && !value.thumbnail) throw new PlayError(`Embed ${index + 1} is empty.`);
-  const image = url(value.image, 'Embed image'), thumbnail = url(value.thumbnail, 'Embed thumbnail');
+  const image = url(unwrap(value.image, 'url'), 'Embed image'), thumbnail = url(unwrap(value.thumbnail, 'url'), 'Embed thumbnail');
   return { size, json: compact({ title, description, url: url(value.url, 'Embed url'), color: color(value.color), fields: fields.length ? fields : undefined, footer: footer ? { text: footer } : undefined, image: image ? { url: image } : undefined, thumbnail: thumbnail ? { url: thumbnail } : undefined }) };
 }
 
@@ -212,7 +214,7 @@ export function describe(view: View): string {
     lines.push(`[embed${embed.color !== undefined ? ` ${String(embed.color)}` : ''}]${embed.title ? ` ${embed.title}` : ''}`);
     if (embed.description) lines.push(embed.description);
     for (const field of embed.fields ?? []) lines.push(`${field.name}: ${field.value}`);
-    if (embed.footer) lines.push(`-- ${embed.footer}`);
+    if (embed.footer) lines.push(`-- ${String(unwrap(embed.footer, 'text'))}`);
   }
   for (const row of view.rows ?? []) lines.push(row.controls.map(control => control.type === 'select'
     ? `<select ${control.id}: ${control.options.map(option => option.value).join('|')}>`

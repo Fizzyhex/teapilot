@@ -2,7 +2,7 @@ import { button, embed, field, modal, row, select } from '@teapilot/discord-play
 import { expect, it } from 'vitest';
 import { describe as preview, findControl, parseCustomId, renderModal, renderView } from '../src/discord/play/render.js';
 import { checkMessage, checkModal } from '../scripts/discord-sim/validate.js';
-import { unfence } from '../src/discord/play/consult.js';
+import { firstJson, unfence } from '../src/discord/play/consult.js';
 
 it('renders a view as Discord API JSON with namespaced custom ids', () => {
   const payload = renderView('abc123', {
@@ -24,6 +24,12 @@ it('renders a view as Discord API JSON with namespaced custom ids', () => {
   expect(() => checkMessage(payload)).not.toThrow();
   expect(parseCustomId('play:abc123:go')).toEqual({ playId: 'abc123', id: 'go' });
   expect(parseCustomId('teapilot:nonce:approve')).toBeUndefined();
+});
+
+it('accepts Discord\'s own { text } and { url } shapes for an embed footer and images', () => {
+  const view = { embeds: [{ type: 'embed', title: 'Soup', footer: { text: 'Recipe 1 of 2' }, thumbnail: { url: 'https://example.com/a.png' } }] } as never;
+  expect(renderView('a1', view).embeds[0]).toMatchObject({ footer: { text: 'Recipe 1 of 2' }, thumbnail: { url: 'https://example.com/a.png' } });
+  expect(preview(view)).toContain('-- Recipe 1 of 2');
 });
 
 it('sends emoji-only buttons without a blank label', () => {
@@ -88,4 +94,12 @@ it('hands a consult reply that is one fenced block to the app as its contents', 
   expect(unfence('```json\n{"a":1}\n```')).toBe('{"a":1}');
   expect(unfence('  ```\nplain\n```\n')).toBe('plain');
   expect(unfence('Here you go:\n```json\n{}\n```')).toBe('Here you go:\n```json\n{}\n```');
+});
+
+it('finds the first whole JSON value in a consult reply that repeats or wraps it', () => {
+  expect(firstJson('{"a":"}{"}\n\n{"a":"}{"}')).toBe('{"a":"}{"}');
+  expect(firstJson('Sure! [1, {"b": "\\"x\\""}] hope that helps')).toBe('[1, {"b": "\\"x\\""}]');
+  expect(firstJson(' {"a":1} ')).toBe(' {"a":1} ');
+  expect(firstJson('no json here')).toBeUndefined();
+  expect(firstJson('{"a": 1')).toBeUndefined();
 });

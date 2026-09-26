@@ -18,6 +18,8 @@ export interface Spec {
   /** Where the access list and app records live; the profile's own state directory is never touched for these. */
   state: string;
   root: string; mode: 'ask' | 'chat'; configDir?: string; ttl: number; teachat: boolean;
+  /** Time stands still except when `advance` moves it. */
+  frozen?: boolean;
 }
 type Body = Record<string, unknown> & { op: string };
 
@@ -27,7 +29,7 @@ process.on('uncaughtException', fail);
 process.on('unhandledRejection', fail);
 
 const world = new World();
-const clock = new SkippableClock();
+const clock = new SkippableClock(spec.frozen);
 const notes: string[] = [];
 const config = await loadConfig(await configDirectory(spec.configDir, homedir()), { ...process.env });
 if (!config.policy.permissions.includes('discord.play')) {
@@ -141,7 +143,7 @@ async function handle(body: Body): Promise<Record<string, unknown>> {
       await serve();
       return { text: `teapilot restarted; conversations started over and apps were recovered.\n${since(mark)}` };
     }
-    case 'status': return { text: `${running() ? 'running' : 'stopped'}; clock +${Math.round(clock.skipped / 1000)} s; root ${spec.root}; mode ${spec.mode}` };
+    case 'status': return { text: `${running() ? 'running' : 'stopped'}; clock +${Math.round(clock.skipped / 1000)} s${spec.frozen ? ' (frozen)' : ''}; root ${spec.root}; mode ${spec.mode}` };
     case 'stop': await halt(); return { text: 'Stopped.', shutdown: true };
     default: throw new Error(`Unknown operation ${body.op}`);
   }

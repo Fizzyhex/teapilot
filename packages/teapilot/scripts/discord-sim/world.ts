@@ -362,7 +362,9 @@ export class World {
       const notes = [this.controlId(control), styles[control.style as number], control.disabled ? 'disabled' : undefined].filter(Boolean);
       return `[${this.label(control)}](${notes.join(', ')})`;
     }
-    const options = (control.options as Array<{ label: string; value: string; default?: boolean }>).map(option => `${option.label === option.value ? option.label : `${option.label}=${option.value}`}${option.default ? '*' : ''}`);
+    // Shown as an option looks in Discord: its emoji and label, then its description underneath.
+    const options = (control.options as Array<Json & { label: string; value: string; description?: string; default?: boolean }>).map(option =>
+      `${this.label(option)}${option.label === option.value ? '' : `=${option.value}`}${option.description ? ` "${option.description}"` : ''}${option.default ? '*' : ''}`);
     const min = (control.min_values as number | undefined) ?? 1, max = (control.max_values as number | undefined) ?? 1;
     return `<select ${this.controlId(control)}${min === 1 && max === 1 ? '' : ` ${min}–${max}`}${control.disabled ? ', disabled' : ''}${control.placeholder ? ` "${String(control.placeholder)}"` : ''}: ${options.join(' | ')}>`;
   }

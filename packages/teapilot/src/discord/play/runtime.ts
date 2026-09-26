@@ -43,7 +43,7 @@ export const systemClock: Clock = {
 
 export const playLimits = {
   perChannel: 5, total: 50, idleMs: 24 * 60 * 60_000, keepFinishedMs: 7 * 24 * 60 * 60_000,
-  timers: 10, minTimerMs: 1000, maxTimerMs: 24 * 60 * 60_000, consultsPerHour: 20, consultPromptChars: 4000,
+  timers: 10, minTimerMs: 2000, maxTimerMs: 24 * 60 * 60_000, consultsPerHour: 20, consultPromptChars: 4000,
   stateChars: 64_000, log: 20,
 };
 const idPattern = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -74,14 +74,14 @@ function checkEffects(effects: unknown[]): Effect[] {
   return effects.map(effect => {
     const value = effect as Record<string, unknown>;
     if (typeof value !== 'object' || value === null) throw new PlayError('Effects must be built with ephemeral(), after(), cancel(), finish() or consult().');
-    const key = (what: string) => { if (typeof value.id !== 'string' || !idPattern.test(value.id)) throw new PlayError(`${what} id must be 1–64 letters, digits, "_", "." or "-".`); return value.id; };
+    const key = (what: string) => { if (typeof value.id !== 'string' || !idPattern.test(value.id)) throw new PlayError(`${what} id must be 1–64 letters, digits, "_", "." or "-", not ${JSON.stringify(value.id).slice(0, 80)}. Use a fixed id such as "reply", and keep what it was about in state.`); return value.id; };
     switch (value.type) {
       case 'ephemeral':
         if (typeof value.content !== 'string' || value.content.length > 2000) throw new PlayError('ephemeral() content must be a string of at most 2000 characters.');
         if (value.embeds !== undefined) renderEmbeds(value.embeds);
         return value.embeds === undefined ? { type: 'ephemeral', content: value.content } : { type: 'ephemeral', content: value.content, embeds: value.embeds as Embed[] };
       case 'after':
-        if (typeof value.ms !== 'number' || !Number.isFinite(value.ms) || value.ms < playLimits.minTimerMs || value.ms > playLimits.maxTimerMs) throw new PlayError(`after() takes ${playLimits.minTimerMs} ms to 24 hours.`);
+        if (typeof value.ms !== 'number' || !Number.isFinite(value.ms) || value.ms < playLimits.minTimerMs || value.ms > playLimits.maxTimerMs) throw new PlayError(`after() takes ${playLimits.minTimerMs} ms to 24 hours; each tick edits the message, and Discord limits how often that can happen.`);
         return { type: 'after', id: key('after()'), ms: value.ms };
       case 'cancel': return { type: 'cancel', id: key('cancel()') };
       case 'finish':
@@ -174,6 +174,9 @@ export class PlayRuntime {
     let budget = 60;
     let timed = from.timers.length > 0;
     const base: PlayRecord = { ...record, state: from.state, seed: from.seed, timers: from.timers };
+    const before = JSON.stringify(from.state) + describe(from.view);
+    const tried: string[] = [], inert: string[] = [];
+    const shortcodes = new Set(shortcodesIn(describe(from.view)));
     for (const control of (from.view.rows ?? []).flatMap(row => row.controls)) {
       if (control.disabled || (control.type === 'button' && control.url)) continue;
       const name = control.type === 'button' ? `[${control.label || control.emoji || control.id}]` : `select ${control.id}`;
@@ -185,6 +188,7 @@ export class PlayRuntime {
       let current = base;
       let pending: Action[] = [action];
       let label = control.type === 'button' && control.opens ? `submitting the form behind ${name}` : `using ${name}`;
+      tried.push(name);
       for (let round = 0; round < 6 && pending.length && budget > 0; round++, budget--) {
         const next = pending.shift()!;
         if (round) label += next.kind === 'timer' ? `, then timer ${next.id}` : `, then an answer to consult ${next.id}`;
@@ -192,6 +196,8 @@ export class PlayRuntime {
         try { step = await this.advance(engine, current, next); }
         catch (error) { problems.push(`${label}: ${errorText(error)}`); break; }
         if (step.timers.length) timed = true;
+        if (!round && !step.effects.length && JSON.stringify(step.state) + describe(step.view) === before) inert.push(name);
+        for (const code of shortcodesIn(describe(step.view))) shortcodes.add(code);
         if (next.kind !== 'button' && next.kind !== 'select' && next.kind !== 'modal' && step.effects.some(effect => effect.type === 'ephemeral')) notes.add(`${label} returns ephemeral(), but no one pressed anything, so no one sees it. Show that message in the view instead.`);
         if (step.finished) {
           const left = (step.view.rows ?? []).flatMap(row => row.controls).filter(shown => !shown.disabled && !(shown.type === 'button' && shown.url));
@@ -206,7 +212,10 @@ export class PlayRuntime {
       if (problems.length >= 3) break;
     }
     if (problems.length) throw new PlayError(`People using the app would hit these errors:\n${problems.map(problem => `- ${clip(problem, 400)}`).join('\n')}`);
-    if (!timed && record.source.kind === 'sandbox' && /\bafter\s*\(/.test(record.source.code)) notes.add('The code uses after(), but no timer is pending and using each control did not schedule one, so nothing will move on its own. Schedule the first one from init (return step(state, after(...))) or from the control that starts things.');
+    // Timer code that nothing reaches is also never checked, so its mistakes would only show once live.
+    if (shortcodes.size) notes.add(`The view shows ${[...shortcodes].slice(0, 5).join(' ')} as plain text: Discord turns :shortcodes: into emoji only when a person types them. Use the Unicode emoji instead.`);
+    if (tried.length && inert.length === tried.length) notes.add(`Using ${inert.join(', ')} changed nothing, so the app looks broken to whoever presses first. If people join by acting, add them the first time their id acts.`);
+    if (!timed && record.source.kind === 'sandbox' && /\bafter\b|["']timer["']/.test(record.source.code)) notes.add('The code handles timers, but no timer is pending and using each control did not schedule one, so nothing will move on its own and the timer code is untested. Schedule the first tick from init or from the control that starts things: return step(state, after(2000, "tick")).');
     return [...notes].slice(0, 3);
   }
 
@@ -491,6 +500,11 @@ export class PlayRuntime {
     this.sweeper = undefined;
     for (const live of this.live.values()) this.release(live);
   }
+}
+
+/** :name: shortcodes, which Discord shows as typed in anything a bot sends; <:name:id> custom emoji are left out. */
+function shortcodesIn(text: string): string[] {
+  return [...text.matchAll(/(?<![<\w]):([a-z][a-z0-9_+-]{1,40}):(?!\d)/g)].map(match => match[0]);
 }
 
 function checkParticipants(value: unknown): Participants {

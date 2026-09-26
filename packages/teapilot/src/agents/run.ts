@@ -17,7 +17,7 @@ import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
 import { coder } from './coder.js';
 import { fitHistory, turnSteps } from './history.js';
-import { latestCode, play, withoutCode, type PlayContext } from './play.js';
+import { latestCode, play, withoutCode, type Drafts, type PlayContext } from './play.js';
 
 export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
@@ -45,6 +45,8 @@ export interface AttemptResult {
   searchExhausted?: boolean;
   /** Tool calls and results before the final reply, for later turns to replay. */
   steps?: Message[];
+  /** How the last model message ended, so an unexplained incomplete attempt can be diagnosed. */
+  ending?: { stopReason?: string; error?: string; textChars: number };
 }
 
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
@@ -59,12 +61,17 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const model = modelFor(config, tier); const profile = effectiveProfile(config, tier);
   const inference: InferenceState = { turns: 0 };
   let toolLimit = false, timeout = false, searchFailed = false, capabilityDenied = false;
+  /** A reply that ended to call a tool but carried no call the server could parse. */
+  const lost = (message: { stopReason?: string; content: Array<{ type: string }> }) => message.stopReason === 'toolUse' && !message.content.some(part => part.type === 'toolCall');
+  let lostCalls = 0, lostNotice = false;
   let repositorySetup: Awaited<ReturnType<typeof coder>> | undefined;
   const controlTools: AgentTool[] = [];
   // discord.play takes an app's code from the newest code block in this request's replies, so code never
   // has to be escaped into JSON arguments; blocks it used are left out of the answer shown to people.
   let messages = (): Message[] => [];
-  const drafts = { latest: () => latestCode(messages()), used: new Set<string>() };
+  const drafts: Drafts = { latest: () => latestCode(messages()), used: new Set<string>() };
+  // Models that call a play tool without writing its code tend to repeat that call; a reply without tools cannot.
+  let paused: AgentTool[] | undefined, writing = false, pauses = 0;
   const compose = async () => {
     const repository = effectiveConfig.policy.permissions.includes('repository.read');
     if (repository && !repositorySetup) {
@@ -161,6 +168,19 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     toolExecution: 'sequential',
     prepareNextTurnWithContext: async ({ context }) => {
+      if (lostNotice) {
+        lostNotice = false;
+        const messages = context.messages.filter(message => !(message.role === 'assistant' && lost(message)));
+        return { context: { ...context, messages }, messages: [{ role: 'user', content: '[host notice] The model server could not read your last tool call, so nothing ran. Keep tool arguments short: put code and long text in your reply (an app goes in one ```js code block), then call the tool again.', timestamp: Date.now() }] };
+      }
+      if (drafts.missing && context.tools?.length && pauses < 2) {
+        drafts.missing = false; pauses++; paused = context.tools; writing = true;
+        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: '[host notice] That call had no new app code to use. Tools are paused for this reply: write the whole app now as one ```js code block, with at most a sentence around it. The tools return on your next turn.', timestamp: Date.now() }] };
+      }
+      if (paused) {
+        const tools = paused; paused = undefined;
+        return { context: { ...context, tools }, messages: [{ role: 'user', content: '[host notice] Tools are back. Call play_start (or play_update) now; it reads the code block you just wrote.', timestamp: Date.now() }] };
+      }
       if (evidence.answerNow && context.tools?.length) {
         return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: '[host notice] Those calls could not run, so tools are withdrawn for this attempt. Answer now from what you already have, clearly stating any gaps.', timestamp: Date.now() }] };
       }
@@ -197,7 +217,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (evidence.warning) return { content: [...result.content, { type: 'text' as const, text: evidence.warning }] };
       return undefined;
     },
-    finishTurn: () => capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted ? { action: 'end' } : undefined,
+    finishTurn: ({ message }) => {
+      if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
+      // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
+      if (lost(message) && lostCalls < 2) { lostCalls++; lostNotice = true; return { action: 'continue' }; }
+      if (writing) { writing = false; if (drafts.latest()) return { action: 'continue' }; paused = undefined; }
+      return undefined;
+    },
   });
   const start = history.length + 1;
   messages = () => agent.state.messages.slice(start) as Message[];
@@ -242,7 +268,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const steps = turnSteps(last?.role === 'assistant' && last === turn.at(-1) && !last.content.some(part => part.type === 'toolCall') ? turn.slice(0, -1) : turn);
   const shown = drafts.used.size ? withoutCode(text, drafts.used) : text;
   const stopped = capabilityDenied || policy.denied ? 'approval_denied' : input.signal?.aborted ? 'cancelled' : searchFailed ? 'search_unavailable' : timeout ? 'timeout' : toolLimit ? 'tool_limit' : inference.stop;
-  const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? 'unsupported' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
+  // A server that says the model called a tool but sends no call it could parse leaves nothing to run or show.
+  const lostCall = last?.role === 'assistant' && lost(last);
+  const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? 'unsupported' : undefined) ?? (lostCall ? 'provider_error' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
     ?? (evidence.unresolvedChecks.size || evidence.lastCheck === 'failed' ? 'test_failures' : evidence.failures ? 'tool_failures' : undefined);
   const success = !stopped && !reason && evidence.failures === 0 && evidence.lastCheck !== 'failed' && last?.role === 'assistant' && last.stopReason === 'stop' && Boolean(text.trim());
   const relPath = (path: string) => relative(input.cwd, path) || path;
@@ -269,6 +297,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     stopped,
     turns: Math.min(inference.turns, config.policy.limits.maxTurns),
     toolCalls: Math.min(evidence.toolCalls, config.policy.limits.maxToolCalls),
-    check: evidence.unresolvedChecks.size ? 'failed' : evidence.lastCheck
+    check: evidence.unresolvedChecks.size ? 'failed' : evidence.lastCheck,
+    ending: { stopReason: last?.role === 'assistant' ? last.stopReason : undefined, error: last?.role === 'assistant' ? last.errorMessage?.slice(0, 300) : undefined, textChars: text.length },
   };
 }

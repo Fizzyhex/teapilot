@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { latestCode } from '../src/agents/play.js';
 import { runAttempt } from '../src/agents/run.js';
 import { SessionGrants } from '../src/execution/grants.js';
 import { runHost } from '../src/host.js';
@@ -75,25 +76,38 @@ it('updates the newest app with small edits to its current source', async () => 
   expect(JSON.stringify(bodies[5].messages)).toMatch(/Current source:.*'Total '/);
 });
 
-it('takes app code from the code block in the reply, and leaves it out of the answer', async () => {
+it('takes app code from the code block in the reply, pausing tools until it is written, and leaves it out of the answer', async () => {
   const bodies: any[] = [];
   const block = '```js\n' + source + '\n```';
   const steps = [
     { tool: { name: 'play_start', arguments: { title: 'Counter' } } },
-    { text: `Here it is:\n${block}`, tool: { name: 'play_start', arguments: { title: 'Counter' } } },
+    { text: `Here it is:\n${block}` },
+    { tool: { name: 'play_start', arguments: { title: 'Counter' } } },
     { text: `Done:\n${block}\nPress Add.` },
   ];
   const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
   const result = await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'],
     play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
   expect(result.success, JSON.stringify(result)).toBe(true);
-  expect(JSON.stringify(bodies[1].messages)).toContain('No app code found in your reply');
+  expect(JSON.stringify(bodies[1].messages)).toContain('No app code found: your message had no');
+  // Asked for the code with no tools to call instead, then given them back.
+  expect(bodies[1].tools ?? []).toEqual([]);
+  expect(JSON.stringify(bodies[2].messages)).toContain('Tools are back');
+  expect(bodies[2].tools.length).toBeGreaterThan(0);
   expect(bodies[0].tools.find((tool: any) => tool.function.name === 'play_start').function.parameters.properties).not.toHaveProperty('source');
   expect(f.posts).toEqual(['Count 0']);
   expect(result.text).toBe('Done:\n\nPress Add.');
   // The steps keep the block and the call, for the next turn to replay.
   expect(JSON.stringify(result.steps)).toContain('```js');
   expect(result.steps!.filter(step => step.role === 'toolResult')).toHaveLength(2);
+});
+
+it('takes app code from thinking only when the reply has none', () => {
+  const said = (...content: unknown[]) => ({ role: 'assistant', content }) as never;
+  const block = (code: string) => '```js\n' + code + '\n```';
+  expect(latestCode([said({ type: 'thinking', thinking: block('thought()') })])).toBe('thought()');
+  expect(latestCode([said({ type: 'thinking', thinking: block('thought()') }, { type: 'text', text: block('written()') })])).toBe('written()');
+  expect(latestCode([said({ type: 'text', text: block('older()') }), said({ type: 'thinking', thinking: block('newer()') })])).toBe('newer()');
 });
 
 it('replays the tool calls of earlier turns, so a follow-up knows the app and its code', async () => {
@@ -122,6 +136,9 @@ it('returns app mistakes as results to fix, not tool failures', async () => {
     play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1' } });
   expect(result.success, JSON.stringify(result)).toBe(true);
   expect(JSON.stringify(bodies[1].messages)).toContain('App problem, nothing was changed');
+  // The same code again is turned away without a run, and tools pause until new code is written.
+  expect(JSON.stringify(bodies[2].messages)).toContain('the code that was just rejected, unchanged');
+  expect(bodies[2].tools ?? []).toEqual([]);
   expect(f.posts).toEqual([]);
 });
 

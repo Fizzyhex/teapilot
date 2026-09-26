@@ -294,7 +294,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           return approved;
         },
         signal: request.signal,
-        prompt: basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
+        prompt: basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. ${previous.changedFiles?.length || previous.shellRan ? 'Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.' : 'It changed no files; continue the task from the context below.'}\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
       });
       check = previous.check;
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
@@ -306,7 +306,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         if (activePermissions.includes('web.search')) activePermissions.splice(activePermissions.indexOf('web.search'), 1);
       }
       if (accessFailure) return await finish(false, 'approval_denied', incomplete(previous, accessFailure));
-      await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check });
+      await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check, ...(previous.success ? {} : { ending: previous.ending }) });
       if (previous.success) return await finish(true, 'completed', previous.text);
       if (!previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit', 'search_unavailable'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
         return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));

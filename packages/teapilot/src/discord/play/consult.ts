@@ -33,8 +33,31 @@ export function consultant(options: {
     };
     const result = await options.queue.run(() => options.run(request, { approve: async () => false }));
     if (!result.success) throw new Error(result.text || `The model could not answer (${result.status}).`);
-    return unfence(result.text);
+    const text = unfence(result.text);
+    return /\bjson\b/i.test(prompt) ? firstJson(text) ?? text : text;
   };
+}
+
+/**
+ * The first whole JSON object or array in a reply that is not JSON itself. Small models asked for
+ * JSON sometimes add a sentence or repeat the answer, which would fail the app's JSON.parse.
+ */
+export function firstJson(text: string): string | undefined {
+  try { JSON.parse(text); return text; } catch { /* look inside it */ }
+  const start = text.search(/[[{]/);
+  if (start < 0) return undefined;
+  let depth = 0, quoted = false, escaped = false;
+  for (let index = start; index < text.length; index++) {
+    const char = text[index]!;
+    if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
+    if (char === '"') quoted = true;
+    else if (char === '{' || char === '[') depth++;
+    else if ((char === '}' || char === ']') && --depth === 0) {
+      const candidate = text.slice(start, index + 1);
+      try { JSON.parse(candidate); return candidate; } catch { return undefined; }
+    }
+  }
+  return undefined;
 }
 
 /** App code parses the reply, so a reply that is one fenced block (```json ... ```) arrives as its contents. */

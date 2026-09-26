@@ -48,5 +48,6 @@ node packages/teapilot/scripts/agent-discord.mjs stop d
 - People are `op` (an operator), `user` (whitelisted) and `stranger` (neither); `--as` defaults to `op`. Channels are `dm-<person>` (the default), `channel`, and `thread-N` once teapilot opens one.
 - `select`, `submit --field id=value` and `approve [--deny]` cover menus, forms and approvals; `screen` shows a channel; `log` shows teapilot's operator log. Run it with `--help` for the rest.
 - It uses the real configuration and models, so turns can spend money; `--config-dir` picks another profile. Access lists and apps live in a scratch directory, never the profile's.
+- `start --frozen` stops the clock, so timers fire only when `advance` reaches them; use it for games that tick.
 - Only operators can answer approvals, as on Discord: read each one, and deny it unless the action is part of your task.
 - Always `stop` sessions you start.

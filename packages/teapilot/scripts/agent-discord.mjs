@@ -22,8 +22,9 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
 
 const usage = `Usage: node scripts/agent-discord.mjs <command>
 
-  start [--name N] [--root DIR] [--mode ask|chat] [--config-dir DIR] [--ttl S] [--teachat]
+  start [--name N] [--root DIR] [--mode ask|chat] [--config-dir DIR] [--ttl S] [--teachat] [--frozen]
                                      --root is teapilot's repository (default: an empty scratch directory)
+                                     --frozen stops the clock: timers fire only when advance reaches them
   say <name> <text> [--as P] [--in C] send a message; @op, @user, @stranger and @teapilot become mentions
   click <name> <message> <control> [--as P]
   select <name> <message> <control> <value...> [--as P]
@@ -87,7 +88,7 @@ async function client(argv) {
   if (command === 'start') {
     const { values } = parseArgs({ args: rest, options: {
       name: { type: 'string', default: 'default' }, root: { type: 'string' }, mode: { type: 'string', default: 'ask' },
-      'config-dir': { type: 'string' }, ttl: { type: 'string', default: '1800' }, teachat: { type: 'boolean', default: false },
+      'config-dir': { type: 'string' }, ttl: { type: 'string', default: '1800' }, teachat: { type: 'boolean', default: false }, frozen: { type: 'boolean', default: false },
     } });
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(values.name)) throw new UsageError('--name may contain letters, digits, _ and - (at most 40).');
     if (!['ask', 'chat'].includes(values.mode)) throw new UsageError('--mode is ask or chat.');
@@ -100,7 +101,7 @@ async function client(argv) {
     mkdirSync(paths.state, { recursive: true });
     if (!values.root) mkdirSync(paths.root, { recursive: true });
     const spec = { name: values.name, directory: paths.directory, socket: paths.socket, meta: paths.meta, log: paths.log, state: paths.state,
-      root: values.root ? resolve(values.root) : paths.root, mode: values.mode, configDir: values['config-dir'] && resolve(values['config-dir']), ttl, teachat: values.teachat };
+      root: values.root ? resolve(values.root) : paths.root, mode: values.mode, configDir: values['config-dir'] && resolve(values['config-dir']), ttl, teachat: values.teachat, frozen: values.frozen };
     const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--conditions=teapilot-source', join(root, 'scripts', 'discord-sim', 'daemon.ts'), Buffer.from(JSON.stringify(spec)).toString('base64url')],
       { cwd: homedir(), detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();

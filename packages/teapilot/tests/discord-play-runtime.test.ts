@@ -23,8 +23,8 @@ export default app({
     if (action.kind === 'button' && action.id === 'add') return { ...state, count: state.count + 1 };
     if (action.kind === 'button' && action.id === 'boom') throw new Error('kaboom');
     if (action.kind === 'button' && action.id === 'hint') return step(state, ephemeral('psst'));
-    if (action.kind === 'button' && action.id === 'soon') return step(state, after(1000, 'tick'));
-    if (action.kind === 'button' && action.id === 'never') return step(state, after(1000, 'tick'), cancel('tick'));
+    if (action.kind === 'button' && action.id === 'soon') return step(state, after(2000, 'tick'));
+    if (action.kind === 'button' && action.id === 'never') return step(state, after(2000, 'tick'), cancel('tick'));
     if (action.kind === 'button' && action.id === 'ask') return step(state, consult('judge', 'is ' + state.count + ' big?'));
     if (action.kind === 'button' && action.id === 'end') return step(state, finish('Final: ' + state.count));
     if (action.kind === 'timer') return { ...state, count: state.count + 100 };
@@ -173,7 +173,7 @@ it('fires timers, cancels them, and keeps them across a restart', async () => {
   await first.runtime.interact(act(record.id, 'never').interaction);
   expect(first.store.all()[0]!.timers).toEqual([]);
   await first.runtime.interact(act(record.id, 'soon').interaction);
-  expect(first.store.all()[0]!.timers).toEqual([{ id: 'tick', dueAt: clock + 1000 }]);
+  expect(first.store.all()[0]!.timers).toEqual([{ id: 'tick', dueAt: clock + 2000 }]);
   first.runtime.close();
   // A new process a minute later: the overdue timer fires as soon as the app is recovered.
   clock += 60_000;
@@ -253,18 +253,32 @@ it('tries every control, and what it sets off, before posting or replacing an ap
   expect(preview).toContain('Note: using [End] calls finish(), which ends the app and disables [Add], [Hint]');
   expect(preview).not.toContain('nothing will move on its own');
   const still = counter.replace("button('boom', 'Boom'), ", '').replace("button('soon', 'Soon'), button('never', 'Never')", "button('hint2', 'Hint 2')");
-  expect((await start(runtime, { code: still })).preview).toContain('Note: The code uses after(), but no timer is pending');
+  expect((await start(runtime, { code: still })).preview).toContain('Note: The code handles timers, but no timer is pending');
+  // Timer handling written without after() at all is still noticed, since its code is never tried.
+  const handled = still.replace(/after\(/g, 'later(');
+  expect((await start(runtime, { code: handled })).preview).toContain('Note: The code handles timers');
   const whisper = counter.replace("button('boom', 'Boom'), ", '').replace("return { ...state, count: state.count + 100 }", "return step(state, ephemeral('tick'))");
   expect((await start(runtime, { code: whisper })).preview).toContain('Note: using [Soon], then timer tick returns ephemeral(), but no one pressed anything');
   await expect(runtime.update(record.id, 'dm:1', { kind: 'sandbox', code: counter }, false)).rejects.toThrow(/kaboom/);
-  expect(posts).toHaveLength(3);
+  expect(posts).toHaveLength(4);
+});
+
+it('notes controls that change nothing and :shortcodes: that Discord would show as text', async () => {
+  const { runtime } = await setup({ probe: true });
+  // Controls that ignore whoever presses them first, such as a game nobody can join.
+  const inert = counter.replace(/row\(button\('ask'.*\),\n/, '').replace("button('add', 'Add'), button('boom', 'Boom'), button('hint', 'Hint'), button('soon', 'Soon'), button('never', 'Never')", "button('left', 'Left'), button('right', 'Right')");
+  expect((await start(runtime, { code: inert })).preview).toContain('Note: Using [Left], [Right] changed nothing');
+  const coded = counter.replace("button('boom', 'Boom'), ", '').replace("content: state.count + ' ' + state.said", "content: ':man_fairy: <:tea:123456789012345678> 12:30:00 ' + state.count");
+  const { preview: shown } = await start(runtime, { code: coded });
+  expect(shown).toContain('Note: The view shows :man_fairy: as plain text');
+  expect(shown).toMatch(/Note: The view shows :man_fairy: as plain text: /);
 });
 
 it('dry-runs an app with scripted actions', async () => {
   const { runtime, posts } = await setup();
-  const transcript = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }, { kind: 'button', id: 'soon' }, { kind: 'button', id: 'boom' }, { kind: 'button', id: 'add' }], owner);
+  const transcript = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }, { kind: 'button', id: 'soon' }, { kind: 'button', id: 'boom' }, { kind: 'button', id: 'add' }], owner, { steps: true });
   expect(transcript).toContain('## 1. button add\nstate: {"count":1,"said":""}');
-  expect(transcript).toContain('effects: [{"type":"after","id":"tick","ms":1000}]');
+  expect(transcript).toContain('effects: [{"type":"after","id":"tick","ms":2000}]');
   expect(transcript).toMatch(/## 3\. button boom\nerror: .*kaboom/);
   expect(transcript).not.toContain('## 4.');
   expect(posts).toEqual([]);
