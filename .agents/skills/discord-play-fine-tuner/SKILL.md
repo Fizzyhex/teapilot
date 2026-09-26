@@ -70,4 +70,4 @@ recipes should have condensed sections for name, prep time, servings, ingredient
 
 *verify: the app should ask the model through `consult()` (visible in `app <name> <id>`'s source), not hard-code recipes. submit two recipes through the form, then switch between them with `select`.*
 
-"that's great - could you also append "
+"that's great - could you use emojis as icons for the recipes in the dropdown options, and include little summaries underneath that add fun trivia about the recipe?"
