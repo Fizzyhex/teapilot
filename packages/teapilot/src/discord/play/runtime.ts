@@ -308,24 +308,26 @@ export class PlayRuntime {
   }
 
   /** A dry run with no message, persistence or timers, so the model can check an app before posting it. */
-  async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string> } = {}): Promise<string> {
+  async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean } = {}): Promise<string> {
     const engine = await this.build(source);
     const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], createdAt: 0, updatedAt: 0 };
     const lines: string[] = [];
+    let last: string[] = [];
     const show = (label: string, step: Advance) => {
       record.state = step.state; record.seed = step.seed;
-      lines.push(`## ${label}`, `state: ${clip(JSON.stringify(step.state), 1500)}`, describe(step.view));
-      if (step.effects.length) lines.push(`effects: ${clip(JSON.stringify(step.effects), 800)}`);
+      last = [`## ${label}`, `state: ${clip(JSON.stringify(step.state), 1500)}`, describe(step.view)];
+      if (step.effects.length) last.push(`effects: ${clip(JSON.stringify(step.effects), 800)}`);
+      if (options.steps) lines.push(...last);
     };
     try {
       show('start', await this.advance(engine, record));
       for (const [index, action] of actions.entries()) {
         const label = `${index + 1}. ${action.kind} ${action.id}`;
         try { show(label, await this.advance(engine, record, toAction(action, owner))); }
-        catch (error) { lines.push(`## ${label}`, `error: ${errorText(error)}`); break; }
+        catch (error) { last = [`## ${label}`, `error: ${errorText(error)}`]; lines.push(...last); break; }
       }
     } finally { engine.dispose(); }
-    return clip(lines.join('\n'), maxOutputChars / 8);
+    return clip((options.steps ? lines : [`(final of ${actions.length} actions; set steps for each)`, ...last]).join('\n'), maxOutputChars / 8);
   }
 
   inspect(id: string, conversation: string): string {

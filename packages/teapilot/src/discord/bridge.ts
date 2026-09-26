@@ -143,7 +143,7 @@ export class Conversation {
       else await this.options.transport.edit(await status, text);
     }, this.options.progressIntervalMs ?? 1500);
     const answerOnly = this.answerOnly;
-    this.sink = event => { if (!answerOnly && progress.push(event)) update.request(); };
+    this.sink = event => { if (typeof event.result === 'string') this.options.log(`${this.options.key}: ${String(event.tool)} -> ${this.options.redact(event.result)}`); if (!answerOnly && progress.push(event)) update.request(); };
     const typing = answerOnly ? undefined : setInterval(() => this.options.transport.typing(), 8000);
     let result: HostResult;
     try {

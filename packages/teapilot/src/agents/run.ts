@@ -212,7 +212,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         if (!state) evidence.refuse();
         detail = { ...toolDetails.get(event.toolCallId), ...(state !== 'ran' ? { refused: true } : {}) }; toolDetails.delete(event.toolCallId);
       }
-      input.onEvent?.({ type: event.type, tool: event.toolName, ...('isError' in event ? { isError: event.isError } : {}), ...detail });
+      const result = event.type === 'tool_execution_end' && event.toolName.startsWith('play_') ? JSON.stringify(event.result?.content?.[0]?.text ?? '').slice(1, 401) : undefined;
+      input.onEvent?.({ type: event.type, tool: event.toolName, ...('isError' in event ? { isError: event.isError } : {}), ...(result ? { result } : {}), ...detail });
     }
   });
   const timer = setTimeout(() => { timeout = true; agent.abort(); }, config.policy.limits.attemptTimeoutMs);

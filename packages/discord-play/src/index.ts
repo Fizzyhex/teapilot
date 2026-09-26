@@ -119,8 +119,8 @@ export function row(...controls: Control[]): Row { return { type: 'row', control
  * An emoji board: each cell is looked up in `palette`, so state can hold short codes.
  * grid([[0, 1], [1, 0]], { 0: '⬛', 1: '🟥' }) → "⬛🟥\n🟥⬛"
  */
-export function grid(cells: Array<Array<string | number>>, palette: Record<string, string> = {}): string {
-  return cells.map(line => line.map(cell => palette[String(cell)] ?? String(cell)).join('')).join('\n');
+export function grid(cells: Array<string | Array<string | number>>, palette: Record<string, string> = {}): string {
+  return cells.map(line => (typeof line === 'string' ? Array.from(line) : line).map(cell => palette[String(cell)] ?? String(cell)).join('')).join('\n');
 }
 
 /** A bar such as 🟩🟩🟩⬛⬛ for health, progress or timers. */

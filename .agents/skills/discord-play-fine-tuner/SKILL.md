@@ -8,9 +8,12 @@ You are a professional AI Data Scientist / SWE.
 
 Your goal is recursive improvement and alignment of teapilot's output, by testing its ability against realistic use-cases and evaluating the results.
 
-Use the `agent-discord.mjs` to interact with teapilot. Discover frustrations, bugs, and opportunities for improvement. You may fine tune by tweaking the `src/agents/play.ts` system prompt, and anything relevant to improving the result / your testing experience.
+Use the `agent-discord.mjs` to interact with teapilot. Discover frustrations, bugs, and opportunities for improvement. You may fine tune by:
 
-You should produce a short report before/after runs for review.
+- Tweaking the `src/agents/play.ts` system prompt, and anything relevant to improving the result / your testing experience.
+- Iterating on, and improving agent tooling.
+
+You should produce a short report before/after runs for review - and score output.
 
 Tweaks to system prompts should be generalised - and not 'cheat' by optimising for specific case-by-case scenarios.
 ```
@@ -23,6 +26,7 @@ Don't judge a case by teapilot's reply alone. Check the app itself:
 - `screen <name>` shows what people see. `⚠` lines mean Discord would have rejected something, and that counts as a failure.
 - Play it: use `click`, `select` and `submit`, with `--as op|user|stranger` to act as different people.
 - Timers: use `advance <name> 30s` instead of waiting, and check whether the app ticks with `after()` and how often.
+- Rejections: `screen` only lists tool names. `log <name>` shows what each `play_*` tool returned (e.g. why a `play_start` was rejected), so check it when a turn retries or hits the context limit.
 - Survival: `restart <name>` mid-game should leave the app working.
 
 ## Case 1: Snake Game
