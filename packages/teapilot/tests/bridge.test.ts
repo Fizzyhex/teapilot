@@ -49,7 +49,7 @@ async function client(port: number, token = TOKEN, headers: Record<string, strin
 it('parses connect targets and refuses unencrypted remote hosts', () => {
   expect(bridgeUrl()).toBe('ws://127.0.0.1:8377');
   expect(bridgeUrl('9000')).toBe('ws://127.0.0.1:9000');
-  expect(bridgeUrl('box.tail1234.ts.net')).toBe('wss://box.tail1234.ts.net/');
+  expect(bridgeUrl('box.tail1234.ts.net')).toBe('wss://box.tail1234.ts.net:8377/');
   expect(bridgeUrl('https://box.tail1234.ts.net')).toBe('wss://box.tail1234.ts.net/');
   expect(bridgeUrl('100.101.102.103:8377')).toBe('ws://100.101.102.103:8377/');
   expect(bridgeUrl('localhost:9000')).toBe('ws://localhost:9000/');
@@ -168,7 +168,8 @@ function fake(replies: Record<string, { code?: number; stdout?: string }>): Tail
     return reply ? { code: reply.code ?? 0, stdout: reply.stdout ?? '', stderr: '' } : { code: 1, stdout: '', stderr: 'unexpected' };
   };
 }
-const serving = (proxy: string, funnel = false) => JSON.stringify({ Web: { 'box.tail1234.ts.net:443': { Handlers: { '/': { Proxy: proxy } } } }, ...(funnel ? { AllowFunnel: { 'box.tail1234.ts.net:443': true } } : {}) });
+const site = (proxy: string, funnel = false, port = 8377) => ({ Web: { [`box.tail1234.ts.net:${port}`]: { Handlers: { '/': { Proxy: proxy } } } }, ...(funnel ? { AllowFunnel: { [`box.tail1234.ts.net:${port}`]: true } } : {}) });
+const serving = (proxy: string, funnel = false, port = 8377) => JSON.stringify(site(proxy, funnel, port));
 
 it('reads Tailscale login and serve state', async () => {
   expect(await tailscaleState(missing)).toEqual({ kind: 'missing' });
@@ -178,14 +179,17 @@ it('reads Tailscale login and serve state', async () => {
   expect((await serveState(fake({ 'serve status --json': { stdout: serving('http://127.0.0.1:8377') } }), 8377)).mapping).toBe('this');
   expect((await serveState(fake({ 'serve status --json': { stdout: serving('http://127.0.0.1:3000') } }), 8377)).mapping).toBe('other');
   expect((await serveState(fake({ 'serve status --json': { code: 1 } }), 8377)).mapping).toBe('unknown');
+  // Another app on 443 does not block the bridge's own port, but a foreground session on it does.
+  expect((await serveState(fake({ 'serve status --json': { stdout: serving('http://127.0.0.1:3000', true, 443) } }), 8377))).toEqual({ mapping: 'none', funnel: true });
+  expect((await serveState(fake({ 'serve status --json': { stdout: JSON.stringify({ Foreground: { a: site('http://127.0.0.1:3000') } }) } }), 8377)).mapping).toBe('other');
 });
 
 it('tips the exact serve command, and notices when it is already running or public', async () => {
   const idle = await tailnetTip(fake({ 'status --json': { stdout: status('Running') }, 'serve status --json': { stdout: '{}' } }), 8377);
-  expect(idle.join('\n')).toContain('tailscale serve --bg 8377');
+  expect(idle.join('\n')).toContain('tailscale serve --bg --https=8377 8377');
   expect(idle.join('\n')).toContain('teapilot bridge connect box.tail1234.ts.net');
   const running = await tailnetTip(fake({ 'status --json': { stdout: status('Running') }, 'serve status --json': { stdout: serving('http://127.0.0.1:8377') } }), 8377);
-  expect(running[0]).toContain('already serving port 8377 at https://box.tail1234.ts.net');
+  expect(running[0]).toContain('already serving port 8377 at https://box.tail1234.ts.net:8377');
   const funnel = await tailnetTip(fake({ 'status --json': { stdout: status('Running') }, 'serve status --json': { stdout: serving('http://127.0.0.1:8377', true) } }), 8377);
   expect(funnel.join('\n')).toContain('Funnel');
   expect((await tailnetTip(missing, 8377))[0]).toContain('not found');
@@ -195,7 +199,7 @@ it('--ts leaves an existing mapping alone, refuses to replace another, and logs 
   const controller = new AbortController(); const logs: string[] = [];
   const opts = { port: 8377, signal: controller.signal, log: (text: string) => logs.push(text), login: async () => 0 };
   const same = fake({ 'status --json': { stdout: status('Running') }, 'serve status --json': { stdout: serving('http://127.0.0.1:8377') } });
-  expect((await publishToTailnet({ ...opts, exec: same })).url).toBe('https://box.tail1234.ts.net');
+  expect((await publishToTailnet({ ...opts, exec: same })).url).toBe('https://box.tail1234.ts.net:8377');
   expect(logs.join('\n')).toContain('leaving it as it is');
   const other = fake({ 'status --json': { stdout: status('Running') }, 'serve status --json': { stdout: serving('http://127.0.0.1:3000') } });
   await expect(publishToTailnet({ ...opts, exec: other })).rejects.toThrow('Not replacing');

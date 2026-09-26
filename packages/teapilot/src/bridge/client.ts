@@ -23,6 +23,8 @@ export function bridgeUrl(target?: string): string {
   const explicit = target.match(/^(https?|wss?):\/\//i)?.[1]?.toLowerCase();
   let url: URL;
   try { url = new URL(explicit ? target : `wss://${target}`); } catch { throw new Error(`Cannot understand bridge address "${target}". Use a port, host[:port] or https://host.`); }
+  // A bare host means the bridge port, which is also where tailscale serve publishes it.
+  if (!explicit && !url.port) url.port = String(DEFAULT_BRIDGE_PORT);
   const local = loopback(url.hostname) || tailnetAddress(url.hostname);
   const secure = explicit ? explicit === 'https' || explicit === 'wss' : !local;
   if (!secure && !local) throw new Error('Refusing an unencrypted connection. Use https:// (tailscale serve provides it), or a Tailscale 100.x address.');
