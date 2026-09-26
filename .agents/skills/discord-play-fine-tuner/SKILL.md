@@ -13,7 +13,7 @@ Use the `agent-discord.mjs` to interact with teapilot. Discover frustrations, bu
 - Tweaking the `src/agents/play.ts` system prompt, and anything relevant to improving the result / your testing experience.
 - Iterating on, and improving agent tooling.
 
-You should produce a short report before/after runs for review - and score output.
+You should produce a short report before/after runs for review - and score output for comparison at the end.
 
 Tweaks to system prompts should be generalised - and not 'cheat' by optimising for specific case-by-case scenarios.
 ```
