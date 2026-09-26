@@ -48,12 +48,16 @@ function color(value: unknown): number | undefined {
   if (typeof value === 'string' && value in colors) return colors[value as keyof typeof colors];
   throw new PlayError(`Embed color ${JSON.stringify(value)} must be 0–0xffffff, "#rrggbb" or one of ${Object.keys(colors).join(', ')}.`);
 }
-/** Custom emoji arrive as <:name:id> or <a:name:id>; anything else is sent as a unicode emoji. */
+// One emoji, including a bare pictograph such as ❤. The v flag is newer than the compile target, not than Node 22.
+const unicodeEmoji = new RegExp('^(?:\\p{RGI_Emoji}|\\p{Extended_Pictographic}\\uFE0F?)$', 'v');
+/** Custom emoji arrive as <:name:id> or <a:name:id>; anything else must be one Unicode emoji, the only other kind Discord accepts. */
 function emoji(value: unknown): Record<string, unknown> | undefined {
   const text = string(value, 'Emoji', 100);
   if (!text) return undefined;
   const custom = /^<(a?):(\w{2,32}):(\d{17,20})>$/.exec(text);
-  return custom ? { id: custom[3], name: custom[2], animated: custom[1] === 'a' } : { name: text };
+  if (custom) return { id: custom[3], name: custom[2], animated: custom[1] === 'a' };
+  if (!unicodeEmoji.test(text)) throw new PlayError(`Emoji ${JSON.stringify(text)} is not one Unicode emoji. Use a character such as "🍵", or a server emoji as <:name:id>; ctx.emoji(name) gives only those the user shared.`);
+  return { name: text };
 }
 function url(value: unknown, what: string): string | undefined {
   const text = string(value, what, 2000);

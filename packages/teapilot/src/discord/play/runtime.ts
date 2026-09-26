@@ -34,6 +34,12 @@ export type Consultant = (play: { title: string; owner: User; channelId: string 
 export type Source = PlayRecord['source'];
 export interface StartOptions { title: string; channelId: string; conversation: string; owner: User; source: Source; participants?: Participants; emojis?: Record<string, string> }
 export interface TestAction { kind: Action['kind']; id: string; user?: User; values?: string[]; fields?: Record<string, string>; text?: string; error?: string }
+/** Time for apps, timers and expiry; a simulator swaps it to skip ahead. `after` returns a cancel function. */
+export interface Clock { now(): number; after(ms: number, run: () => void): () => void }
+export const systemClock: Clock = {
+  now: () => Date.now(),
+  after(ms, run) { const timer = setTimeout(run, ms); timer.unref?.(); return () => clearTimeout(timer); },
+};
 
 export const playLimits = {
   perChannel: 5, total: 50, idleMs: 24 * 60 * 60_000, keepFinishedMs: 7 * 24 * 60 * 60_000,
@@ -45,7 +51,7 @@ const idPattern = /^[A-Za-z0-9_.-]{1,64}$/;
 interface Live {
   record: PlayRecord;
   engine?: PlayEngine;
-  timers: Map<string, ReturnType<typeof setTimeout>>;
+  timers: Map<string, () => void>;
   consulting: boolean;
   chain: Promise<unknown>;
 }
@@ -101,14 +107,15 @@ function checkState(state: unknown): void {
  */
 export class PlayRuntime {
   private readonly live = new Map<string, Live>();
-  private sweeper?: ReturnType<typeof setInterval>;
+  private sweeper?: () => void;
 
   constructor(private readonly options: {
     store: PlayStore; surface: PlaySurface; log: (text: string) => void;
-    consult?: Consultant; now?: () => number;
+    consult?: Consultant; clock?: Clock;
   }) {}
 
-  private now(): number { return this.options.now?.() ?? Date.now(); }
+  private get clock(): Clock { return this.options.clock ?? systemClock; }
+  private now(): number { return this.clock.now(); }
 
   private context(record: PlayRecord): ContextData {
     return { now: this.now(), invoker: record.owner, participants: record.participants, emojis: record.emojis, seed: record.seed };
@@ -200,17 +207,15 @@ export class PlayRuntime {
   }
 
   private arm(live: Live): void {
-    for (const timer of live.timers.values()) clearTimeout(timer);
+    for (const cancel of live.timers.values()) cancel();
     live.timers.clear();
     if (live.record.status !== 'running') return;
     for (const { id, dueAt } of live.record.timers) {
-      const timer = setTimeout(() => {
+      live.timers.set(id, this.clock.after(Math.max(0, dueAt - this.now()), () => {
         live.timers.delete(id);
         live.record.timers = live.record.timers.filter(entry => entry.id !== id);
         void this.background(live, { kind: 'timer', id }, `timer ${id}`);
-      }, Math.max(0, dueAt - this.now()));
-      timer.unref?.();
-      live.timers.set(id, timer);
+      }));
     }
   }
 
@@ -230,7 +235,7 @@ export class PlayRuntime {
   }
 
   private release(live: Live): void {
-    for (const timer of live.timers.values()) clearTimeout(timer);
+    for (const cancel of live.timers.values()) cancel();
     live.timers.clear();
     live.engine?.dispose();
     live.engine = undefined;
@@ -396,9 +401,12 @@ export class PlayRuntime {
       this.arm(live);
       count++;
     }
-    this.sweeper ??= setInterval(() => void this.sweep(), 10 * 60_000);
-    this.sweeper.unref?.();
+    if (!this.sweeper) this.schedule();
     return count;
+  }
+
+  private schedule(): void {
+    this.sweeper = this.clock.after(10 * 60_000, () => void this.sweep().finally(() => { if (this.sweeper) this.schedule(); }));
   }
 
   /** Apps nobody has touched for a day end, so abandoned games do not hold resources forever. */
@@ -415,7 +423,8 @@ export class PlayRuntime {
   }
 
   close(): void {
-    if (this.sweeper) clearInterval(this.sweeper);
+    this.sweeper?.();
+    this.sweeper = undefined;
     for (const live of this.live.values()) this.release(live);
   }
 }

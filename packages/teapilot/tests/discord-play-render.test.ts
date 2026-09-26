@@ -1,6 +1,7 @@
 import { button, embed, field, modal, row, select } from '@teapilot/discord-play';
 import { expect, it } from 'vitest';
 import { describe as preview, findControl, parseCustomId, renderModal, renderView } from '../src/discord/play/render.js';
+import { checkMessage, checkModal } from '../scripts/discord-sim/validate.js';
 
 it('renders a view as Discord API JSON with namespaced custom ids', () => {
   const payload = renderView('abc123', {
@@ -19,12 +20,19 @@ it('renders a view as Discord API JSON with namespaced custom ids', () => {
       { type: 1, components: [{ type: 3, custom_id: 'play:abc123:pick', options: [{ value: 'a', label: 'a' }, { value: 'b', label: 'b' }], min_values: 1, max_values: 2 }] },
     ],
   });
+  expect(() => checkMessage(payload)).not.toThrow();
   expect(parseCustomId('play:abc123:go')).toEqual({ playId: 'abc123', id: 'go' });
   expect(parseCustomId('teapilot:nonce:approve')).toBeUndefined();
 });
 
 it('sends emoji-only buttons without a blank label', () => {
-  expect(renderView('a1', { rows: [row(button('c0', ' ', { emoji: '⬛' }))] }).components[0]!.components[0]).toEqual({ type: 2, style: 2, emoji: { name: '⬛' }, custom_id: 'play:a1:c0' });
+  const payload = renderView('a1', { rows: [row(button('c0', ' ', { emoji: '⬛' }), button('c1', ' ', { emoji: '1️⃣' }), button('c2', ' ', { emoji: '❤' }))] });
+  expect(payload.components[0]!.components[0]).toEqual({ type: 2, style: 2, emoji: { name: '⬛' }, custom_id: 'play:a1:c0' });
+  expect(() => checkMessage(payload)).not.toThrow();
+});
+
+it('refuses emoji Discord would refuse, such as a shortcode or a name', () => {
+  for (const emoji of [':tea:', 'tea', '🍵🍵']) expect(() => renderView('a1', { rows: [row(button('c0', 'Go', { emoji }))] })).toThrow(/not one Unicode emoji/);
 });
 
 it('disables every control for a finished app, but keeps link buttons', () => {
@@ -53,6 +61,7 @@ it.each([
 });
 
 it('renders modals and checks their fields', () => {
+  expect(() => checkModal(renderModal('p1', modal('guess', 'Your guess', [field('word', 'Word', { max: 5, required: false })])))).not.toThrow();
   expect(renderModal('p1', modal('guess', 'Your guess', [field('word', 'Word', { max: 5, required: false }), field('why', 'Why', { style: 'paragraph' })]))).toEqual({
     custom_id: 'play:p1:guess', title: 'Your guess',
     components: [

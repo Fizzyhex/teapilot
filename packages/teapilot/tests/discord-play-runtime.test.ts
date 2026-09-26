@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { MessagePayload } from '../src/discord/play/render.js';
-import { hashFile, PlayRuntime, type Consultant, type PlayInteraction, type PlaySurface } from '../src/discord/play/runtime.js';
+import { hashFile, PlayRuntime, systemClock, type Clock, type Consultant, type PlayInteraction, type PlaySurface } from '../src/discord/play/runtime.js';
 import { PlayStore } from '../src/discord/play/store.js';
 
 const cleanups: Array<() => unknown> = [];
@@ -38,7 +38,7 @@ export default app({
   ] }),
 });`;
 
-async function setup(options: { consult?: Consultant; now?: () => number; directory?: string } = {}) {
+async function setup(options: { consult?: Consultant; clock?: Clock; directory?: string } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'teapilot-play-'));
   if (!options.directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const posts: MessagePayload[] = [];
@@ -50,7 +50,7 @@ async function setup(options: { consult?: Consultant; now?: () => number; direct
   };
   const log = vi.fn();
   const store = new PlayStore(directory);
-  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, now: options.now });
+  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, clock: options.clock });
   cleanups.push(() => runtime.close());
   return { directory, store, runtime, surface, posts, edits, log };
 }
@@ -168,7 +168,7 @@ it('finishes with every control disabled and ignores later clicks', async () => 
 
 it('fires timers, cancels them, and keeps them across a restart', async () => {
   let clock = Date.now();
-  const first = await setup({ now: () => clock });
+  const first = await setup({ clock: { ...systemClock, now: () => clock } });
   const { record } = await start(first.runtime);
   await first.runtime.interact(act(record.id, 'never').interaction);
   expect(first.store.all()[0]!.timers).toEqual([]);
@@ -177,7 +177,7 @@ it('fires timers, cancels them, and keeps them across a restart', async () => {
   first.runtime.close();
   // A new process a minute later: the overdue timer fires as soon as the app is recovered.
   clock += 60_000;
-  const second = await setup({ now: () => clock, directory: first.directory });
+  const second = await setup({ clock: { ...systemClock, now: () => clock }, directory: first.directory });
   expect(await second.runtime.recover()).toBe(1);
   await vi.waitFor(() => expect(second.edits.at(-1)?.content).toBe('100 '));
   expect(second.store.all()[0]!.timers).toEqual([]);

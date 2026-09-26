@@ -1,5 +1,5 @@
 import { realpath } from 'node:fs/promises';
-import { loadConfig } from '../config.js';
+import { loadConfig, type Config } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
 import { runHost, type HostRequest } from '../host.js';
 import { headlessTeachat, openHeadlessTeachat } from '../teachat/session.js';
@@ -8,13 +8,13 @@ import { route, routeReply } from './access.js';
 import { AccessStore } from './access-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
 import { consultant } from './play/consult.js';
-import { PlayRuntime, type PlaySurface } from './play/runtime.js';
+import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
 import { PlayStore } from './play/store.js';
-import type { GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
+import type { connect, GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
 import { interactionLifetimeMs } from './commands.js';
 import { quoteMessage } from './render.js';
 import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
-import { readDiscordSettings } from './settings.js';
+import { readDiscordSettings, type DiscordSettings } from './settings.js';
 
 export const discordActions = ['setup', 'start', 'status', 'remove'] as const;
 export interface DiscordCommand { directory: string; cwd: string; ui: SetupUI; signal: AbortSignal }
@@ -32,24 +32,46 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   const env = { ...process.env };
   const config = await loadConfig(directory, env);
   const settings = readDiscordSettings(env);
+  // discord.js loads only here, so every other command starts without it.
+  const gateway = await import('./gateway.js');
+  await serveDiscord({ config, settings, log: text => ui.log(`${new Date().toLocaleTimeString()} ${text}`), signal, connect: gateway.connect });
+  return true;
+}
+
+/** Everything `teapilot discord start` runs once settings are read; the Discord simulator supplies its own `connect`. */
+export interface DiscordServer {
+  config: Config;
+  settings: DiscordSettings;
+  /** The operator log; lines arrive redacted. */
+  log: (text: string) => void;
+  signal: AbortSignal;
+  connect: typeof connect;
+  /** Where the access list and app records live; the profile's state directory by default. */
+  stateDir?: string;
+  clock?: Clock;
+  teachat?: boolean;
+}
+
+/** Connects and serves Discord until `signal` aborts. */
+export async function serveDiscord({ config, settings, signal, connect, clock, stateDir = config.stateDir, teachat: withTeachat = true, ...options }: DiscordServer): Promise<void> {
   let root: string;
   try { root = await realpath(settings.root); }
   catch { throw new Error(`Discord repository root ${settings.root} is unavailable. Run teapilot discord setup.`); }
   const secrets = [settings.token, config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value));
   const redact = (text: string) => secrets.reduce((result, secret) => result.split(secret).join('[REDACTED]'), text);
-  const log = (text: string) => ui.log(`${new Date().toLocaleTimeString()} ${redact(text)}`);
+  const log = (text: string) => options.log(redact(text));
   // Operators come from setup; whitelisted users and temporary grants live in the state directory.
-  const access = AccessStore.at(config.stateDir, settings.allowedUserIds, config.policy.permissions);
+  const access = AccessStore.at(stateDir, settings.allowedUserIds, config.policy.permissions);
   const allowed = (id: string) => access.roleOf(id) !== undefined;
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
-  const teachat = await openHeadlessTeachat(config, log);
+  const teachat = withTeachat ? await openHeadlessTeachat(config, log) : undefined;
   const run = (request: HostRequest, dependencies: Parameters<typeof runHost>[2]) => teachat ? teachat.work(() => runHost(config, request, dependencies)) : runHost(config, request, dependencies);
   // The surface is bound once the gateway connects; apps only post after a message arrives or on recovery, both later.
   let surface: PlaySurface | undefined;
   const connected = () => { if (!surface) throw new Error('Discord is not connected yet.'); return surface; };
   const play = new PlayRuntime({
-    store: PlayStore.at(config.stateDir), log,
+    store: PlayStore.at(stateDir), log, clock,
     surface: { post: (...args) => connected().post(...args), edit: (...args) => connected().edit(...args), request: (...args) => connected().request(...args) },
     consult: consultant({ config, root, access, queue, run, signal }),
   });
@@ -123,8 +145,6 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     (await open(key, transport, channelId, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
-  // discord.js loads only here, so every other command starts without it.
-  const { connect } = await import('./gateway.js');
   const gateway = await connect(settings, {
     message: message => void handle(message).catch(failed('Message handling')),
     command: command => void handleCommand(command).catch(failed('Command handling')),
@@ -145,5 +165,4 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   await gateway.close();
   await Promise.allSettled([...conversations.values()].map(conversation => conversation.done));
   await teachat?.close();
-  return true;
 }
