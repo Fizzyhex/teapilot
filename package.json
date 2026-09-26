@@ -19,7 +19,7 @@
     "build": "npm run build --workspaces",
     "test": "npm test --workspaces",
     "check": "npm run check --workspaces",
-    "global:build": "npm run build && npm install --global ./packages/teapilot",
+    "global:build": "npm run build && npm uninstall --global teapilot && npm install --global ./packages/teapilot",
     "global:pull": "git pull && npm install --allow-git=all --allow-remote=all && npm run global:build",
     "test:package": "npm run test:package -w teapilot",
     "test:ollama": "npm run test:ollama -w teapilot",
