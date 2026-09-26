@@ -16,7 +16,7 @@ export type Writer = (kind: 'conclusion' | 'summary', prompt: string, signal?: A
 export type Actor = (prompt: string, context: { channel: string; action: GossipAction }, signal?: AbortSignal) => Promise<void>;
 
 export const TRANSCRIPT_TURNS = 6, TRANSCRIPT_TURN_CHARS = 1500, CONCLUSION_WORDS = 120, REQUEST_SUMMARY_LIMIT = 120;
-const vague = 'Keep it vague: no secrets, credentials, code, file contents, paths, names or personal details about anyone.';
+const vague = 'Keep it vague: no secrets or credentials.';
 
 const cut = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 /** A request summary as it appears inside quotes in an event. */
@@ -27,7 +27,7 @@ export const transcriptText = (transcript: readonly Turn[]): string =>
 
 export function conclusionPrompt({ username, bio, transcript }: { username: string; bio?: string; transcript: readonly Turn[] }): string {
   return [
-    `You are ${displayName(username)}, one of the teapilot agents.${bio ? ` Your bio: ${bio}` : ''}`,
+    `You are ${displayName(username)}, a teapilot agent:3.${bio ? ` Your bio: ${bio}` : ''}`,
     'You just finished the conversation below with a user. Look back on it privately.',
     '',
     'Conversation:',
