@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { chooseMany, type SetupUI } from '../src/setup/terminal.js';
-import { ollamaAlias, presets, selectOllamaModel } from '../src/setup/ollama.js';
+import { ollamaAlias, presets, selectOllamaModel } from '../src/runtime/ollama.js';
 
 vi.mock('node:fs/promises', async importOriginal => ({
   ...await importOriginal<typeof import('node:fs/promises')>(),

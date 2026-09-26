@@ -1,16 +1,18 @@
-import type { Config, ModelConfig, PhysicalModel, Tier, Workload } from '../config.js';
+import type { Config, ModelConfig, PhysicalModel, ReasoningLevel, Tier, Workload } from '../config.js';
 
-export type ThinkingLevel = 'off' | 'medium' | 'xhigh';
+export type ThinkingLevel = ReasoningLevel;
+/** How each level is requested on the wire belongs to the model's reasoning protocol. */
 export interface ExecutionProfile {
-  tier: Tier; model: PhysicalModel; contextTokens: number; maxOutputTokens: number;
-  thinking: ThinkingLevel; effort: 'none' | 'medium' | 'xhigh';
+  tier: Tier; model: PhysicalModel; contextTokens: number; maxOutputTokens: number; thinking: ThinkingLevel;
 }
 export const executionProfiles: Record<Tier, ExecutionProfile> = {
-  fast: { tier: 'fast', model: 'fast', contextTokens: 8192, maxOutputTokens: 2048, thinking: 'off', effort: 'none' },
-  normal: { tier: 'normal', model: 'capable', contextTokens: 16384, maxOutputTokens: 4096, thinking: 'off', effort: 'none' },
-  reasoning: { tier: 'reasoning', model: 'capable', contextTokens: 24576, maxOutputTokens: 8192, thinking: 'medium', effort: 'medium' },
-  deep: { tier: 'deep', model: 'capable', contextTokens: 32768, maxOutputTokens: 16384, thinking: 'xhigh', effort: 'xhigh' },
+  fast: { tier: 'fast', model: 'fast', contextTokens: 8192, maxOutputTokens: 2048, thinking: 'off' },
+  normal: { tier: 'normal', model: 'capable', contextTokens: 16384, maxOutputTokens: 4096, thinking: 'off' },
+  reasoning: { tier: 'reasoning', model: 'capable', contextTokens: 24576, maxOutputTokens: 8192, thinking: 'medium' },
+  deep: { tier: 'deep', model: 'capable', contextTokens: 32768, maxOutputTokens: 16384, thinking: 'xhigh' },
 };
+/** The tier that runs a reasoning level on the capable model. */
+export const reasoningTier: Record<ThinkingLevel, Tier> = { off: 'normal', medium: 'reasoning', xhigh: 'deep' };
 export const escalationOrder: Tier[] = ['fast', 'normal', 'reasoning', 'deep'];
 export function profileFor(tier: Tier): ExecutionProfile { return executionProfiles[tier]; }
 export function effectiveProfile(config: Config, tier: Tier): ExecutionProfile {

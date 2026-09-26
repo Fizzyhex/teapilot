@@ -13,6 +13,8 @@ From a source checkout without `--global`, follow the [README quick start](../RE
 
 The setup wizard walks through local model setup and tests the selected model. The built-in presets are `Qwen3.5-9B Heretic Q4_K_M` for Fast and `Qwen3.8-27B Heretic Q4_K_M` for the capable profiles. 
 
+On Windows with a 24 GB NVIDIA GPU, setup also offers **Optimized NVIDIA**, which runs Qwen3.8-27B for the capable profiles on a GPU-optimized server. Its server keeps running after setup; use `teapilot runtime stop` and `teapilot runtime start` to control it.
+
 ## Make your first request
 
 ```sh

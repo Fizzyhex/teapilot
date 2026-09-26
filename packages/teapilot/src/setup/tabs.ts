@@ -1,9 +1,10 @@
 import { during } from '../activity.js';
 import { physicalModels, policySchema, type Config, type PhysicalModel } from '../config.js';
 import { routingCheck, type LiveReport } from '../diagnostics.js';
-import { applyEndpoint, applyOllama, applyReports, askEndpoint, checkModels, checksLine, cloneConfig, configureRouting, finishModels, numberInput, persist, summaryLines, type CredentialStorage, type Draft } from './draft.js';
+import { applyProvisioned, applyReports, askEndpoint, checkModels, checksLine, cloneConfig, configureRouting, finishModels, modelSources, numberInput, persist, summaryLines, type CredentialStorage, type Draft } from './draft.js';
 import { InstallQueue, type InstallJob } from './installs.js';
-import { configureOllamaModel, ensureOllama, hardware, isTeapilotAlias, ollamaAlias, ollamaJSON, presets, roleChoices, roleLabel, type OllamaModel, type PreparedModel } from './ollama.js';
+import { endpointDriver, managedRuntimes, type ProvisionedModel, type RuntimeDriver, type Runtimes } from '../runtime/index.js';
+import { configureOllamaModel, hardware, isTeapilotAlias, ollamaAlias, ollamaJSON, presets, provisionedOllama, roleChoices, roleLabel, type OllamaModel, type PreparedModel } from '../runtime/ollama.js';
 import { Navigation, type ScreenTab, type SetupScreen } from './screen.js';
 import { configureSearch } from './search.js';
 import type { SetupUI } from './terminal.js';
@@ -33,8 +34,12 @@ interface Session {
   signal: AbortSignal;
   verbose?: boolean;
   credentials?: CredentialStorage;
+  runtimes: Runtimes;
   original: { models: Config['models']; env: Record<string, string>; routing: Config['routingMode']; provider: string; budget: Config['policy']['budget']; search?: string };
-  source: 'keep' | 'ollama' | 'endpoint';
+  /** keep, endpoint, or the ID of the managed runtime chosen. */
+  source: string;
+  /** A managed runtime other than Ollama: it prepares its own models, with nothing to pick. */
+  managed?: { driver: RuntimeDriver; provisioned?: ProvisionedModel[] };
   ollamaReady: boolean;
   queue?: InstallQueue;
   hardware?: { memory: number; lines: string[] };
@@ -50,12 +55,12 @@ interface Session {
  * when the tab finishes, so leaving a tab part-way never undoes earlier work.
  * Nothing is written to disk until Save.
  */
-export async function tabbedSetup(draft: Draft, screen: SetupScreen, ui: SetupUI, root: AbortSignal, options: { verbose?: boolean; credentials?: CredentialStorage }): Promise<Outcome | undefined> {
+export async function tabbedSetup(draft: Draft, screen: SetupScreen, ui: SetupUI, root: AbortSignal, options: { verbose?: boolean; credentials?: CredentialStorage; runtimes?: Runtimes }): Promise<Outcome | undefined> {
   const quit = new AbortController();
   const signal = AbortSignal.any([root, quit.signal]);
   const { config, env } = draft;
   const session: Session = {
-    draft, screen, signal, ...options,
+    draft, screen, signal, ...options, runtimes: options.runtimes ?? managedRuntimes(),
     original: { models: structuredClone(config.models), env: { ...env }, routing: config.routingMode, provider: config.router.provider, budget: { ...config.policy.budget }, search: config.searchUrl },
     source: 'keep', ollamaReady: false, assignments: {}, notes: [],
     searchStatus: config.searchUrl ? 'Unchanged · not tested' : 'Disabled',
@@ -119,7 +124,7 @@ function restoreModels(s: Session): void {
 async function readyOllama(s: Session): Promise<void> {
   if (s.ollamaReady) return;
   // Installing Ollama may run a system installer, which must not be interrupted by a tab change.
-  await s.screen.lock('Preparing Ollama...', () => ensureOllama(s.screen, s.signal));
+  await s.screen.lock('Preparing Ollama...', () => s.runtimes.ollama.ensure({ ui: s.screen, signal: s.signal, verbose: s.verbose }));
   s.ollamaReady = true;
 }
 
@@ -140,7 +145,11 @@ function candidate(s: Session) {
       else if (job.state === 'failed' || job.state === 'cancelled') problems.push(`${job.id} (${jobRoles.join(' + ')}) ${job.state === 'failed' ? `failed: ${job.error}` : 'was cancelled'}. Retry it or choose another model in Install models.`);
       else pending.push(job);
     }
-    if (!problems.length && !pending.length) ({ roles, displayModel } = applyOllama(config, env, prepared));
+    if (!problems.length && !pending.length) ({ roles, displayModel } = applyProvisioned(config, env, s.runtimes.ollama, prepared.map(provisionedOllama)));
+  } else if (s.managed && s.source === s.managed.driver.id) {
+    changed = true;
+    if (s.managed.provisioned) ({ roles, displayModel } = applyProvisioned(config, env, s.managed.driver, s.managed.provisioned));
+    else problems.push(`Prepare the model for ${s.managed.driver.label} in Manage Models › Install models.`);
   } else if (s.source === 'ollama' && !currentlyOllama(s)) problems.push('Choose at least one model in Manage Models › Install models.');
   else if (s.source === 'keep' && !s.draft.hasConfiguration) problems.push('Choose a model source first.');
   if (!problems.length && !pending.length) {
@@ -168,18 +177,30 @@ function note(s: Session, text: string): void {
   s.screen.log(text);
 }
 
-async function source(s: Session): Promise<TabResult> {
+async function source(s: Session, signal: AbortSignal): Promise<TabResult> {
   const { screen, draft } = s;
   screen.log('Choose where your models run. With Local Ollama, you pick the models next, in Install models.');
   if (draft.hasConfiguration) screen.log(`Current: ${draft.before.models || 'none enabled'}`);
-  const choices = ['Locally via Ollama', 'An existing local OpenAI-compatible endpoint', ...draft.hasConfiguration ? ['Keep current models'] : []];
-  const fallback = s.source === 'ollama' ? 0 : s.source === 'endpoint' ? 1 : draft.hasConfiguration ? 2 : 0;
-  const choice = await screen.choose('Model source', choices, fallback);
-  if (choice === 2) {
+  const sources = await modelSources(s.runtimes, signal);
+  for (const line of sources.flatMap(item => item.summary ?? [])) screen.log(line);
+  const choices = [...sources.map(item => item.label), ...draft.hasConfiguration ? ['Keep current models'] : []];
+  const current = sources.findIndex(item => item.id === s.source);
+  const choice = await screen.choose('Model source', choices, current >= 0 ? current : draft.hasConfiguration ? sources.length : 0);
+  const picked = sources[choice];
+  if (!picked) {
     restoreModels(s); s.source = 'keep'; screen.mark('source', undefined);
     return;
   }
-  if (choice === 0) {
+  if (picked.unavailable) return 'source';
+  if (picked.driver && picked.id !== 'ollama') {
+    const driver = picked.driver;
+    // Installing and starting the runtime must not be interrupted by a tab change.
+    await screen.lock(`Preparing ${driver.label}...`, () => driver.ensure({ ui: screen, signal: s.signal, verbose: s.verbose }));
+    if (s.source !== driver.id) { restoreModels(s); s.managed = { driver }; }
+    s.source = driver.id; screen.mark('source', 'changed');
+    return 'install';
+  }
+  if (picked.id === 'ollama') {
     await readyOllama(s);
     if (s.source !== 'ollama') restoreModels(s);
     s.source = 'ollama'; screen.mark('source', 'changed');
@@ -187,9 +208,10 @@ async function source(s: Session): Promise<TabResult> {
   }
   // Ask on a copy so leaving part-way through keeps the previous endpoint.
   const env = { ...draft.env };
-  const endpoint = await askEndpoint(screen, env, cloneConfig(draft.config));
+  const endpoint = endpointDriver(await askEndpoint(screen, env, cloneConfig(draft.config)));
+  const provisioned = await endpoint.provision({ ui: screen, signal });
   restoreModels(s);
-  applyEndpoint(draft.config, draft.env, endpoint);
+  applyProvisioned(draft.config, draft.env, endpoint, provisioned);
   s.source = 'endpoint'; screen.mark('source', 'changed');
   // The endpoint already names its model, so there is nothing to install.
   return 'limits';
@@ -254,8 +276,24 @@ async function chooseRoles(s: Session, id: string, preset?: typeof presets[numbe
   return roleChoices[await s.screen.choose(`Role for ${id}`, roleChoices.map(roleLabel), fallback)]!;
 }
 
+/** Download and load a managed runtime's recommended model, before any check or request. */
+async function prepareManaged(s: Session, managed: NonNullable<Session['managed']>): Promise<TabResult> {
+  const { screen } = s;
+  if (managed.provisioned) {
+    screen.log(`Ready: ${managed.provisioned.map(model => `${model.source} (${model.roles.join(' + ')})`).join(', ')}.`);
+    if (await screen.choose('Install models', ['Continue to Usage limits', 'Prepare again'], 0) === 0) return 'limits';
+  } else {
+    screen.log(`${managed.driver.label} downloads and loads the model recommended for this computer. Only the capable model runs here; the fast tier stays off.`);
+    if (await screen.choose('Install models', ['Download and load the model', 'Choose another model source'], 0) === 1) return 'source';
+  }
+  managed.provisioned = await screen.lock('Preparing the model...', () => managed.driver.provision({ ui: screen, signal: s.signal, verbose: s.verbose }));
+  screen.mark('install', 'changed');
+  return 'limits';
+}
+
 async function install(s: Session, signal: AbortSignal): Promise<TabResult> {
   const { screen } = s;
+  if (s.managed && s.source === s.managed.driver.id) return await prepareManaged(s, s.managed);
   if (!usesOllama(s)) {
     screen.log(`Models run at ${s.draft.config.models.capable.baseUrl}. Installing models applies to Local Ollama.`);
     return await screen.choose('Install models', ['Continue to Usage limits', 'Switch to Local Ollama'], 0) === 1 ? 'source' : 'limits';
@@ -390,6 +428,8 @@ async function save(s: Session, signal: AbortSignal): Promise<TabResult> {
   const fresh = s.checks?.fingerprint === fingerprint(c) ? s.checks : undefined;
   const report = fresh?.reports.get('capable') ?? fresh?.reports.get('fast');
   const routingReady = fresh?.routingReady ?? c.config.routingMode === 'direct';
+  // Apply results before the review, so it shows the limits each verified tier will run with.
+  if (c.changed) applyReports(c.config, c.roles, fresh?.reports ?? new Map());
   const lines = summaryLines(draft, c.config, c.roles, {
     displayModel: c.displayModel, routingReady, searchStatus: s.searchStatus,
     checks: fresh ? checksLine(report) : c.changed ? 'not run · coding stays disabled until checks pass' : 'not run · current models kept',
@@ -399,7 +439,6 @@ async function save(s: Session, signal: AbortSignal): Promise<TabResult> {
   screen.log(changed.length ? `Changed: ${changed.join(', ')}.` : 'Nothing has changed yet. Use ←/→ to revisit any tab.');
   const choice = await screen.choose(draft.hasConfiguration ? 'Save these settings? The previous configuration is kept for rollback.' : 'Save these settings?', ['Save settings', 'Leave without saving'], 0);
   if (choice === 1) return await leave(s);
-  if (c.changed) applyReports(c.config, c.roles, fresh?.reports ?? new Map());
   // Saving is never interrupted by a tab change.
   await screen.lock('Saving configuration...', () => persist(draft, c.config, c.env, screen, s.signal, s.credentials));
   return { end: { ready: Boolean(report?.ask && report.coding && routingReady), coding: Boolean(report?.coding) }, summary: lines };

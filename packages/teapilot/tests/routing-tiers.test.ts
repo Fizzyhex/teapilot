@@ -15,10 +15,10 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 it('defines the four profiles from two physical models', async () => {
   expect(executionProfiles).toEqual({
-    fast: expect.objectContaining({ model: 'fast', thinking: 'off', effort: 'none', contextTokens: 8192, maxOutputTokens: 2048 }),
-    normal: expect.objectContaining({ model: 'capable', thinking: 'off', effort: 'none', contextTokens: 16384, maxOutputTokens: 4096 }),
-    reasoning: expect.objectContaining({ model: 'capable', thinking: 'medium', effort: 'medium', contextTokens: 24576, maxOutputTokens: 8192 }),
-    deep: expect.objectContaining({ model: 'capable', thinking: 'xhigh', effort: 'xhigh', contextTokens: 32768, maxOutputTokens: 16384 }),
+    fast: expect.objectContaining({ model: 'fast', thinking: 'off', contextTokens: 8192, maxOutputTokens: 2048 }),
+    normal: expect.objectContaining({ model: 'capable', thinking: 'off', contextTokens: 16384, maxOutputTokens: 4096 }),
+    reasoning: expect.objectContaining({ model: 'capable', thinking: 'medium', contextTokens: 24576, maxOutputTokens: 8192 }),
+    deep: expect.objectContaining({ model: 'capable', thinking: 'xhigh', contextTokens: 32768, maxOutputTokens: 16384 }),
   });
   const f = await fixture(); cleanups.push(f.cleanup);
   f.config.models.capable.reasoningEfforts = ['off', 'medium'];

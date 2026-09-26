@@ -11,15 +11,30 @@ const endpoint = z.string().url().refine(value => {
   const url = new URL(value);
   return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
 }, 'Use an HTTP(S) endpoint without embedded credentials, query, or fragment');
-const effort = z.enum(['off', 'medium', 'xhigh']);
+export const reasoningLevels = ['off', 'medium', 'xhigh'] as const;
+export type ReasoningLevel = typeof reasoningLevels[number];
+const effort = z.enum(reasoningLevels);
+// How a model's server is asked for each reasoning level. It describes the wire
+// format only: reasoningEfforts remains the one record of which levels passed
+// their live check. A level without a value sends no reasoning field.
+//   reasoning_effort:     { reasoning_effort: values[level] }
+//   chat_template_kwargs: { chat_template_kwargs: values[level] }, for servers whose
+//                         chat template decides thinking (e.g. enable_thinking: false)
+const templateValue = z.union([z.string(), z.number(), z.boolean()]);
+const reasoningSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('reasoning_effort'), values: z.object({ off: z.string().min(1), medium: z.string().min(1), xhigh: z.string().min(1) }).partial().strict() }).strict(),
+  z.object({ type: z.literal('chat_template_kwargs'), values: z.object(Object.fromEntries(reasoningLevels.map(level => [level, z.record(z.string().regex(/^[a-z_][a-z0-9_]*$/i), templateValue)])) as Record<ReasoningLevel, z.ZodRecord<z.ZodString, typeof templateValue>>).partial().strict() }).strict(),
+]);
+export type ReasoningProtocol = z.infer<typeof reasoningSchema>;
 const modelSchema = z.object({
   enabled: z.boolean(), id: z.string().min(1), provider: z.string().min(1), baseUrl: endpoint,
   apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/), contextTokens: z.number().int().min(4096).max(2_000_000),
   maxOutputTokens: z.number().int().min(128).max(32768), inputUsdPerMillion: money, outputUsdPerMillion: money,
   vision: z.boolean().default(false), toolCalling: z.boolean().default(true), supportsDeveloperRole: z.boolean().default(false),
   supportsUsage: z.boolean().default(true), temperature: z.number().min(0).max(2).optional(),
-  reasoningEfforts: z.array(effort).min(1).default(['off']), compatibility: z.boolean().default(false),
-}).strict().refine(m => m.maxOutputTokens + 2048 < m.contextTokens, 'Context must leave room for input');
+  reasoningEfforts: z.array(effort).min(1).default(['off']), reasoning: reasoningSchema.optional(), compatibility: z.boolean().default(false),
+}).strict().refine(m => m.maxOutputTokens + 2048 < m.contextTokens, 'Context must leave room for input')
+  .refine(m => !m.reasoning || m.reasoningEfforts.every(level => level === 'off' || m.reasoning!.values[level]), 'Every verified reasoning level needs a value in the reasoning protocol');
 
 export const tiers = ['fast', 'normal', 'reasoning', 'deep'] as const;
 export type Tier = typeof tiers[number];
@@ -70,16 +85,24 @@ function legacyCloudEnabled(raw: Record<string, unknown>, env: NodeJS.ProcessEnv
   const economy = (raw.economy ?? {}) as Record<string, unknown>; const strong = (raw.strong ?? {}) as Record<string, unknown>;
   return economy.enabled === true || strong.enabled === true || env.ECONOMY_ENABLED === 'true' || env.STRONG_ENABLED === 'true' || Boolean(env.ECONOMY_MODEL || env.STRONG_MODEL);
 }
+/** The reasoning request older Ollama configurations sent, keyed then by provider. */
+export const ollamaReasoning: ReasoningProtocol = { type: 'reasoning_effort', values: { off: 'none', medium: 'medium', xhigh: 'xhigh' } };
+// Configurations saved before models declared a reasoning protocol: Ollama models
+// keep exactly the payload they sent, and other endpoints keep sending none.
+function withReasoningProtocol(models: CanonicalModels): CanonicalModels {
+  for (const model of Object.values(models)) if (!model.reasoning && model.provider === 'ollama') model.reasoning = structuredClone(ollamaReasoning);
+  return models;
+}
 function canonicalize(raw: unknown, env: NodeJS.ProcessEnv): { models: CanonicalModels; warnings: string[] } {
   if (!raw || typeof raw !== 'object') throw new Error('Model configuration must be a JSON object.');
   const object = raw as Record<string, unknown>;
-  if ('fast' in object || 'capable' in object) return { models: canonicalModelsSchema.parse(object), warnings: [] };
+  if ('fast' in object || 'capable' in object) return { models: withReasoningProtocol(canonicalModelsSchema.parse(object)), warnings: [] };
   if (!('local' in object) || !('economy' in object) || !('strong' in object)) throw new Error('Model configuration must define fast and capable models. Run teapilot setup to migrate it.');
   if (legacyCloudEnabled(object, env)) throw new Error('Cloud execution settings from legacy economy/strong tiers are no longer supported. Disable them and run teapilot setup to configure local fast/capable models.');
   const local = modelSchema.parse(object.local);
   const capable: ModelConfig = { ...local, inputUsdPerMillion: 0, outputUsdPerMillion: 0, reasoningEfforts: ['off'], compatibility: true };
   const fast: ModelConfig = { ...capable, enabled: false, id: `${local.id}:fast-unavailable` };
-  return { models: canonicalModelsSchema.parse({ fast, capable }), warnings: ['Loaded legacy local-only configuration as compatibility capable-only; setup must verify the target models before fast, medium, or xhigh execution is enabled.'] };
+  return { models: withReasoningProtocol(canonicalModelsSchema.parse({ fast, capable })), warnings: ['Loaded legacy local-only configuration as compatibility capable-only; setup must verify the target models before fast, medium, or xhigh execution is enabled.'] };
 }
 function applyOverride(model: ModelConfig, env: NodeJS.ProcessEnv, prefix: string): void {
   if (env[`${prefix}_MODEL`]) model.id = env[`${prefix}_MODEL`]!;

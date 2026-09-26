@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile, rm, lstat } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute } from 'node:path';
 import type { Config } from '../config.js';
+import { windowsTool } from '../runtime/process.js';
 import { cleanChildEnvironment, ExecutionPolicy } from '../execution/policy.js';
 
 const exec = promisify(execFile);
@@ -15,10 +16,10 @@ export interface ReviewResult { id: string; root: string; changes: ReviewedChang
 export async function privateDirectory(path: string) {
   await mkdir(path, { recursive: true, mode: 0o700 });
   if (process.platform === 'win32') {
-    const { stdout } = await exec('whoami', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true });
+    const { stdout } = await exec(windowsTool('whoami'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true });
     const sid = stdout.match(/S-1-[\d-]+/)?.[0];
     if (!sid) throw new Error('Cannot determine private storage permissions');
-    await exec('icacls', [path, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true });
+    await exec(windowsTool('icacls'), [path, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true });
   }
 }
 

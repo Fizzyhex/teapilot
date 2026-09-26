@@ -63,7 +63,7 @@ const quiet = { allowedMentions: { parse: [] as [] } };
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
 export async function connect(settings: DiscordSettings, handlers: GatewayHandlers, log: (text: string) => void): Promise<Gateway> {
-  const { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, MessageFlags, MessageReferenceType, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
+  const { ActionRowBuilder, ApplicationIntegrationType, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, InteractionContextType, MessageFlags, MessageReferenceType, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Channel],
@@ -173,7 +173,12 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     const channel = await sendable(interaction);
     const thread = channel?.isThread() ? channel : undefined;
     // Servers where teapilot is only user-installed, or where it lacks Send Messages, still allow interaction replies.
-    const oneShot = !channel || (interaction.inGuild() && !interaction.appPermissions?.has([PermissionFlagsBits.ViewChannel, thread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages]));
+    // A user install reports the user's default permissions, which can look like the right to post, so the install type decides first.
+    const guildInstalled = interaction.authorizingIntegrationOwners[ApplicationIntegrationType.GuildInstall] !== undefined;
+    const cannotPost = interaction.inGuild()
+      ? !guildInstalled || !interaction.appPermissions?.has([PermissionFlagsBits.ViewChannel, thread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages])
+      : interaction.context === InteractionContextType.PrivateChannel;
+    const oneShot = !channel || cannotPost;
     const respond = async (note?: string) => {
       if (answered) { if (note) await interaction.followUp({ content: note, flags: MessageFlags.Ephemeral }); return; }
       answered = true;

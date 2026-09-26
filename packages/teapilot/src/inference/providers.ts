@@ -8,6 +8,7 @@ import { effectiveProfile, modelFor, profileFor, type ExecutionProfile } from '.
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 import { calibratedTokens, estimateInputTokens, MAX_PAYLOAD_BYTES } from './context.js';
+import { reasoningFields } from './reasoning.js';
 
 export function piModel(config: ModelConfig, profile?: ExecutionProfile): Model<'openai-completions'> {
   return {
@@ -30,28 +31,6 @@ export async function localAvailable(config: Config, physical?: PhysicalModel): 
     });
     return response.ok;
   } catch { return false; }
-}
-
-/** Probe native reasoning metadata without guessing from a model name. */
-export async function discoverNativeReasoning(config: Config, physical: PhysicalModel, signal?: AbortSignal): Promise<readonly ('off' | 'medium' | 'xhigh')[]> {
-  const model = config.models[physical];
-  if (!model.enabled) return [];
-  const base = model.baseUrl.replace(/\/v1\/?$/, '');
-  try {
-    const response = await fetch(`${base}/api/show`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: model.id }), signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(5000)]), redirect: 'error' });
-    if (!response.ok) return model.reasoningEfforts;
-    const body = await response.json() as { thinking?: { values?: unknown[]; default?: unknown } };
-    const values = body.thinking?.values;
-    if (!Array.isArray(values)) return model.reasoningEfforts;
-    const discovered = values.flatMap(value => {
-      if (value === false || value === 'none' || value === 'off') return ['off' as const];
-      if (value === 'medium') return ['medium' as const];
-      if (value === 'xhigh') return ['xhigh' as const];
-      return [];
-    });
-    if (discovered.length) model.reasoningEfforts = [...new Set(discovered)];
-    return model.reasoningEfforts;
-  } catch { signal?.throwIfAborted(); return model.reasoningEfforts; }
 }
 
 // The SDK does not accept a signal. Custom providers may opt in; racing also
@@ -172,6 +151,7 @@ export function guardedStream(
   const spec = modelFor(config, tier);
   const model = piModel(spec, profile);
   const reservedOutputTokens = Math.min(controls?.maxOutputTokens ?? profile.maxOutputTokens, profile.maxOutputTokens);
+  const reasoning = reasoningFields(spec, profile.thinking);
   return (_model, context, options) => {
     const output = new AssistantMessageEventStream();
     const run = async (): Promise<void> => {
@@ -202,9 +182,7 @@ export function guardedStream(
           onPayload: payload => spec.provider === 'openrouter' ? {
             ...(payload as Record<string, unknown>),
             provider: { require_parameters: true, max_price: { prompt: spec.inputUsdPerMillion, completion: spec.outputUsdPerMillion, request: 0 } },
-          } : spec.provider === 'ollama' ? {
-            ...(payload as Record<string, unknown>), reasoning_effort: profile.effort,
-          } : undefined,
+          } : reasoning ? { ...(payload as Record<string, unknown>), ...reasoning } : undefined,
           fetch: async (input, init) => {
             const body = typeof init?.body === 'string' ? init.body : '';
             const payloadBytes = Buffer.byteLength(body);

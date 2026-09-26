@@ -69,5 +69,6 @@ TeaPilot uses Qwen3.5-9B for cheap standalone work and one persistent Qwen3.8-27
 2. [Commands](docs/02-commands.md) — choose a request mode, use interactive features, and interpret results
 3. [Configuration](docs/03-configuration.md) — profiles, local endpoints, providers, models, and policies
 4. [Discord](docs/04-discord.md) — optional: use teapilot from Discord DMs or a channel
+5. [NVIDIA Runtime](docs/05-nvidia-runtime.md) — benches & trade-offs for the `Optimized NVIDIA` runtime
 
 See [project status](https://github.com/fizzyhex/teapilot/blob/main/STATUS.md) for known limits and remaining work.

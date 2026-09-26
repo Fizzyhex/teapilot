@@ -13,13 +13,12 @@ import { budgetedJev, guardedStream, piModel, type InferenceState } from './infe
 import { Telemetry } from './telemetry/outcome.js';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import { capabilities } from './routing/capabilities.js';
-import { effectiveProfile, modelFor, profileFor } from './routing/execution.js';
+import { effectiveProfile, modelFor, profileAvailable, profileFor, reasoningTier, type ThinkingLevel } from './routing/execution.js';
+import { managedRuntimes, runtimeHints, type Runtimes } from './runtime/index.js';
 
-export async function endpointHint(config: Config, tier: Tier, log: (text: string) => void, signal?: AbortSignal): Promise<void> {
-  try {
-    const response = await fetch('http://127.0.0.1:11434/api/version', { redirect: 'error', signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(1500)]) });
-    if (response.ok) log(`Ollama detected at http://127.0.0.1:11434; configured endpoint: ${modelFor(config, tier).baseUrl}. To choose installed models, run teapilot setup${config.source ? ` --config-dir "${config.source.directory}"` : ''} and select Locally via Ollama. No endpoint was changed.`);
-  } catch { signal?.throwIfAborted(); }
+/** Hints from the runtimes TeaPilot manages, for a model whose endpoint check failed. */
+export async function endpointHint(config: Config, tier: Tier, log: (text: string) => void, signal?: AbortSignal, runtimes?: Runtimes): Promise<void> {
+  for (const hint of await runtimeHints(modelFor(config, tier), signal ?? new AbortController().signal, runtimes)) log(hint);
 }
 
 export async function routingCheck(config: Config, consent: (message: string) => Promise<boolean>, log: (text: string) => void, signal?: AbortSignal): Promise<boolean> {
@@ -48,29 +47,67 @@ export async function routingCheck(config: Config, consent: (message: string) =>
   } finally { await unlock(); }
 }
 
-export async function modelStatus(config: Config, tier: Tier, signal?: AbortSignal): Promise<string | undefined> {
+/** Why a model's endpoint cannot serve it: the server is not ready, its API is incompatible, or the model is missing. */
+export interface EndpointProblem { layer: 'not-ready' | 'api' | 'model-missing'; message: string }
+
+/** The cheap check: API metadata only, never generation. */
+export async function endpointStatus(config: Config, tier: Tier, signal?: AbortSignal): Promise<EndpointProblem | undefined> {
   const model = modelFor(config, tier); const secret = config.secrets[profileFor(tier).model];
   try {
     const response = await fetch(`${model.baseUrl.replace(/\/$/, '')}/models`, {
       headers: secret ? { Authorization: `Bearer ${secret}` } : {},
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000), redirect: 'error',
     });
-    if (!response.ok) return `Model listing returned HTTP ${response.status}; check the endpoint and credential.`;
+    if (!response.ok) return { layer: 'api', message: `Model listing returned HTTP ${response.status}; check the endpoint and credential.` };
     const body = await response.json() as { data?: Array<{ id?: string }> };
-    if (!Array.isArray(body.data)) return 'Endpoint did not return an OpenAI-compatible model list.';
-    if (!body.data.some(item => item.id === model.id)) return 'Selected model is not installed/available; rerun teapilot setup.';
+    if (!Array.isArray(body.data)) return { layer: 'api', message: 'Endpoint did not return an OpenAI-compatible model list.' };
+    if (!body.data.some(item => item.id === model.id)) return { layer: 'model-missing', message: 'Selected model is not installed/available; rerun teapilot setup.' };
     return undefined;
   } catch {
     signal?.throwIfAborted();
-    return 'Endpoint is unreachable; start the model server and check its URL.';
+    return { layer: 'not-ready', message: 'Endpoint is unreachable; start the model server and check its URL.' };
   }
 }
 
-export interface LiveReport { ask: boolean; tools: boolean; coding: boolean; spentUsd: number }
+/** Process-level state of the managed runtimes serving the configured models. Cheap: no generation. */
+async function runtimeStatus(config: Config, log: (text: string) => void, signal: AbortSignal, runtimes: Runtimes = managedRuntimes()): Promise<void> {
+  const urls = new Set(Object.values(config.models).filter(model => model.enabled).map(model => model.baseUrl.replace(/\/$/, '')));
+  for (const driver of Object.values(runtimes)) {
+    if (!driver) continue;
+    const state = await driver.inspect(signal).catch(() => { signal.throwIfAborted(); return undefined; });
+    if (!state?.baseUrl || !urls.has(state.baseUrl.replace(/\/$/, ''))) continue;
+    log(`Runtime: ${driver.label}: ${state.ready ? `running${state.version ? ` (${state.version})` : ''}` : 'NOT RUNNING'}${state.detail ? `; ${state.detail}` : ''}`);
+  }
+}
+
+export async function modelStatus(config: Config, tier: Tier, signal?: AbortSignal): Promise<string | undefined> {
+  return (await endpointStatus(config, tier, signal))?.message;
+}
+
+/**
+ * The layer a live check stopped at, so setup and doctor need not match message text:
+ * the server could not load the model, rejected the request as incompatible, or
+ * the streamed answer, tool continuation or coding edit failed.
+ */
+export type LiveFailure = 'load' | 'api' | 'answer' | 'tools' | 'coding';
+export interface LiveReport {
+  ask: boolean; tools: boolean; coding: boolean; spentUsd: number;
+  /** Reasoning levels whose own streamed answer passed; set only when candidates were given. */
+  reasoning?: ThinkingLevel[];
+  failure?: LiveFailure;
+}
+const failureAdvice: Record<LiveFailure, string> = {
+  load: 'The server could not load the model; choose another model or free memory on the server.',
+  api: 'The server rejected the request as unsupported; check that it is OpenAI-compatible and serves this model.',
+  answer: 'Try another model or update the model server.',
+  tools: 'Try another model or update the model server.',
+  coding: 'Check context capacity or choose another model.',
+};
 
 // Uses the production metered streaming adapter and real pi file tools. The probe
 // never executes generated code; coding file tools are confined to its disposable directory.
-export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal, progress: (text: string) => void = () => {}): Promise<LiveReport> {
+// Each reasoning candidate is enabled only by its own streamed answer on its tier.
+export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal, progress: (text: string) => void = () => {}, reasoning: ThinkingLevel[] = []): Promise<LiveReport> {
   if (!config.policy.permissions.includes('inference')) throw new Error('Live inference is disabled by the configured permission policy.');
   const unlock = await lockState(config.stateDir);
   let scratch: string | undefined;
@@ -84,16 +121,18 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     const probeConfig = structuredClone(config);
     modelFor(probeConfig, tier).temperature = 0;
     probeConfig.policy.limits.maxTurns = Math.min(6, config.policy.limits.maxTurns);
-    async function run(prompt: string, tools: AgentTool[] = []): Promise<{ text: string; ok: boolean; failure?: string }> {
+    // Probes send exactly what production sends for the tier: any reasoning
+    // request comes from the model's protocol, never from a prompt suffix.
+    async function run(prompt: string, tools: AgentTool[] = [], probeTier = tier): Promise<{ text: string; ok: boolean; failure?: string; layer?: LiveFailure }> {
       const state: InferenceState = { turns: 0 };
       const agent = new Agent({
-        initialState: { model: piModel(modelFor(probeConfig, tier), effectiveProfile(probeConfig, tier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s typing style and tone - leaning towards informal lowercase responses', tools, thinkingLevel: profileFor(tier).thinking },
-        streamFn: guardedStream(probeConfig, tier, budget, telemetry, state), toolExecution: 'sequential',
+        initialState: { model: piModel(modelFor(probeConfig, probeTier), effectiveProfile(probeConfig, probeTier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s typing style and tone - leaning towards informal lowercase responses', tools, thinkingLevel: profileFor(probeTier).thinking },
+        streamFn: guardedStream(probeConfig, probeTier, budget, telemetry, state), toolExecution: 'sequential',
       });
       const abort = () => agent.abort();
       const timer = setTimeout(abort, config.policy.limits.attemptTimeoutMs);
       signal?.addEventListener('abort', abort, { once: true });
-      try { signal?.throwIfAborted(); await agent.prompt(`${prompt}\n/no_think`); }
+      try { signal?.throwIfAborted(); await agent.prompt(prompt); }
       finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
       signal?.throwIfAborted();
       const last = agent.state.messages.findLast(message => message.role === 'assistant');
@@ -101,12 +140,32 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
       return {
         ok: stopReason === 'stop', text: last?.role === 'assistant' ? last.content.filter(part => part.type === 'text').map(part => part.text).join('') : '',
         failure: state.providerDetail ?? (state.stop ? `inference stopped (${state.stop})` : stopReason !== 'stop' ? `stop reason ${stopReason}` : undefined),
+        layer: state.providerDetail ? 'load' : state.stop === 'unsupported' ? 'api' : undefined,
       };
     }
     progress('Checking streamed answers...');
     const answer = await run('Reply with exactly TEAPILOT_OK.');
     report.ask = answer.ok && answer.text.includes('TEAPILOT_OK');
-    if (!report.ask) progress(`Answer check failed: ${answer.failure ?? 'reply did not contain TEAPILOT_OK'}. ${answer.failure && /loading model|tensor/i.test(answer.failure) ? 'The model file cannot be loaded by this Ollama version; rerun teapilot setup and choose another model.' : 'Try another model or update Ollama.'}`);
+    if (!report.ask) {
+      report.failure = answer.layer ?? 'answer';
+      progress(`Answer check failed: ${answer.failure ?? 'reply did not contain TEAPILOT_OK'}. ${failureAdvice[report.failure]}`);
+    }
+    const candidates = reasoning.filter(level => level !== 'off' && profileFor(reasoningTier[level]).model === profileFor(tier).model);
+    if (report.ask && candidates.length) {
+      report.reasoning = [];
+      const model = modelFor(probeConfig, tier);
+      const verified = model.reasoningEfforts;
+      for (const level of candidates) {
+        const levelTier = reasoningTier[level];
+        // The candidate counts as enabled during its own probe, so its tier gets its own limits.
+        model.reasoningEfforts = [...new Set([...verified, level])];
+        progress(`Checking ${levelTier} answers...`);
+        const result = await run('Reply with exactly TEAPILOT_OK.', [], levelTier);
+        if (result.ok && result.text.includes('TEAPILOT_OK')) report.reasoning.push(level);
+        else progress(`${levelTier[0]!.toUpperCase()}${levelTier.slice(1)} check failed: ${result.failure ?? 'reply did not contain TEAPILOT_OK'}. ${levelTier} stays unavailable.`);
+      }
+      model.reasoningEfforts = verified;
+    }
     if (report.ask && modelFor(config, tier).toolCalling) {
       progress('Checking tool calls and continuation...');
       const token = randomUUID();
@@ -117,7 +176,10 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
       };
       const result = await run('Call teapilot_probe, then reply with the exact token returned by the tool.', [tool]);
       report.tools = called && result.ok && result.text.includes(token);
-      if (!report.tools) progress(`Tool check failed: executed=${called}, completed=${result.ok}, returned token=${result.text.includes(token)}. Try another model or update Ollama.`);
+      if (!report.tools) {
+        report.failure = result.layer ?? 'tools';
+        progress(`Tool check failed: executed=${called}, completed=${result.ok}, returned token=${result.text.includes(token)}. ${failureAdvice[report.failure]}`);
+      }
       if (report.tools) {
         progress('Checking a disposable coding task...');
         const nonce = randomUUID();
@@ -126,11 +188,14 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
         await writeFile(join(scratch, 'fixture.js'), before);
         probeConfig.policy.permissions = probeConfig.policy.permissions.filter(permission => ['inference', 'repository.read', 'repository.write'].includes(permission));
         const result = await runAttempt({ config: probeConfig, tier, workload: 'coder', cwd: scratch,
-          prompt: 'Read fixture.js. Change only the subtraction operator to addition, preserving every other character including the comment and final newline. Write fixture.js, then reply DONE. Do not call any shell. /no_think',
+          prompt: 'Read fixture.js. Change only the subtraction operator to addition, preserving every other character including the comment and final newline. Write fixture.js, then reply DONE. Do not call any shell.',
           web: false, budget, telemetry, approve: async () => false, signal });
         signal?.throwIfAborted();
         report.coding = result.success && result.toolCalls >= 2 && await readFile(join(scratch, 'fixture.js'), 'utf8') === expected;
-        if (!report.coding) progress(`Coding check failed: ${result.stopped ?? result.reason ?? 'file edit did not match the fixture'}; ${result.toolCalls} tool calls. Check context capacity or choose another model.`);
+        if (!report.coding) {
+          report.failure = 'coding';
+          progress(`Coding check failed: ${result.stopped ?? result.reason ?? 'file edit did not match the fixture'}; ${result.toolCalls} tool calls. ${failureAdvice.coding}`);
+        }
       }
     }
     report.spentUsd = budget.spent().request;
@@ -142,7 +207,7 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
   }
 }
 
-export async function doctor(config: Config, cwd: string, options: ActivityUI & { live?: boolean; signal?: AbortSignal; consent: (message: string) => Promise<boolean>; log: (text: string) => void }): Promise<boolean> {
+export async function doctor(config: Config, cwd: string, options: ActivityUI & { live?: boolean; signal?: AbortSignal; consent: (message: string) => Promise<boolean>; log: (text: string) => void; runtimes?: Runtimes }): Promise<boolean> {
   const { log } = options;
   let healthy = true;
   if (config.source) {
@@ -164,14 +229,18 @@ export async function doctor(config: Config, cwd: string, options: ActivityUI & 
     await rm(probe, { recursive: true });
     log('Workspace and state directory: accessible');
   } catch { log('Workspace or state directory is inaccessible; check paths and permissions.'); healthy = false; }
+  await during(options, 'Checking model runtimes...', () => runtimeStatus(config, log, options.signal ?? new AbortController().signal, options.runtimes));
   let available = false;
   for (const tier of tiers) {
     const model = modelFor(config, tier);
     if (!model.enabled) continue;
-    const error = await during(options, `Checking ${tier} endpoint...`, () => modelStatus(config, tier, options.signal));
+    const availability = profileAvailable(config, tier);
+    if (!availability.available) { log(`${tier}: unavailable (${availability.reason}); rerun setup to verify it.`); continue; }
+    const problem = await during(options, `Checking ${tier} endpoint...`, () => endpointStatus(config, tier, options.signal));
+    const error = problem?.message;
     log(`${tier}: ${model.id}; endpoint ${model.baseUrl}: ${error ? `FAIL: ${error}` : 'PASS (model found; live inference checked separately)'}`);
     if (config.policy.disabledCapabilities.includes(`coder.${tier}`)) log(`${tier}: coding is disabled by configuration; rerun setup to reconfigure and validate it.`);
-    if (error) { healthy = false; await during(options, 'Checking local endpoint...', () => endpointHint(config, tier, log, options.signal)); continue; }
+    if (error) { healthy = false; await during(options, 'Checking local endpoint...', () => endpointHint(config, tier, log, options.signal, options.runtimes)); continue; }
     available = true;
     if (options.live) {
       if (!await options.consent(`Run local ${tier} diagnostic calls within the configured request/day limits?`)) { log(`${tier}: live check declined`); healthy = false; continue; }

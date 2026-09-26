@@ -11,7 +11,15 @@
     "outputUsdPerMillion": 0,
     "vision": false,
     "toolCalling": true,
-    "reasoningEfforts": ["off"]
+    "reasoningEfforts": ["off"],
+    "reasoning": {
+      "type": "reasoning_effort",
+      "values": {
+        "off": "none",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      }
+    }
   },
   "capable": {
     "enabled": true,
@@ -25,6 +33,14 @@
     "outputUsdPerMillion": 0,
     "vision": false,
     "toolCalling": true,
-    "reasoningEfforts": ["off", "medium", "xhigh"]
+    "reasoningEfforts": ["off", "medium", "xhigh"],
+    "reasoning": {
+      "type": "reasoning_effort",
+      "values": {
+        "off": "none",
+        "medium": "medium",
+        "xhigh": "xhigh"
+      }
+    }
   }
 }

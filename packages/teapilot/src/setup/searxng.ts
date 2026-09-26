@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { command } from './ollama.js';
+import { command } from '../runtime/process.js';
 import { searchQuery } from '../search.js';
 import type { SetupUI } from './terminal.js';
 

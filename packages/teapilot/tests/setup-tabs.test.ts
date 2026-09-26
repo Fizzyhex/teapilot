@@ -9,6 +9,8 @@ import { InstallQueue } from '../src/setup/installs.js';
 import { renderScreen, SetupScreen, type ScreenState } from '../src/setup/screen.js';
 import { setupTabs, tabbedSetup } from '../src/setup/tabs.js';
 import type { SetupUI } from '../src/setup/terminal.js';
+import type { RuntimeDriver, Runtimes } from '../src/runtime/index.js';
+import { ollamaDriver } from '../src/runtime/ollama.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.unstubAllEnvs(); for (const fn of cleanup.splice(0)) await fn(); });
@@ -98,7 +100,10 @@ function driver(screen: SetupScreen) {
   };
 }
 
-async function session() {
+// No process or network: listing sources must not depend on this computer's GPU or Ollama.
+const offline: Runtimes = { ollama: { ...ollamaDriver, suitability: async () => ({ suitable: true, summary: 'ok' }) } };
+
+async function session(runtimes: Runtimes = offline) {
   const directory = await mkdtemp(join(tmpdir(), 'teapilot-tabs-'));
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   vi.stubEnv('TEAPILOT_STATE_DIR', join(directory, '.state'));
@@ -106,7 +111,7 @@ async function session() {
   const messages: string[] = [];
   const ui: SetupUI = { log: text => messages.push(text), input: async () => '', choose: async () => 0, confirm: async () => false };
   const draft = await loadDraft(directory, false);
-  return { directory, screen, messages, run: tabbedSetup(draft, screen, ui, new AbortController().signal, {}), drive: driver(screen) };
+  return { directory, screen, messages, run: tabbedSetup(draft, screen, ui, new AbortController().signal, { runtimes }), drive: driver(screen) };
 }
 
 it('keeps finished tabs when the user leaves another part-way, and saves only on request', async () => {
@@ -154,4 +159,44 @@ it('Ctrl+C twice leaves without writing anything', async () => {
   expect(await run).toBeUndefined();
   expect(messages.join('\n')).toContain('Settings were not saved');
   expect(existsSync(join(directory, '.env'))).toBe(false);
+});
+
+it('prepares a managed runtime through Model source and Install models, and explains one that cannot run here', async () => {
+  const calls: string[] = [];
+  const managed = (id: string, label: string, reason?: string): RuntimeDriver => ({
+    id, label, ownership: 'managed',
+    suitability: async () => reason ? { suitable: false, kind: 'hardware', reason } : { suitable: true, summary: 'ok' },
+    inspect: async () => ({ ownership: 'managed', ready: true }),
+    ensure: async () => { calls.push(`${id} ensure`); },
+    provision: async () => {
+      calls.push(`${id} provision`);
+      return [{ roles: ['capable'], source: 'Big model', model: { id: 'big', provider: 'managed', baseUrl: 'http://127.0.0.1:9/v1', contextTokens: 32768, maxOutputTokens: 16384, toolCalling: true } }];
+    },
+  });
+  const logs = (screen: SetupScreen) => (screen as unknown as { logs: Map<string, string[]> }).logs.get('source') ?? [];
+
+  const blocked = await session({ ollama: managed('ollama', 'Locally via Ollama'), nvidia: managed('nvidia', 'Optimized NVIDIA', 'No NVIDIA GPU was found.') });
+  await blocked.drive.wait(/^Model source/);
+  expect(logs(blocked.screen)).toContain('Optimized NVIDIA is not available on this computer: No NVIDIA GPU was found.');
+  await blocked.drive.answer(/^Model source/, '3');
+  await blocked.drive.wait(/^Model source/);
+  expect(calls).toEqual([]);
+  await blocked.drive.key(/^Model source/, 'c', { ctrl: true });
+  await blocked.drive.key(/^Model source/, 'c', { ctrl: true });
+  expect(await blocked.run).toBeUndefined();
+
+  const { directory, run, drive } = await session({ ollama: managed('ollama', 'Locally via Ollama'), nvidia: managed('nvidia', 'Optimized NVIDIA') });
+  await drive.answer(/^Model source/, '3');
+  await drive.answer(/^Install models/, '1');
+  await drive.answer(/^Usage limits/, '1');
+  await drive.answer(/^Routing/, '1');
+  await drive.answer(/^Run Checks/, '2');
+  await drive.answer(/^Web search/, '3');
+  await drive.answer(/^Save these settings/, '1');
+  expect(await run).toEqual({ ready: false, coding: false });
+  expect(calls).toEqual(['nvidia ensure', 'nvidia provision']);
+  const saved = await loadConfig(directory, {});
+  expect(saved.models.capable).toMatchObject({ id: 'big', provider: 'managed', enabled: true, reasoningEfforts: ['off'] });
+  expect(saved.models.fast.enabled).toBe(false);
+  expect(saved.policy.disabledCapabilities).toEqual(expect.arrayContaining(['coder.normal', 'coder.reasoning', 'coder.deep']));
 });

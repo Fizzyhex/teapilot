@@ -23,6 +23,7 @@ teapilot code --cwd <repository> ["Fix the failing tests"]
 teapilot --prompt "Summarise this idea"   (one-shot, no session)
 teapilot doctor [--live]
 teapilot search status|start|stop|remove
+teapilot runtime status|start|stop   (the model server TeaPilot installed, e.g. after a restart)
 teapilot discord setup|start|status|remove   (optional; chat from Discord)
 teapilot bridge host [port] [--ts] [--token]   (share this computer's teapilot over your tailnet)
 teapilot bridge connect [port|host]
@@ -54,7 +55,7 @@ async function main(): Promise<void> {
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
-  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search', 'discord', 'bridge'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search', 'runtime', 'discord', 'bridge'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
   if (command === 'serve') { if (!values.stdio) throw new Error('serve requires --stdio'); await serve(); return; }
   if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
@@ -119,6 +120,14 @@ async function main(): Promise<void> {
       presentation.approval(redact(`${approval.summary}\n${approval.details ?? ''}`));
       return await ui.confirm('Approve this action?', approval.signal);
     };
+    if (command === 'runtime') {
+      const action = positionals.shift() ?? 'status';
+      if (positionals.length) throw new Error('Use teapilot runtime status|start|stop.');
+      const { manageRuntimes } = await import('./runtime/manage.js');
+      const runtimeUI = ui ?? { log: (text: string) => console.error(text), confirm: async () => false, input: async () => '', choose: async () => 0 };
+      process.exitCode = await manageRuntimes(action, config, runtimeUI, controller.signal) ? 0 : 2;
+      return;
+    }
     if (command === 'doctor') {
       process.exitCode = await doctor(config, values.cwd, { live: values.live, signal: controller.signal, consent: async message => ui ? ui.confirm(redact(message)) : false, activity: presentation.activity, log: text => presentation.write(redact(text) + '\n', 'stdout') }) ? 0 : 1;
       return;

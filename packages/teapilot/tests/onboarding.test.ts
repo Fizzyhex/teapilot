@@ -5,12 +5,16 @@ import { configDirectory, loadConfig } from '../src/config.js';
 import { doctor, liveCheck, modelStatus, routingCheck } from '../src/diagnostics.js';
 import { runHost } from '../src/host.js';
 import { saveConfiguration, setup } from '../src/setup/index.js';
-import { checkDisk, streamOperation } from '../src/setup/ollama.js';
+import { checkDisk, ollamaDriver, streamOperation } from '../src/runtime/ollama.js';
+import { RuntimeError, type Runtimes } from '../src/runtime/index.js';
 import type { SetupUI } from '../src/setup/terminal.js';
 import { completion, events, fixture, jev, mockServer, type Handler } from './helpers.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); for (const fn of cleanup.splice(0).reverse()) await fn(); });
+
+// Ollama as it is on a computer without it, where the user declines the install.
+const declined: Runtimes = { ollama: { ...ollamaDriver, ensure: async () => { throw new RuntimeError('declined', 'Installation declined.'); } } };
 
 const diagnostic: Handler = (body, request, response) => {
   if (request.url?.endsWith('/models')) { response.end(JSON.stringify({ data: [{ id: 'local-test' }] })); return; }
@@ -82,7 +86,7 @@ it('live diagnostics prove streaming, tool continuation and a real file edit', a
 
 it('an answer without tool execution is not reported as coding readiness', async () => {
   const f = await local((_body, _req, res) => completion(res, { text: 'TEAPILOT_OK' }));
-  expect(await liveCheck(f.config, 'normal')).toEqual({ ask: true, tools: false, coding: false, spentUsd: 0 });
+  expect(await liveCheck(f.config, 'normal')).toEqual({ ask: true, tools: false, coding: false, spentUsd: 0, failure: 'tools' });
 });
 
 it('Ollama execution disables thinking in the actual HTTP request', async () => {
@@ -157,7 +161,7 @@ it('setup saves private config, reruns preserve it, and environment overrides re
   expect(config.secrets.capable).toBe('private-test-key');
   expect(messages.join('\n')).not.toContain('private-test-key');
   await expect(setup(options, ui, new AbortController().signal)).rejects.toThrow('already exists');
-  expect(await setup({ directory }, ui, new AbortController().signal)).toBe(false);
+  expect(await setup({ directory, runtimes: declined }, ui, new AbortController().signal)).toBe(false);
   expect(await readFile(join(directory, '.env'), 'utf8')).toBe(content);
   expect((await loadConfig(directory, { CAPABLE_MODEL: 'override' })).models.capable.id).toBe('override');
   expect((await loadConfig(directory, { CAPABLE_MODEL: 'override' })).source).toMatchObject({ directory, overrides: expect.arrayContaining(['CAPABLE_MODEL']) });
@@ -175,7 +179,7 @@ it('recognizes interrupted first setup without mislabeling retained generations'
   expect(await setup({ directory, nonInteractive: true, endpoint: `${f.server.url}/v1`, model: 'local-test', contextTokens: 16384 }, ui, new AbortController().signal)).toBe(false);
   expect(messages.join('\n')).toContain('interrupted before activation');
   messages.length = 0;
-  await setup({ directory }, ui, new AbortController().signal);
+  await setup({ directory, runtimes: declined }, ui, new AbortController().signal);
   expect(messages.join('\n')).not.toContain('interrupted before activation');
 });
 

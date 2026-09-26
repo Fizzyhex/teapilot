@@ -2,10 +2,11 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parse } from 'dotenv';
 import { during } from '../activity.js';
-import { loadConfig, modelsSchema, physicalModels, policySchema, type Config, type PhysicalModel, type Tier } from '../config.js';
+import { loadConfig, modelsSchema, physicalModels, policySchema, tiers, type Config, type PhysicalModel, type Tier } from '../config.js';
 import { endpointHint, liveCheck, modelStatus, type LiveReport } from '../diagnostics.js';
+import { effectiveProfile, profileAvailable, profileFor, reasoningTier, type ThinkingLevel } from '../routing/execution.js';
 import { saveConfiguration } from './index.js';
-import { ollamaURL, type PreparedModel } from './ollama.js';
+import { endpointLabel, type Endpoint, type ProvisionedModel, type RuntimeDriver, type Runtimes } from '../runtime/index.js';
 import type { SetupUI } from './terminal.js';
 
 // The tier each physical model is verified through during setup.
@@ -76,19 +77,26 @@ export async function configureRouting(config: Config, env: Record<string, strin
   }
 }
 
-/** Only the models passed here are enabled: never a silent paid fallback. */
-export function applyOllama(config: Config, env: Record<string, string>, prepared: PreparedModel[]): { roles: PhysicalModel[]; displayModel: string } {
+/**
+ * Fill ordinary model entries from what a runtime provisioned. Only these models
+ * are enabled (never a silent paid fallback), and no reasoning level counts as
+ * verified until live checks pass.
+ */
+export function applyProvisioned(config: Config, env: Record<string, string>, driver: Pick<RuntimeDriver, 'requestTimeoutMs'>, provisioned: ProvisionedModel[]): { roles: PhysicalModel[]; displayModel: string } {
   for (const model of Object.values(config.models)) model.enabled = false;
-  for (const model of prepared) for (const role of model.roles) {
-    Object.assign(config.models[role], { id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, apiKeyEnv: 'LOCAL_API_KEY', contextTokens: model.context, maxOutputTokens: role === 'capable' ? Math.min(16384, Math.floor(model.context / 2)) : 2048, toolCalling: model.tools, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2, reasoningEfforts: ['off'] });
+  for (const item of provisioned) for (const role of item.roles) {
+    const model = config.models[role];
+    Object.assign(model, { inputUsdPerMillion: 0, outputUsdPerMillion: 0, ...item.model, reasoning: item.model.reasoning, reasoningEfforts: ['off'] });
+    // The fast tier never produces more than its profile allows.
+    if (role === 'fast') model.maxOutputTokens = Math.min(model.maxOutputTokens, profileFor('fast').maxOutputTokens);
+    if (item.apiKeyEnv) model.apiKeyEnv = item.apiKeyEnv;
+    if (item.apiKey === null) delete env[model.apiKeyEnv];
+    else if (item.apiKey !== undefined) env[model.apiKeyEnv] = item.apiKey;
   }
-  delete env.LOCAL_API_KEY;
-  config.policy.limits.requestTimeoutMs = 120000;
-  const roles = physicalModels.filter(role => prepared.some(model => model.roles.includes(role)));
-  return { roles, displayModel: prepared.map(model => `${model.source} (${model.roles.join(' + ')})`).join(', ') };
+  if (driver.requestTimeoutMs) config.policy.limits.requestTimeoutMs = driver.requestTimeoutMs;
+  const roles = physicalModels.filter(role => provisioned.some(model => model.roles.includes(role)));
+  return { roles, displayModel: provisioned.map(model => `${model.source} (${model.roles.join(' + ')})`).join(', ') };
 }
-
-export interface Endpoint { baseUrl: string; id: string; contextTokens: number; key?: string }
 
 export async function askEndpoint(ui: SetupUI, env: Record<string, string>, config: Config, preset: Partial<Endpoint> = {}): Promise<Endpoint> {
   const current = config.models.capable;
@@ -99,11 +107,22 @@ export async function askEndpoint(ui: SetupUI, env: Record<string, string>, conf
   return { baseUrl, id, contextTokens, key };
 }
 
-export function applyEndpoint(config: Config, env: Record<string, string>, endpoint: Endpoint): void {
-  for (const model of Object.values(config.models)) model.enabled = false;
-  const model = config.models.capable;
-  Object.assign(model, { baseUrl: endpoint.baseUrl, id: endpoint.id, contextTokens: endpoint.contextTokens, maxOutputTokens: Math.min(16384, Math.floor(endpoint.contextTokens / 4)), toolCalling: true, provider: 'local', inputUsdPerMillion: 0, outputUsdPerMillion: 0, reasoningEfforts: ['off'] });
-  if (endpoint.key) env[model.apiKeyEnv] = endpoint.key;
+
+export interface ModelSource { id: string; label: string; driver?: RuntimeDriver; unavailable?: string; summary?: string[] }
+
+/**
+ * Where models can run, in the order setup offers them. The existing endpoint
+ * has no driver until its details are known. A managed runtime that cannot run
+ * on this machine is still listed, with the reason.
+ */
+export async function modelSources(runtimes: Runtimes, signal: AbortSignal): Promise<ModelSource[]> {
+  const managed = async (driver: RuntimeDriver): Promise<ModelSource> => {
+    const suitability = await driver.suitability(signal);
+    return suitability.suitable
+      ? { id: driver.id, label: driver.label, driver, summary: [`${driver.label}: ${suitability.summary}`, ...suitability.notes ?? []] }
+      : { id: driver.id, label: `${driver.label} · unavailable`, driver, unavailable: suitability.reason, summary: [`${driver.label} is not available on this computer: ${suitability.reason}`] };
+  };
+  return [await managed(runtimes.ollama), { id: 'endpoint', label: endpointLabel }, ...runtimes.nvidia ? [await managed(runtimes.nvidia)] : []];
 }
 
 /** Resolve secrets, validate, and enable exactly the given roles. */
@@ -124,26 +143,55 @@ export async function checkModels(config: Config, roles: PhysicalModel[], ui: Se
     let report: LiveReport | undefined;
     if (status) { ui.log(`${label}Endpoint ${config.models[role].baseUrl}: ${status}`); await during(ui, 'Checking local endpoint...', () => endpointHint(config, tier, ui.log, signal)); }
     else if (runLive ??= await ui.confirm(`Run live local checks, bounded by the configured request/day limits?`)) {
-      report = await during(ui, `Verifying ${role} answers and coding...`, () => liveCheck(config, tier, signal, ui.log));
+      report = await during(ui, `Verifying ${role} answers and coding...`, () => liveCheck(config, tier, signal, ui.log, candidates(config, role)));
     }
     ui.log(`${label}${report?.coding ? 'Ready: answers, tool continuation, and a verified file edit passed.' : report?.ask ? 'Partial: answers work; coding is disabled until validation passes.' : 'Partial: inference is unverified. Use teapilot doctor --live after fixing the endpoint.'}`);
+    if (report?.reasoning) ui.log(`${label}Reasoning: ${reasoningLine(report)}`);
     reports.set(role, report);
   }
   return reports;
 }
 
-/** Failed or skipped coding validation never advertises a ready coding path. */
+/** Reasoning levels the model's protocol can request, still to be verified. */
+export function candidates(config: Config, role: PhysicalModel): ThinkingLevel[] {
+  const values = config.models[role].reasoning?.values ?? {};
+  return (['medium', 'xhigh'] as const).filter(level => values[level] !== undefined);
+}
+
+/**
+ * Failed or skipped coding validation never advertises a ready coding path, and
+ * only reasoning levels whose own check passed are enabled. Higher tiers on the
+ * same model inherit the coding result of the tier that was checked.
+ */
 export function applyReports(config: Config, roles: PhysicalModel[], reports: Map<PhysicalModel, LiveReport | undefined>): void {
   for (const role of roles) {
-    const tier = roleTier[role], report = reports.get(role);
-    config.models[role].toolCalling = Boolean(report?.tools);
-    config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => id !== `coder.${tier}`);
-    if (!report?.coding) config.policy.disabledCapabilities.push(`coder.${tier}`);
+    const report = reports.get(role), model = config.models[role];
+    model.toolCalling = Boolean(report?.tools);
+    model.reasoningEfforts = ['off', ...report?.reasoning ?? []];
+    const coder = tiers.filter(tier => profileFor(tier).model === role).map(tier => `coder.${tier}`);
+    config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => !coder.includes(id));
+    if (!report?.coding) config.policy.disabledCapabilities.push(...coder);
   }
 }
 
+function reasoningLine(report: LiveReport | undefined): string {
+  return (['medium', 'xhigh'] as const).map(level => `${reasoningTier[level]} ${report?.reasoning?.includes(level) ? 'Passed' : 'unavailable'}`).join(' · ');
+}
+
 export function checksLine(report: LiveReport | undefined): string {
-  return `answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'}`;
+  return `answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'} · ${reasoningLine(report)}`;
+}
+
+/** Context and output limits each tier will run with, so a change to them is visible before saving. */
+export function tierLines(config: Config, roles: PhysicalModel[]): string[] {
+  return roles.map(role => {
+    const parts = tiers.filter(tier => profileFor(tier).model === role).map(tier => {
+      if (!profileAvailable(config, tier).available) return `${tier} unavailable`;
+      const profile = effectiveProfile(config, tier);
+      return `${tier} ${profile.contextTokens.toLocaleString('en-US')} / ${profile.maxOutputTokens.toLocaleString('en-US')} output`;
+    });
+    return `  Tiers:     ${parts.join(' · ')}`;
+  });
 }
 
 export function summaryLines(draft: Draft, config: Config, roles: PhysicalModel[], details: { displayModel?: string; checks: string; routingReady: boolean; searchStatus: string }): string[] {
@@ -154,6 +202,7 @@ export function summaryLines(draft: Draft, config: Config, roles: PhysicalModel[
     const selected = config.models[role]; const previous = previousModels[role];
     lines.push(`  ${role[0]!.toUpperCase()}${role.slice(1)}: ${selected.baseUrl}${hasConfiguration && previous.baseUrl !== selected.baseUrl ? ` (was ${previous.baseUrl})` : ''} · ${selected.contextTokens.toLocaleString('en-US')} tokens${hasConfiguration && previous.contextTokens !== selected.contextTokens ? ` (was ${previous.contextTokens.toLocaleString('en-US')})` : ''}`);
   }
+  lines.push(...tierLines(config, roles));
   lines.push(`  Budgets:   $${config.policy.budget.requestUsd}/request · $${config.policy.budget.dailyUsd}/UTC day`);
   lines.push(`  Routing:   ${config.routingMode}${config.routingMode === 'hosted' ? ' £' : ''}${hasConfiguration ? ` (was ${before.routing})` : ''}`);
   lines.push(`  Search:    ${details.searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);

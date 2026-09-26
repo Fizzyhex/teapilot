@@ -1,4 +1,4 @@
-import { ollamaURL, prepareOllamaModel, type OllamaModel, type PreparedModel } from './ollama.js';
+import { ollamaURL, prepareOllamaModel, type OllamaModel, type PreparedModel } from '../runtime/ollama.js';
 import type { SetupUI } from './terminal.js';
 
 export type InstallState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';

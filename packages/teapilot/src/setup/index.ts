@@ -5,22 +5,27 @@ import { resolve } from 'node:path';
 import { parse } from 'dotenv';
 import { configDirectory, exists, loadConfig, modelsSchema, policySchema, userConfigDir, type Config, type PhysicalModel } from '../config.js';
 import { routingCheck } from '../diagnostics.js';
-import { applyEndpoint, applyOllama, applyReports, askEndpoint, checkModels, checksLine, configureRouting, finishModels, loadDraft, persist, summaryLines, type CredentialStorage, type Draft } from './draft.js';
-import { command, ensureOllama, selectOllamaModel } from './ollama.js';
+import { applyProvisioned, applyReports, askEndpoint, checkModels, checksLine, configureRouting, finishModels, loadDraft, modelSources, persist, summaryLines, type CredentialStorage, type Draft } from './draft.js';
+import { endpointDriver, isRuntimeError, managedRuntimes, RuntimeError, type Runtimes } from '../runtime/index.js';
+import { command, windowsTool } from '../runtime/process.js';
 import type { SetupUI } from './terminal.js';
 import { configureSearch } from './search.js';
 
 export type { CredentialStorage } from './draft.js';
-export interface SetupOptions { directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number; verbose?: boolean }
+export interface SetupOptions {
+  directory?: string; nonInteractive?: boolean; endpoint?: string; model?: string; contextTokens?: number; verbose?: boolean;
+  /** The managed runtimes to offer; the real ones unless a test provides its own. */
+  runtimes?: Runtimes;
+}
 
 async function privateWrite(path: string, contents: string, signal: AbortSignal): Promise<void> {
   const handle = await open(path, 'wx', 0o600);
   try {
     if (process.platform === 'win32') {
-      const identity = await command('whoami', ['/user', '/fo', 'csv', '/nh'], signal);
+      const identity = await command(windowsTool('whoami'), ['/user', '/fo', 'csv', '/nh'], signal);
       const sid = identity.match(/S-1-[\d-]+/)?.[0];
       if (!sid) throw new Error('Could not determine the account for private configuration permissions.');
-      await command('icacls', [path, '/inheritance:r', '/grant:r', `*${sid}:F`], signal);
+      await command(windowsTool('icacls'), [path, '/inheritance:r', '/grant:r', `*${sid}:F`], signal);
     }
     await handle.writeFile(contents); await handle.sync();
   } finally { await handle.close(); }
@@ -99,7 +104,7 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
   // The tabbed screen needs a real terminal with room for it; otherwise questions come one after another.
   const screen = options.nonInteractive ? undefined : ui.screen?.();
   const outcome = screen
-    ? await (await import('./tabs.js')).tabbedSetup(draft, screen, ui, signal, { verbose: options.verbose, credentials })
+    ? await (await import('./tabs.js')).tabbedSetup(draft, screen, ui, signal, { verbose: options.verbose, credentials, runtimes: options.runtimes })
     : await linearSetup(draft, options, ui, signal, credentials);
   if (!outcome) return false;
   ui.log(outcome.coding ? 'Model checks passed. See the routing and search results above.' : 'Partial: configuration saved; some model checks remain unverified.');
@@ -112,18 +117,26 @@ export async function setup(options: SetupOptions, ui: SetupUI, signal: AbortSig
 async function linearSetup(draft: Draft, options: SetupOptions, ui: SetupUI, signal: AbortSignal, credentials?: CredentialStorage): Promise<{ ready: boolean; coding: boolean } | undefined> {
   const { config, env } = draft;
   ui.log('Model downloads and verification happen before the final settings review.');
-  const choice = options.nonInteractive ? 1 : await ui.choose('Model source', ['Locally via Ollama', 'An existing local OpenAI-compatible endpoint']);
-  let displayModel: string | undefined;
-  let roles: PhysicalModel[] = ['capable'];
+  const sources = await modelSources(options.runtimes ?? managedRuntimes(), signal);
+  if (!options.nonInteractive) for (const line of sources.flatMap(item => item.summary ?? [])) ui.log(line);
+  const source = sources[options.nonInteractive ? sources.findIndex(item => item.id === 'endpoint') : await ui.choose('Model source', sources.map(item => item.label))]!;
   if (!options.nonInteractive) await configureRouting(config, env, ui);
-  if (choice === 0) {
-    await during(ui, 'Preparing Ollama...', () => ensureOllama(ui, signal));
-    const prepared = await during(ui, 'Inspecting local models...', () => selectOllamaModel(ui, signal, undefined, options.verbose));
-    ({ roles, displayModel } = applyOllama(config, env, prepared));
-  } else {
-    const endpoint = await askEndpoint(ui, env, config, { baseUrl: options.endpoint, id: options.model, contextTokens: options.contextTokens, ...options.nonInteractive ? { key: process.env.LOCAL_API_KEY } : {} });
-    applyEndpoint(config, env, endpoint);
+  if (source.unavailable) throw new RuntimeError('hardware', `${source.driver!.label} is not available on this computer: ${source.unavailable}`);
+  const driver = source.driver ?? endpointDriver(await askEndpoint(ui, env, config, { baseUrl: options.endpoint, id: options.model, contextTokens: options.contextTokens, ...options.nonInteractive ? { key: process.env.LOCAL_API_KEY } : {} }));
+  // Installs, downloads and model loads all finish here, before any check or real request.
+  let provisioned;
+  try {
+    const context = { ui, signal, verbose: options.verbose };
+    if (driver.ownership === 'managed') {
+      await during(ui, `Preparing ${driver.label}...`, () => driver.ensure(context));
+      provisioned = await during(ui, 'Preparing models...', () => driver.provision(context));
+    } else provisioned = await driver.provision(context);
+  } catch (error) {
+    if (!isRuntimeError(error, 'declined')) throw error;
+    ui.log(`${error.message} Existing settings were retained.`);
+    return undefined;
   }
+  const { roles, displayModel } = applyProvisioned(config, env, driver, provisioned);
   finishModels(config, env, roles);
   const reports = await checkModels(config, roles, ui, signal);
   applyReports(config, roles, reports);

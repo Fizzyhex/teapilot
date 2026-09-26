@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../dist/config.js';
 import { liveCheck, modelStatus } from '../dist/diagnostics.js';
 import { runHost } from '../dist/host.js';
-import { presets, selectOllamaModel } from '../dist/setup/ollama.js';
+import { presets, selectOllamaModel } from '../dist/runtime/ollama.js';
 
 const model = process.env.TEAPILOT_TEST_MODEL ?? presets[0].id;
 const selection = presets.findIndex(preset => preset.id === model);
