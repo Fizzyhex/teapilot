@@ -11,6 +11,8 @@ Your goal is recursive improvement and alignment of teapilot's output, by testin
 Use the `agent-discord.mjs` to interact with teapilot. Discover frustrations, bugs, and opportunities for improvement. You may fine tune by tweaking the `src/agents/play.ts` system prompt, and anything relevant to improving the result / your testing experience.
 
 You should produce a short report before/after runs for review.
+
+Tweaks to system prompts should be generalised - and not 'cheat' by optimising for specific case-by-case scenarios.
 ```
 
 ## Verifying a case
