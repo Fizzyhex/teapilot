@@ -1,8 +1,9 @@
-import { tierPreferences } from '../config.js';
-import { modes, permissions } from '../execution/grants.js';
+import { reasoningLevels, tierPreferences, type ReasoningLevel, type TierPreference } from '../config.js';
+import { modes, permissions, type Mode } from '../execution/grants.js';
+import { reasoningTier } from '../routing/execution.js';
 
 type Choice = { name: string; value: string };
-type Option = { type: 3; name: string; description: string; required: true; choices?: Choice[] };
+type Option = { type: 3; name: string; description: string; required: boolean; choices?: Choice[] };
 /** Discord application-command JSON; kept free of discord.js so it can be tested and registered from anywhere. */
 export type CommandDefinition = Placement & (
   | { name: string; description: string; options?: Array<Option | { type: 1; name: string; description: string; options?: Option[] }> }
@@ -17,10 +18,13 @@ export const interactionLifetimeMs = 14 * 60_000;
 
 /** Commands that start or continue a conversation instead of controlling one; the gateway handles them itself. */
 export const replyCommand = 'reply';
+export const promptCommand = 'prompt';
 export const replyMenu = 'Reply';
 
 const value = (description: string, values: readonly string[]): Option =>
   ({ type: 3, name: 'value', description, required: true, choices: values.map(item => ({ name: item, value: item })) });
+const optional = (name: string, description: string, values: readonly string[]): Option =>
+  ({ type: 3, name, description, required: false, choices: values.map(item => ({ name: item, value: item })) });
 const choice = (name: string, description: string, values: readonly string[]): CommandDefinition =>
   ({ name, description, options: [value(description, values)] });
 const subcommand = (name: string, description: string, options?: Option[]) => ({ type: 1 as const, name, description, ...(options ? { options } : {}) });
@@ -42,6 +46,15 @@ export const commandDefinitions: CommandDefinition[] = [
     options: [{ type: 3, name: 'message', description: 'What to ask teapilot', required: true }],
     ...everywhere,
   },
+  {
+    name: promptCommand, description: 'Talk to teapilot with a chosen mode and reasoning',
+    options: [
+      { type: 3, name: 'prompt', description: 'What to ask teapilot', required: true },
+      optional('mode', 'Session mode for this and later turns', modes),
+      optional('reasoning', 'Reasoning effort for this and later turns', reasoningLevels),
+    ],
+    ...everywhere,
+  },
   { type: 3, name: replyMenu, ...everywhere },
   { name: 'new', description: 'Start a new task with a clean history' },
   { name: 'stop', description: 'Cancel the running turn' },
@@ -56,10 +69,24 @@ export const withoutUserInstall = (definitions: CommandDefinition[]): CommandDef
 /** The session text equivalent to an invocation, or undefined for anything teapilot does not define. */
 export function commandText(name: string, subcommandName?: string | null, argument?: string | null): string | undefined {
   const definition = commandDefinitions.find(candidate => candidate.name === name);
-  if (!definition || !('description' in definition) || name === replyCommand) return undefined;
+  if (!definition || !('description' in definition) || name === replyCommand || name === promptCommand) return undefined;
   if (name === 'permissions') {
     if (subcommandName === 'list') return '/permissions';
     return (subcommandName === 'grant' || subcommandName === 'revoke') && argument ? `/${subcommandName} ${argument}` : undefined;
   }
   return definition.options ? (argument ? `/${name} ${argument}` : undefined) : `/${name}`;
 }
+
+/** The mode and tier /prompt asks for; either is left out when not chosen or not recognised. */
+export interface PromptSetup { mode?: Mode; tier?: TierPreference }
+
+export function promptSetup(mode?: string | null, reasoning?: string | null): PromptSetup {
+  return {
+    ...(modes.includes(mode as Mode) ? { mode: mode as Mode } : {}),
+    ...(reasoningLevels.includes(reasoning as ReasoningLevel) ? { tier: reasoningTier[reasoning as ReasoningLevel] } : {}),
+  };
+}
+
+/** The session commands that apply `setup` to a conversation that is already running. */
+export const setupCommands = (setup: PromptSetup): string[] =>
+  [...(setup.mode ? [`/mode ${setup.mode}`] : []), ...(setup.tier ? [`/tier ${setup.tier}`] : [])];

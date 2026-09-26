@@ -12,7 +12,7 @@ import { consultant } from './play/consult.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
 import { PlayStore } from './play/store.js';
 import type { connect, GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
-import { interactionLifetimeMs } from './commands.js';
+import { interactionLifetimeMs, setupCommands, type PromptSetup } from './commands.js';
 import { quoteMessage } from './render.js';
 import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
 import { readDiscordSettings, type DiscordSettings } from './settings.js';
@@ -78,8 +78,11 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     consult: consultant({ config, root, access, queue, run, signal }),
   });
 
-  /** `channelId` is where discord.play apps post; one-shot replies have none. */
-  const open = async (key: string, transport: DiscordTransport, channelId?: string, oneShot = false): Promise<Conversation> => {
+  /**
+   * `channelId` is where discord.play apps post; one-shot replies have none. `setup` only shapes a new
+   * conversation; access still starts from the configured mode, so a chosen Code mode asks for it when needed.
+   */
+  const open = async (key: string, transport: DiscordTransport, channelId?: string, oneShot = false, setup: PromptSetup = {}): Promise<Conversation> => {
     const existing = conversations.get(key);
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
@@ -87,7 +90,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       key, transport, queue, redact, log, access,
       // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
       once: oneShot,
-      request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
+      request: { prompt: '', cwd: root, mode: setup.mode ?? settings.startMode, tier: setup.tier, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
         // A conversation picks up where it was before a restart; a one-shot reply has nothing to continue.
         history: oneShot ? undefined : histories.load(key) },
       onHistory: oneShot ? undefined : history => { try { histories.save(key, history); } catch (error) { log(`${key}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
@@ -147,7 +150,12 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     } else transport = reply.transport();
     await reply.respond();
     log(`${key} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport, channelId, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
+    // A new conversation starts with the chosen mode and tier; one already running switches to them first.
+    // Queuing commands would end a one-shot conversation before the prompt, since it stops after one input.
+    const running = conversations.get(key)?.active;
+    const conversation = await open(key, transport, channelId, reply.oneShot, reply.setup);
+    if (running) for (const command of setupCommands(reply.setup)) conversation.push(command, { sender: reply.authorId, senderName: reply.authorName });
+    conversation.push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   const gateway = await connect(settings, {

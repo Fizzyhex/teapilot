@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { commandDefinitions, commandText, withoutUserInstall } from '../src/discord/commands.js';
+import { commandDefinitions, commandText, promptSetup, setupCommands, withoutUserInstall } from '../src/discord/commands.js';
 
 it('maps slash commands to session commands', () => {
   expect(commandText('mode', null, 'code')).toBe('/mode code');
@@ -34,4 +34,15 @@ it('offers reply in user-installed contexts and can drop that for server-only re
   for (const command of reply) expect(command).toMatchObject({ integration_types: [0, 1], contexts: [0, 1, 2] });
   for (const command of withoutUserInstall(commandDefinitions)) expect(command).not.toHaveProperty('integration_types');
   expect(withoutUserInstall(commandDefinitions)).toHaveLength(commandDefinitions.length);
+});
+
+it('maps /prompt mode and reasoning to a starting mode and tier', () => {
+  const prompt = commandDefinitions.find(command => command.name === 'prompt' && 'options' in command)! as Extract<typeof commandDefinitions[number], { options?: unknown }>;
+  expect(prompt.options).toMatchObject([{ name: 'prompt', required: true }, { name: 'mode', required: false }, { name: 'reasoning', required: false }]);
+  expect(commandText('prompt', null, 'hello')).toBeUndefined();
+  expect(promptSetup('code', 'xhigh')).toEqual({ mode: 'code', tier: 'deep' });
+  expect(promptSetup(null, 'off')).toEqual({ tier: 'normal' });
+  expect(promptSetup('nonsense', 'nonsense')).toEqual({});
+  expect(setupCommands({ mode: 'code', tier: 'deep' })).toEqual(['/mode code', '/tier deep']);
+  expect(setupCommands({})).toEqual([]);
 });

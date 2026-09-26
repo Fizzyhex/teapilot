@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
-import { commandDefinitions, commandText, interactionLifetimeMs, replyCommand, replyMenu, withoutUserInstall } from './commands.js';
+import { commandDefinitions, commandText, interactionLifetimeMs, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
 import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
@@ -43,6 +43,8 @@ export interface GatewayReply extends Omit<GatewayMessage, 'replyChain'> {
   oneShot: boolean;
   /** From the Reply menu: only teapilot's answer (and approval buttons) go to Discord; the rest is logged in the terminal. */
   answerOnly: boolean;
+  /** The mode and tier chosen with /prompt, applied before `content`. */
+  setup: PromptSetup;
   respond(text?: string): Promise<void>;
 }
 export interface GatewayHandlers {
@@ -201,7 +203,9 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       return { id: created.id, transport: transport(created) };
     };
     const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
-    const text = interaction.isChatInputCommand() ? interaction.options.getString('message', true).trim() : strip(target?.content ?? '', self.id);
+    const isPrompt = interaction.isChatInputCommand() && interaction.commandName === promptCommand;
+    const text = interaction.isChatInputCommand() ? interaction.options.getString(isPrompt ? 'prompt' : 'message', true).trim() : strip(target?.content ?? '', self.id);
+    const setup = interaction.isChatInputCommand() && isPrompt ? promptSetup(interaction.options.getString('mode'), interaction.options.getString('reasoning')) : {};
     const repliedTo = interactionReplies.get(interaction.id);
     interactionReplies.delete(interaction.id);
     const chain = target && text ? await replyChain(target, self.id, repliedTo) : undefined;
@@ -219,6 +223,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       id: interaction.id,
       oneShot,
       answerOnly: !!target,
+      setup,
       transport: () => channel && !oneShot ? transport(channel) : interactionTransport(interaction),
       startThread: name => spawn(async () => {
         const options = { name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay };
@@ -244,7 +249,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   client.on(Events.InteractionCreate, async interaction => {
     // Only the Reply menu reads this; drop it for every other interaction so the map stays empty.
     if (!(interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu)) interactionReplies.delete(interaction.id);
-    if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && interaction.commandName === replyCommand) {
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && (interaction.commandName === replyCommand || interaction.commandName === promptCommand)) {
       const self = client.user;
       if (self && (interaction.isMessageContextMenuCommand() || interaction.isChatInputCommand())) await reply(interaction, self).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
       return;
