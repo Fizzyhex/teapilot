@@ -162,7 +162,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   if (!config.policy.permissions.includes('discord.play')) log('discord.play is off: add "discord.play" to "permissions" in this profile\'s policy.json to let teapilot build interactive Discord apps.');
 
   access.lookup = gateway.username;
-  log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} operator(s) and ${access.list().users.length} user(s) in DMs${settings.channelId ? ` and channel ${settings.channelId}` : ''}.`);
+  log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} operator(s) and ${access.list().users.length} user(s) in DMs${settings.channelIds.length ? ` and ${settings.channelIds.length === 1 ? 'channel' : 'channels'} ${settings.channelIds.join(', ')}` : ''}.`);
   log(`Repository root: ${root}. Sessions start in ${settings.startMode} mode. Press Ctrl+C to stop.`);
   if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
   log('Stopping: pending approvals are denied.');

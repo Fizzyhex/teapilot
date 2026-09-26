@@ -96,7 +96,7 @@ it('fails closed on a damaged file: operators keep access, nobody is promoted', 
 it('routes whitelisted users and still ignores strangers and bots', async () => {
   const { access } = await store();
   access.addUser(bob, op);
-  const settings = { allowedUserIds: [op], channelId: undefined };
+  const settings = { allowedUserIds: [op], channelIds: [] };
   const message = (authorId: string, authorIsBot = false) => ({ authorId, authorIsBot, channelId: '9', ownThread: false, mentionsBot: false });
   const allowed = (id: string) => access.roleOf(id) !== undefined;
   expect(route(message(op), settings, allowed)?.kind).toBe('dm');

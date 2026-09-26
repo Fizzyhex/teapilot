@@ -4,7 +4,7 @@ import { chunk, ProgressLine, quoteMessage, throttle } from '../src/discord/rend
 import { readDiscordSettings } from '../src/discord/settings.js';
 
 const alice = '111111111111111111', mallory = '222222222222222222', channel = '333333333333333333', guild = '444444444444444444';
-const settings = { allowedUserIds: [alice], channelId: channel };
+const settings = { allowedUserIds: [alice], channelIds: ['888888888888888888', channel] };
 const message = (fields: Partial<IncomingMessage>): IncomingMessage => ({ authorId: alice, authorIsBot: false, channelId: '555555555555555555', ownThread: false, mentionsBot: false, ...fields });
 
 it('routes allowlisted DMs, owned threads and channel mentions, and ignores everything else', () => {
@@ -16,12 +16,16 @@ it('routes allowlisted DMs, owned threads and channel mentions, and ignores ever
   expect(route(message({ guildId: guild, channelId: '666666666666666666', mentionsBot: true }), settings)).toBeUndefined();
   expect(route(message({ guildId: guild, channelId: '777777777777777777', parentId: channel, ownThread: true }), settings)).toEqual({ key: 'thread:777777777777777777', kind: 'thread' });
   expect(route(message({ guildId: guild, channelId: '777777777777777777', parentId: channel, ownThread: false }), settings)).toBeUndefined();
-  expect(route(message({ guildId: guild, channelId: channel, mentionsBot: true }), { allowedUserIds: [alice] })).toBeUndefined();
+  expect(route(message({ guildId: guild, channelId: channel, mentionsBot: true }), { allowedUserIds: [alice], channelIds: [] })).toBeUndefined();
 });
 
 it('fails closed without a token, root or allowlist and rejects malformed IDs', () => {
   const env = { DISCORD_BOT_TOKEN: 'token', DISCORD_ALLOWED_USER_IDS: alice, DISCORD_ROOT: '/repo' };
-  expect(readDiscordSettings(env)).toMatchObject({ allowedUserIds: [alice], startMode: 'ask', channelId: undefined });
+  expect(readDiscordSettings(env)).toMatchObject({ allowedUserIds: [alice], startMode: 'ask', channelIds: [] });
+  expect(readDiscordSettings({ ...env, DISCORD_CHANNEL_IDS: `${channel},${guild}` }).channelIds).toEqual([channel, guild]);
+  // Profiles saved before multiple channels keep working.
+  expect(readDiscordSettings({ ...env, DISCORD_CHANNEL_ID: channel }).channelIds).toEqual([channel]);
+  expect(() => readDiscordSettings({ ...env, DISCORD_CHANNEL_IDS: `${channel},general` })).toThrow(/channelIds/);
   expect(() => readDiscordSettings({ ...env, DISCORD_ALLOWED_USER_IDS: '' })).toThrow(/teapilot discord setup/);
   expect(() => readDiscordSettings({ ...env, DISCORD_ALLOWED_USER_IDS: 'alice' })).toThrow(/allowedUserIds/);
   expect(() => readDiscordSettings({ ...env, DISCORD_START_MODE: 'code' })).toThrow(/startMode/);

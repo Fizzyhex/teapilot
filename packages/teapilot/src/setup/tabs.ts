@@ -5,7 +5,7 @@ import { applyProvisioned, applyReports, askEndpoint, checkModels, checksLine, c
 import { InstallQueue, type InstallJob } from './installs.js';
 import { endpointDriver, managedRuntimes, type ProvisionedModel, type RuntimeDriver, type Runtimes } from '../runtime/index.js';
 import { configureOllamaModel, hardware, isTeapilotAlias, ollamaAlias, ollamaJSON, presets, provisionedOllama, roleChoices, roleLabel, type OllamaModel, type PreparedModel } from '../runtime/ollama.js';
-import { Navigation, type ScreenTab, type SetupScreen } from './screen.js';
+import { Navigation, runTabs, type ScreenTab, type SetupScreen } from './screen.js';
 import { configureSearch } from './search.js';
 import type { SetupUI } from './terminal.js';
 
@@ -21,7 +21,6 @@ export const setupTabs: ScreenTab[] = [
 ];
 type TabId = 'source' | 'install' | 'limits' | 'routing' | 'checks' | 'search' | 'save';
 const order: TabId[] = ['source', 'install', 'limits', 'routing', 'checks', 'search', 'save'];
-const following = (tab: TabId): TabId => order[Math.min(order.indexOf(tab) + 1, order.length - 1)]!;
 
 export interface Outcome { ready: boolean; coding: boolean }
 /** A tab returns the tab to open next (the following one when undefined), or ends setup. */
@@ -71,31 +70,8 @@ export async function tabbedSetup(draft: Draft, screen: SetupScreen, ui: SetupUI
   let summary: string[] = [];
   let outcome: Outcome | undefined;
   try {
-    let current: TabId = 'source';
-    for (;;) {
-      const tab = new AbortController();
-      let requested: TabId | undefined;
-      screen.navigate = target => { requested = target as TabId; tab.abort(new Navigation(target)); };
-      const tabSignal = AbortSignal.any([signal, tab.signal]);
-      updateMarks(session);
-      screen.enter(current, tabSignal);
-      let next: TabResult;
-      try {
-        try { next = await tabs[current](session, tabSignal); }
-        catch (error) {
-          if (requested || signal.aborted) throw error;
-          // A failed step stays open with its error, rather than ending setup.
-          screen.log(error instanceof Error ? error.message : String(error));
-          screen.mark(current, 'attention');
-          next = await screen.choose(`${screen.tabs.find(item => item.id === current)!.label} did not finish`, ['Try again', 'Skip to the next tab'], 0) === 0 ? current : following(current);
-        }
-      } catch (error) {
-        if (requested) { current = requested; continue; }
-        throw error;
-      }
-      if (typeof next === 'object') { outcome = next.end; summary = next.summary ?? []; break; }
-      current = next ?? following(current);
-    }
+    const end = await runTabs<TabId, Exclude<TabResult, TabId | undefined>>(screen, signal, order, (tab, tabSignal) => tabs[tab](session, tabSignal), () => updateMarks(session));
+    outcome = end.end; summary = end.summary ?? [];
   } catch (error) {
     if (!quit.signal.aborted) throw error;
   } finally { screen.close(); }

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { parse } from 'dotenv';
 import { loadConfig } from '../src/config.js';
 import { configureDiscord, invitePermissions, removeDiscord } from '../src/discord/setup.js';
+import { SetupScreen } from '../src/setup/screen.js';
 import type { SetupUI } from '../src/setup/terminal.js';
 import { fixture, mockServer } from './helpers.js';
 
@@ -84,4 +85,79 @@ it('remove deletes only the Discord keys', async () => {
 it('the main setup wizard never offers Discord', async () => {
   const source = await readFile(fileURLToPath(new URL('../src/setup/index.ts', import.meta.url)), 'utf8');
   expect(source).not.toMatch(/discord/i);
+});
+
+it('saves several channels and replaces a single saved DISCORD_CHANNEL_ID', async () => {
+  const p = await profile();
+  const [one, two] = ['222222222222222222', '333333333333333333'];
+  await writeFile(join(p.cwd, '.env'), `TEAPILOT_ROUTING_MODE="direct"\nDISCORD_CHANNEL_ID="${one}"\n`);
+  const terminal = ui(['good-token', alice, `${one}, general`, `${one}, ${two} ${one}`, p.cwd]);
+  expect(await configureDiscord({ directory: p.cwd, cwd: p.cwd, api: p.api }, terminal, signal())).toBe(true);
+  expect(vi.mocked(terminal.input).mock.calls[2]![1]).toBe(one);
+  const env = await p.env();
+  expect(env.DISCORD_CHANNEL_IDS).toBe(`${one},${two}`);
+  expect(env.DISCORD_CHANNEL_ID).toBeUndefined();
+  expect(terminal.logs.join('\n')).toContain(`DMs and @mentions in channels ${one}, ${two}`);
+});
+
+/** Drive a screen that is not attached to the terminal, as a user would through keys. */
+function driver(screen: SetupScreen) {
+  const internals = screen as unknown as { question?: { label: string }; title: string; key(value: string | undefined, key: object): void };
+  const describe = () => `${internals.title}\n${internals.question?.label ?? ''}`;
+  const until = async (pattern: RegExp) => {
+    // Time rather than ticks: the screen's module loads on first use.
+    for (const deadline = Date.now() + 5000; Date.now() < deadline;) {
+      if (internals.question && pattern.test(describe())) return describe();
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    throw new Error(`Expected ${pattern}, found ${describe()}`);
+  };
+  const type = (text: string) => { for (const character of text) internals.key(character, { name: character, sequence: character }); };
+  return {
+    wait: until,
+    async answer(pattern: RegExp, text: string) { await until(pattern); type(text); internals.key('\r', { name: 'return' }); },
+    async key(pattern: RegExp, name: string) { await until(pattern); internals.key(undefined, { name }); },
+  };
+}
+
+it('the tabbed screen edits channel and operator lists and saves only on request', async () => {
+  const p = await profile();
+  const [one, two, three] = ['222222222222222222', '333333333333333333', '444444444444444444'];
+  await writeFile(join(p.cwd, '.env'), `TEAPILOT_ROUTING_MODE="direct"\nDISCORD_CHANNEL_ID="${one}"\n`);
+  const screen = new SetupScreen({ colour: false, motion: false });
+  const terminal = { ...ui([]), screen: () => screen };
+  const run = configureDiscord({ directory: p.cwd, cwd: p.cwd, api: p.api }, terminal, signal());
+  const drive = driver(screen);
+  // A rejected token stays on Bot; a good one moves on to Operators.
+  await drive.answer(/^Bot\nChoose/, '1');
+  await drive.answer(/Bot token/, 'bad-token');
+  await drive.answer(/^Bot\nChoose/, '1');
+  await drive.answer(/Bot token/, 'good-token');
+  // Operators cannot be left empty.
+  await drive.answer(/^Operators/, '1');
+  await drive.answer(/^Operators/, '2');
+  await drive.answer(/User IDs to add/, 'alice');
+  await drive.answer(/^Operators/, '2');
+  await drive.answer(/User IDs to add/, alice);
+  await drive.wait(/^Operators/);
+  expect(screen.markOf('operators')).toBe('changed');
+  await drive.answer(/^Operators/, '1');
+  // Channels start from the saved one: add two, then remove the saved one.
+  await drive.answer(/^Channels/, '3');
+  await drive.answer(/Channel IDs to add/, `${two}, ${three}`);
+  await drive.answer(/^Channels/, '2');
+  await drive.answer(/^Channels/, '1');
+  // Repository opens on a choice, so ←/→ still switch tabs from it.
+  await drive.key(/^Repository\nChoose/, 'left');
+  await drive.answer(/^Channels/, '1');
+  await drive.answer(/^Repository\nChoose/, '2');
+  await drive.answer(/Repository root/, '');
+  await drive.answer(/^Repository\nChoose/, '1');
+  expect(await p.env()).not.toHaveProperty('DISCORD_BOT_TOKEN');
+  await drive.answer(/^Save these Discord settings/, '1');
+  expect(await run).toBe(true);
+  const env = await p.env();
+  expect(env).toMatchObject({ DISCORD_BOT_TOKEN: 'good-token', DISCORD_ALLOWED_USER_IDS: alice, DISCORD_CHANNEL_IDS: `${two},${three}` });
+  expect(env.DISCORD_CHANNEL_ID).toBeUndefined();
+  expect(terminal.logs.some(text => text.includes('client_id=999999999999999999'))).toBe(true);
 });

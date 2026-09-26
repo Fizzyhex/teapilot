@@ -36,7 +36,7 @@ if (!config.policy.permissions.includes('discord.play')) {
   config.policy.permissions.push('discord.play');
   notes.push('This profile\'s policy.json lacks discord.play; the simulator allows it for this session only.');
 }
-const settings: DiscordSettings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelId, root: spec.root, startMode: spec.mode };
+const settings: DiscordSettings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelIds: [channelId], root: spec.root, startMode: spec.mode };
 AccessStore.at(spec.state, settings.allowedUserIds, config.policy.permissions).addUser(people.user.id, people.op.id, { name: people.user.name });
 const store = new PlayStore(join(spec.state, 'discord-play'));
 

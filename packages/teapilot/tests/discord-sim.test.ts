@@ -70,7 +70,7 @@ async function playWorld() {
   const directory = await mkdtemp(join(tmpdir(), 'teapilot-sim-'));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   let runtime!: PlayRuntime;
-  const gateway = await world.connect({ token: 't', allowedUserIds: [people.op.id], channelId, root: directory, startMode: 'ask' },
+  const gateway = await world.connect({ token: 't', allowedUserIds: [people.op.id], channelIds: [channelId], root: directory, startMode: 'ask' },
     { message: vi.fn(), command: vi.fn(), reply: vi.fn(), component: interaction => void runtime.interact(interaction) }, vi.fn());
   runtime = new PlayRuntime({ store: new PlayStore(directory), surface: gateway.play, log: world.log, clock });
   cleanups.push(() => runtime.close());
@@ -139,7 +139,7 @@ async function models() {
 it('runs teapilot discord start against the simulator: a model builds an app, people use it, and it survives a restart', async () => {
   const f = await models();
   const world = new World();
-  const settings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelId, root: f.cwd, startMode: 'ask' as const };
+  const settings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelIds: [channelId], root: f.cwd, startMode: 'ask' as const };
   const serve = () => {
     const controller = new AbortController();
     const done = serveDiscord({ config: f.config, settings, log: world.log, signal: controller.signal, connect: world.connect, stateDir: join(f.cwd, 'discord'), teachat: false });

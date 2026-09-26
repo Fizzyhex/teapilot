@@ -1,6 +1,6 @@
 # Discord (optional)
 
-Chat with teapilot on your computer from Discord: in DMs, or by @mentioning the bot in one channel. Discord is opt-in and separate from `teapilot setup`; nothing is configured, installed or contacted unless you run the commands below.
+Chat with teapilot on your computer from Discord: in DMs, or by @mentioning the bot in the channels you choose. Discord is opt-in and separate from `teapilot setup`; nothing is configured, installed or contacted unless you run the commands below.
 
 For a source checkout, replace `teapilot` with `npm start --`.
 
@@ -20,7 +20,7 @@ teapilot discord remove   # deletes the Discord settings from the profile
 - **Interactive apps (`discord.play`):** ask for a game, poll or quiz and teapilot posts one message with buttons, menus and forms that it updates in place. Anyone in the channel can use its controls unless you say who it is for. Apps keep running across restarts, and end after a day without activity.
 - **Where it listens:**
   - Each DM is one session.
-  - If you configured a channel, @mentioning the bot there starts a thread, and that thread is one session. Follow-ups in the thread don't need a mention.
+  - In the channels you configured, @mentioning the bot starts a thread, and that thread is one session. Follow-ups in the thread don't need a mention.
 - **Access is the same as in the CLI.** Sessions start in `ask` mode at the configured repository root.
   - `/mode code` asks for repository access.
   - Shell commands and large overwrites always ask.
@@ -31,13 +31,13 @@ teapilot discord remove   # deletes the Discord settings from the profile
 
 ## Setup
 
-`teapilot discord setup` walks through these steps. It needs an existing profile, so run `teapilot setup` first.
+`teapilot discord setup` walks through these steps, in tabs like `teapilot setup` (use ←/→ to move between them). It needs an existing profile, so run `teapilot setup` first.
 
 1. At <https://discord.com/developers/applications>, create an application. Open **Bot**, then **Reset Token**, and copy the token.
 2. On the same page, enable **Message Content Intent** under Privileged Gateway Intents.
 3. Paste the token. It is hidden while you type. teapilot asks before contacting discord.com to check it, and warns if the intent is off.
 4. Enter the Discord user IDs of the operators. To copy one, enable Developer Mode (Settings → Advanced), right-click the user, and choose **Copy User ID**.
-5. Optionally, enter a channel ID for @mentions. Press Enter for DMs only.
+5. Optionally, add the IDs of channels where @mentions should work. With none, teapilot answers DMs only.
 6. Choose the repository root. It defaults to `--cwd`.
 7. Confirm, then open the printed invite link to add the bot to a server you share with the people who will use it. Discord only delivers DMs from people who share a server with the bot.
 
@@ -56,7 +56,7 @@ Long answers are split across several messages. Only text is read; attachments a
 
 ## `/reply` and the Reply menu
 
-Allowlisted users can also talk to teapilot outside DMs and the configured channel:
+Allowlisted users can also talk to teapilot outside DMs and the configured channels:
 
 - `/reply message:<text>` asks teapilot something in the current channel.
 - Right-click a message → **Apps → Reply** makes teapilot respond to it. teapilot receives the text prefixed with the author's username (`Message from @name:`).
@@ -78,7 +78,7 @@ For servers where the bot is not installed, enable **Installation → User Insta
 | "Discord refused the Message Content intent" on start | Enable Message Content Intent (step 2) and retry. |
 | The bot gets messages but they arrive empty | Same as above. |
 | DMs get no reply | Check that you are an operator (`teapilot discord status`) or that an operator has let you in and that you share a server with the bot. |
-| Mentions in a channel get no reply | Check the configured channel ID. The bot also needs View Channel, Send Messages, Create Public Threads and Send Messages in Threads there. |
+| Mentions in a channel get no reply | Check that the channel is in the list in `teapilot discord setup`. The bot also needs View Channel, Send Messages, Create Public Threads and Send Messages in Threads there. |
 | "Discord rejected the bot token" | Reset the token and rerun `teapilot discord setup`. |
 
 Keeping it running: `teapilot discord start` is a normal foreground process. If you want it always on, run it under your own service manager.

@@ -19,15 +19,14 @@ export type Route ={ key: string; kind: 'dm' | 'thread' | 'new-thread' };
 
 /**
  * Fail closed: only allowlisted people, only in DMs, a thread teapilot opened (threads exist only
- * because an allowlisted person invoked teapilot), or an @mention in the configured channel.
+ * because an allowlisted person invoked teapilot), or an @mention in a configured channel.
  * Everything else is ignored silently.
  */
-export function route(message: IncomingMessage, settings: Pick<DiscordSettings, 'allowedUserIds' | 'channelId'>, allowed: Allowed = id => settings.allowedUserIds.includes(id)): Route | undefined {
+export function route(message: IncomingMessage, settings: Pick<DiscordSettings, 'allowedUserIds' | 'channelIds'>, allowed: Allowed = id => settings.allowedUserIds.includes(id)): Route | undefined {
   if (message.authorIsBot || !allowed(message.authorId)) return undefined;
   if (!message.guildId) return { key: `dm:${message.channelId}`, kind: 'dm' };
   if (message.ownThread) return { key: `thread:${message.channelId}`, kind: 'thread' };
-  if (!settings.channelId) return undefined;
-  if (message.channelId === settings.channelId && message.mentionsBot) return { key: '', kind: 'new-thread' };
+  if (settings.channelIds.includes(message.channelId) && message.mentionsBot) return { key: '', kind: 'new-thread' };
   return undefined;
 }
 

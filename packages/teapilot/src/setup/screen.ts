@@ -16,6 +16,39 @@ export class Navigation extends Error {
   constructor(readonly target: string) { super(`Opened ${target}.`); this.name = 'Navigation'; }
 }
 
+/**
+ * Show tabs one after another until one ends the screen. A tab returns the tab to open next
+ * (the following one when undefined) or an object that ends it. Opening another tab cancels
+ * the current one; a tab that fails stays open with its error.
+ */
+export async function runTabs<Id extends string, End extends object>(screen: SetupScreen, signal: AbortSignal, order: readonly Id[], run: (tab: Id, signal: AbortSignal) => Promise<Id | undefined | End>, beforeEnter?: () => void): Promise<End> {
+  const following = (tab: Id): Id => order[Math.min(order.indexOf(tab) + 1, order.length - 1)]!;
+  let current = order[0]!;
+  for (;;) {
+    const tab = new AbortController();
+    let requested: Id | undefined;
+    screen.navigate = target => { requested = target as Id; tab.abort(new Navigation(target)); };
+    const tabSignal = AbortSignal.any([signal, tab.signal]);
+    beforeEnter?.();
+    screen.enter(current, tabSignal);
+    let next: Id | undefined | End;
+    try {
+      try { next = await run(current, tabSignal); }
+      catch (error) {
+        if (requested || signal.aborted) throw error;
+        screen.log(error instanceof Error ? error.message : String(error));
+        screen.mark(current, 'attention');
+        next = await screen.choose(`${screen.tabs.find(item => item.id === current)!.label} did not finish`, ['Try again', 'Skip to the next tab'], 0) === 0 ? current : following(current);
+      }
+    } catch (error) {
+      if (requested) { current = requested; continue; }
+      throw error;
+    }
+    if (typeof next === 'object') return next;
+    current = next ?? following(current);
+  }
+}
+
 export interface ScreenState {
   tabs: ScreenTab[];
   current: string;
@@ -164,7 +197,9 @@ export function renderScreen(state: ScreenState, columns: number, rows: number, 
   const available = rows - top.length - bottom.length;
   const choices = state.choices ?? [];
   const title = wrap(state.title, inner);
-  const panelMinimum = 2 + title.length + 1 + Math.min(choices.length, 8) + 3;
+  const logs: Part[][] = state.lines.flatMap(line => wrap(line, inner).map((part): Part[] => charges([[part, logStyle(line)]])));
+  // The art gives way before the tab's own text or choices would scroll out of sight.
+  const panelMinimum = 2 + title.length + 1 + Math.min(logs.length, 8) + Math.min(choices.length, 8) + 3;
   let art: string[] = [];
   if (state.art && inner >= 40) {
     const frame = state.art.split('\n');
@@ -174,7 +209,6 @@ export function renderScreen(state: ScreenState, columns: number, rows: number, 
       art = box(frame.map(line => [[indent + line, LAVENDER]]), LAVENDER);
     }
   }
-  const logs: Part[][] = state.lines.flatMap(line => wrap(line, inner).map((part): Part[] => charges([[part, logStyle(line)]])));
   const busy: Part[][] = state.busy && state.prompt === undefined ? [[[`${state.spinner ?? '•'} `, LAVENDER], [state.busy, DIM]]] : [];
   // The panel hugs its content, like the design, and scrolls its log once the screen is full.
   const wanted = title.length + 1 + logs.length + busy.length + 1 + choices.length;
