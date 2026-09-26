@@ -26,7 +26,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "start": "node --import tsx --conditions=source src/cli.ts",
+    "start": "node --import tsx --conditions=teapilot-source src/cli.ts",
     "doctor": "npm start -- doctor",
     "setup": "npm start -- setup",
     "typecheck": "tsc --noEmit",

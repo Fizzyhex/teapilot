@@ -15,7 +15,7 @@
     "teapilot": "packages/teapilot/dist/cli.js"
   },
   "scripts": {
-    "start": "node --import tsx --conditions=source packages/teapilot/src/cli.ts",
+    "start": "node --import tsx --conditions=teapilot-source packages/teapilot/src/cli.ts",
     "doctor": "npm start -- doctor",
     "setup": "npm start -- setup",
     "typecheck": "npm run typecheck --workspaces",
