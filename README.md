@@ -21,7 +21,8 @@ The npm package is to-be-published. For now, install from source:
 ```sh
 git clone https://github.com/fizzyhex/teapilot.git
 cd teapilot
-npm install --global
+npm install
+npm run global:build
 teapilot setup
 ```
 

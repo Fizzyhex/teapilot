@@ -11,9 +11,6 @@
   "workspaces": [
     "packages/*"
   ],
-  "bin": {
-    "teapilot": "packages/teapilot/dist/cli.js"
-  },
   "scripts": {
     "start": "node --import tsx --conditions=teapilot-source packages/teapilot/src/cli.ts",
     "doctor": "npm start -- doctor",
@@ -22,7 +19,7 @@
     "build": "npm run build --workspaces",
     "test": "npm test --workspaces",
     "check": "npm run check --workspaces",
-    "global:build": "npm run build && npm install --global .",
+    "global:build": "npm run build && npm install --global ./packages/teapilot",
     "global:pull": "git pull && npm install --allow-git=all --allow-remote=all && npm run global:build",
     "test:package": "npm run test:package -w teapilot",
     "test:ollama": "npm run test:ollama -w teapilot",
