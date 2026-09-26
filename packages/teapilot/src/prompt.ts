@@ -113,7 +113,11 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
     write('\r' + (distance > 0 ? `\x1b[${distance}A` : '') + (frame.cursor.cols ? `\x1b[${frame.cursor.cols}C` : ''));
     row = frame.cursor.rows;
   };
+  // While idle work runs the composer is off screen. Input keeps flowing in raw mode (handing stdin
+  // back and forth races on Windows), is held, and is replayed once the work has stopped.
+  let away: { stop: AbortController; held: Buffer[] } | undefined;
   const resize = () => {
+    if (away) return;
     const columns = process.stderr.columns || 80;
     if (columns < frameColumns) {
       row = frameWidths.slice(0, row).reduce((total, width) => total + Math.max(1, Math.ceil(width / columns)), 0);
@@ -122,7 +126,8 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
     render(activeNotice);
   };
   // The spacer row separates the composer from any artwork above it.
-  if (context) { art?.begin(() => ({ rows: 1 + row, cols: cursorCols })); write('\r\n'); }
+  const open = () => { if (context) { art?.begin(() => ({ rows: 1 + row, cols: cursorCols })); write('\r\n'); } };
+  if (context) open();
   else write('\n\x1b[2mShift+Enter or Alt+Enter: send · Ctrl+D: exit\x1b[0m\n');
   // Kitty disambiguation and bracketed paste; pop the keyboard mode on exit.
   write('\x1b[>1u\x1b[?2004h');
@@ -132,9 +137,12 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
   if (context) process.stderr.on('resize', resize);
   try {
     return await new Promise<string>((done, reject) => {
+      let idleTimer: NodeJS.Timeout | undefined;
       const finish = (error?: Error) => {
         if (finished) return;
         finished = true;
+        clearTimeout(idleTimer);
+        away?.stop.abort();
         process.stdin.removeListener('data', forward);
         process.stdin.removeListener('end', eof);
         signal.removeEventListener('abort', abort);
@@ -153,6 +161,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
       const xtermEnter = '\x1b[27;2;13~';
       let pending = '';
       const forward = (chunk: Buffer) => {
+        if (away) { away.held.push(chunk); away.stop.abort(); return; }
         pending += decoder.write(chunk);
         pending = pending.replaceAll(xtermEnter, '\x1b[13;2u');
         let held = Math.min(pending.length, xtermEnter.length - 1);
@@ -161,8 +170,29 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
         pending = pending.slice(pending.length - held);
         if (ready) input.write(ready);
       };
+      const idle = context?.idle;
+      const armIdle = () => {
+        clearTimeout(idleTimer);
+        if (!idle || text || away) return;
+        idleTimer = setTimeout(() => {
+          if (finished || text || away || !idle.pending()) return;
+          // Nothing typed: take the composer and its spacer row off screen while the idle work runs.
+          write('\r' + (row ? `\x1b[${row}A` : '') + '\x1b[J\x1b[1A\x1b[J');
+          art?.end(false, 0);
+          const current = away = { stop: new AbortController(), held: [] as Buffer[] };
+          void idle.run(current.stop.signal).catch(() => {}).finally(() => {
+            away = undefined;
+            if (finished) return;
+            row = 0; open(); render();
+            for (const chunk of current.held) forward(chunk);
+            if (!current.held.length) armIdle();
+          });
+        }, idle.ms);
+      };
+      armIdle();
       input.on('keypress', (value: string | undefined, key: Key) => {
         if (finished) return;
+        clearTimeout(idleTimer);
         if (key.sequence === '\x1b[200~') { pasted = true; return; }
         if (key.sequence === '\x1b[201~') { pasted = false; return; }
         if (!pasted && isPromptSubmit(key)) { finish(); return; }
@@ -191,6 +221,7 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
           const inserted = key.name === 'return' || key.name === 'enter' ? '\n' : value && !key.ctrl && !key.meta ? stripVTControlCharacters(value).replace(/[\x00-\x1f\x7f]/g, '') : '';
           text = text.slice(0, cursor) + inserted + text.slice(cursor); cursor += inserted.length;
         }
+        armIdle();
         render();
       });
       process.stdin.on('data', forward);
@@ -202,8 +233,10 @@ export async function promptInput(label: string, cwd: string, signal: AbortSigna
   } finally {
     process.stderr.removeListener('resize', resize);
     write('\x1b[<u\x1b[?2004l');
-    process.stdin.setRawMode(raw ?? false);
+    // Stop reading before leaving raw mode: on Windows, switching modes mid-read restarts it as a
+    // line-mode console read that cannot be cancelled and swallows later keys as cooked input.
     process.stdin.pause();
+    process.stdin.setRawMode(raw ?? false);
     input.destroy();
   }
 }

@@ -1,4 +1,5 @@
 import { getChoiceAnswer, type JevProvider, type JevRawResponse, type JevRouteQuestion } from 'jevrouter';
+import { IDENTITY_INSTRUCTIONS } from 'teachat';
 import type { Permission } from '../execution/grants.js';
 import { isTierPreference, type TierPreference } from '../config.js';
 
@@ -31,10 +32,21 @@ const routingQuestions: Record<string, JevRouteQuestion> = {
 };
 
 /** Decorates the SDK's existing routing question, retaining its policy engine and receipt. */
-export function capabilityPlanner(provider: JevProvider): JevProvider {
+export function capabilityPlanner(provider: JevProvider, extra?: Record<string, JevRouteQuestion>): JevProvider {
   return { name: provider.name, decide: request => provider.decide({ ...request,
-    questions: { ...questions, ...webQuestions, ...routingQuestions, ...(request.questions ?? { tool: {} }) },
+    questions: { ...questions, ...webQuestions, ...routingQuestions, ...extra, ...(request.questions ?? { tool: {} }) },
   }) };
+}
+
+/** Which teachat identity would most likely be given this request. Asked in the first turn's routing call, so it costs no extra call. */
+export const teachatIdentityQuestion = (identities: Record<string, string>): Record<string, JevRouteQuestion> => ({
+  teachat_identity: { type: 'choice', instructions: IDENTITY_INSTRUCTIONS, criteria: identities },
+});
+export type TeachatIdentityAnswer = { choice: string; probabilities: Record<string, number>; confidence: number };
+export function readTeachatIdentity(raw: JevRawResponse | null | undefined): TeachatIdentityAnswer | undefined {
+  if (!raw) return undefined;
+  try { const { choice, probabilities, confidence } = getChoiceAnswer(raw, 'teachat_identity'); return { choice, probabilities, confidence }; }
+  catch { return undefined; }
 }
 
 /**

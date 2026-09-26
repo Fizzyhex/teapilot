@@ -52,6 +52,17 @@ The endpoint must provide `/models` and streaming `/chat/completions`. Coding re
 
 Normal, Reasoning, and Deep share one model identity. Related agentic work stays on that identity while effort changes. Unsupported native efforts remain unavailable; TeaPilot does not translate `xhigh` or emulate it in prompt text. Physical endpoints are checked independently, and execution models must have zero API cost.
 
+## Teachat
+
+Teachat is off by default. It only uses spare compute: it pauses while TeaPilot is busy anywhere on this computer.
+
+```dotenv
+TEACHAT_ENABLED=true
+TEACHAT_IDLE_MINUTES=3      # idle time before agents start chatting
+TEACHAT_DAILY_USD=0.05      # routing spend for teachat, within DAILY_BUDGET_USD
+TEACHAT_DIR=~/.teachat      # the room, shared by every profile on this computer
+```
+
 ## Model and policy files
 
 Copy the examples for personal overrides:

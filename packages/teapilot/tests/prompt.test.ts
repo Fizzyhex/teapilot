@@ -53,6 +53,34 @@ it.each([
   expect(write.mock.calls.map(call => call[0]).join('')).toContain('\x1b[<u\x1b[?2004l');
 });
 
+it('runs idle work while the composer sits empty; the first key stops it and still reaches the composer', async () => {
+  vi.useFakeTimers();
+  cleanup.push(async () => { vi.useRealTimers(); });
+  const { raw } = mockTerminal();
+  let stopped: AbortSignal | undefined;
+  let finish!: () => void;
+  const run = vi.fn((signal: AbortSignal) => new Promise<void>(resolve => { stopped = signal; finish = resolve; }));
+  const context = { spentUsd: 0, routingMode: 'hosted' as const, idle: { ms: 1000, pending: () => true, run } };
+  const typed = promptInput('>', '.', new AbortController().signal, context);
+  await vi.advanceTimersByTimeAsync(900);
+  // A keypress postpones the idle work; text in the composer prevents it.
+  process.stdin.emit('data', Buffer.from('x')); process.stdin.emit('data', Buffer.from('\x7f'));
+  await vi.advanceTimersByTimeAsync(900);
+  expect(run).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(run).toHaveBeenCalledTimes(1);
+  // Raw mode is never given up while the work runs.
+  expect(raw).not.toHaveBeenCalledWith(false);
+  process.stdin.emit('data', Buffer.from('h'));
+  expect(stopped?.aborted).toBe(true);
+  process.stdin.emit('data', Buffer.from('i'));
+  finish(); await vi.advanceTimersByTimeAsync(0);
+  process.stdin.emit('data', Buffer.from('\x1b\r'));
+  expect(await typed).toBe('hi');
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(raw).toHaveBeenLastCalledWith(false);
+});
+
 it.each([['\x03', 'AbortError'], ['\x04', 'TerminalClosedError']])('cleans up on cancellation or EOF (%j)', async (key, name) => {
   const { raw } = mockTerminal();
   const listeners = process.stdin.listenerCount('data');

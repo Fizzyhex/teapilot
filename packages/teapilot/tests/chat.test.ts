@@ -115,3 +115,26 @@ it('/cd to a missing path reports an error and changes nothing', async () => {
   expect(input.mock.calls[1]![0].cwd).toBe(grants.root);
   expect(onEvent).not.toHaveBeenCalled();
 });
+
+it('runs extension hooks around commands and turns', async () => {
+  const calls: string[] = [];
+  const extension = {
+    help: '/teachat [who]',
+    busy: vi.fn(async () => { calls.push('busy'); }),
+    request: vi.fn(() => ({ teachatIdentities: { pip: 'Quick questions.' } })),
+    turnEnd: vi.fn(async (_turn: unknown, _result: HostResult) => { calls.push('turnEnd'); }),
+    reset: vi.fn(async () => { calls.push('reset'); }),
+    command: vi.fn(async (command: string, _args: string) => { calls.push(command); return command === '/teachat'; }),
+  };
+  const input = vi.fn().mockResolvedValueOnce('/teachat read #ysk').mockResolvedValueOnce('/bogus').mockResolvedValueOnce('/new').mockResolvedValueOnce('Next').mockResolvedValueOnce('/exit');
+  const answer = { choice: 'pip', probabilities: { pip: 1 }, confidence: 1 };
+  const run = vi.fn(async (_request: HostRequest) => { calls.push('run'); return { ...result, teachatIdentity: answer }; });
+  const log = vi.fn();
+  await runChat({ request: { prompt: 'First', cwd: '.' }, maxPromptChars: 2000, input, run, log, extension });
+  expect(calls).toEqual(['busy', 'run', 'turnEnd', 'busy', '/teachat', 'busy', '/bogus', 'busy', 'reset', 'busy', 'run', 'turnEnd']);
+  expect(extension.command.mock.calls).toEqual([['/teachat', 'read #ysk'], ['/bogus', '']]);
+  expect(run.mock.calls.map(call => call[0].teachatIdentities)).toEqual([{ pip: 'Quick questions.' }, { pip: 'Quick questions.' }]);
+  expect(extension.turnEnd.mock.calls[0]).toEqual([{ user: 'First', assistant: result.text }, expect.objectContaining({ teachatIdentity: answer })]);
+  expect(extension.turnEnd.mock.calls[1]![0]).toEqual({ user: 'Next', assistant: result.text });
+  expect(log.mock.calls.map(call => call[0])).toEqual([expect.stringMatching(/^Commands: .*\/new.*, \/teachat \[who\]$/), expect.stringContaining('Started a new task')]);
+});

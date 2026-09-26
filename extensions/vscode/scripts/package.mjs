@@ -25,7 +25,7 @@ function pruneRuntime(directory) {
   }
 }
 try {
-  runNpm(['run', 'build'], teapilot);
+  runNpm(['run', 'build'], root);
   execFileSync(process.execPath, [join(teapilot, 'scripts', 'pack.mjs'), '--pack-destination', temporary], { cwd: teapilot, stdio: 'inherit', windowsHide: true });
   mkdirSync(runtime, { recursive: true });
   writeFileSync(join(runtime, 'package.json'), JSON.stringify({ name: 'teapilot-vscode-runtime', private: true, version: '0.0.0' }));

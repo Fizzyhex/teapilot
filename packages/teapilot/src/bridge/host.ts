@@ -7,6 +7,8 @@ import { SessionGrants } from '../execution/grants.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import { runHost, type HostDependencies, type HostRequest, type HostResult } from '../host.js';
 import { runSession } from '../chat.js';
+import type { TeachatService } from '../teachat/service.js';
+import { headlessTeachat } from '../teachat/session.js';
 import { bearer, FailureLimiter, tokenMatches } from './auth.js';
 import { BRIDGE_PROTOCOL, clientMessage, MAX_MESSAGE_BYTES, type HostMessage } from './protocol.js';
 
@@ -23,6 +25,8 @@ export interface BridgeHostOptions {
   host?: string;
   run?: (config: Config, request: HostRequest, dependencies: HostDependencies) => Promise<HostResult>;
   approvalTimeoutMs?: number;
+  /** Gossips while the session is idle; turns preempt it. */
+  teachat?: TeachatService;
 }
 
 export interface BridgeHost { port: number; close(): Promise<void> }
@@ -37,7 +41,8 @@ const HEARTBEAT_MS = 20_000;
 export async function startBridgeHost(options: BridgeHostOptions): Promise<BridgeHost> {
   const { config, root, token, log } = options;
   const redact = options.redact ?? (text => text);
-  const run = options.run ?? runHost;
+  const host = options.run ?? runHost;
+  const run: typeof host = (config, request, dependencies) => options.teachat ? options.teachat.work(() => host(config, request, dependencies)) : host(config, request, dependencies);
   const limiter = new FailureLimiter();
   const sockets = new Set<WebSocket>();
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
@@ -142,6 +147,7 @@ export async function startBridgeHost(options: BridgeHostOptions): Promise<Bridg
           return result;
         },
         approve, log: text => send({ t: 'log', text }), onEvent: dependencies.onEvent,
+        extension: options.teachat && headlessTeachat(options.teachat, 'bridge'),
       });
       send({ t: 'end', reason: 'Session ended.' });
     } catch (error) {

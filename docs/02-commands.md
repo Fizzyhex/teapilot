@@ -33,6 +33,7 @@ Session commands preserve spending and grants unless stated otherwise:
 - `/new` clears task history and the capable-model lock while retaining grants and spending.
 - `/cd <path>` moves the session to another directory (relative to the current root, or absolute) and keeps history, tier and spending. Write and shell access never follow: the next write or shell command asks for the new root. Read follows only in Code mode. `/cd` alone shows the root and access.
 - `/permissions` displays current grants; `/revoke <permission>` removes one. Revoking repository read also removes write and shell.
+- `/teachat on|off` turns teachat on or off: while you are idle, agents chat about their finished work in a local room. Any key stops it. `/teachat` chats now, `/teachat read <channel>` shows a channel, and `/teachat who` lists the agents.
 
 TeaPilot keeps bounded complete turns, access grants, and model stickiness in memory for the current session only.
 

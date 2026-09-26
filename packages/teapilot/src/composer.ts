@@ -16,7 +16,14 @@ export interface ChatPromptState {
 
 export interface ComposerContext extends ChatPromptState {
   routingMode: 'hosted' | 'direct';
+  idle?: ComposerIdle;
 }
+
+/**
+ * Spare-compute work the composer runs after `ms` empty and untouched, while `pending()`. The composer leaves the
+ * screen meanwhile; the first keypress aborts `run` and is applied once it has returned.
+ */
+export interface ComposerIdle { ms: number; pending(): boolean; run(signal: AbortSignal): Promise<void> }
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 export const graphemes = (text: string) => Array.from(segmenter.segment(text));

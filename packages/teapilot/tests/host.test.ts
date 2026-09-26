@@ -388,6 +388,31 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     expect(result.text).toContain('Next: Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.');
   });
 
+  it('asks the first routing call which teachat identity fits and returns the answer', async () => {
+    const identities = { pip: 'Quick questions and explanations.', oona: 'Research and long writing jobs.' };
+    const answer = { type: 'choice', choice: 'oona', probabilities: { oona: 0.8, pip: 0.2 }, confidence: 0.9 };
+    const questions: any[] = [];
+    const f = await setup((body, req, res) => {
+      if (req.url === '/jev') {
+        questions.push(body.questions);
+        // The same routing answers, plus the identity answer when it was asked.
+        const end = res.end.bind(res);
+        res.end = ((chunk: string) => { const raw = JSON.parse(chunk); if (body.questions.teachat_identity) raw.answers.teachat_identity = answer; return end(JSON.stringify(raw)); }) as typeof res.end;
+        jev(res, 'ask.normal');
+      } else if (req.url?.endsWith('/models')) res.end('{}');
+      else completion(res, { text: 'Here is an overview.' });
+    });
+    const grants = await SessionGrants.create(f.cwd, f.config, 'chat');
+    const asked = await runHost(f.config, { cwd: f.cwd, prompt: 'Write up the research', mode: 'chat', authorization: grants, teachatIdentities: identities }, { approve: async () => false, localProbe: async () => true });
+    expect(asked.success).toBe(true);
+    expect(questions[0].teachat_identity).toMatchObject({ type: 'choice', criteria: identities });
+    expect(asked.teachatIdentity).toEqual({ choice: 'oona', probabilities: { oona: 0.8, pip: 0.2 }, confidence: 0.9 });
+    const plain = await runHost(f.config, { cwd: f.cwd, prompt: 'Write up the research', mode: 'chat', authorization: grants }, { approve: async () => false, localProbe: async () => true });
+    expect(plain.success).toBe(true);
+    expect(questions[1].teachat_identity).toBeUndefined();
+    expect(plain.teachatIdentity).toBeUndefined();
+  });
+
   it('does not retry an interrupted local request or expose provider errors', async () => {
     let calls = 0;
     const f = await setup((_body, req, res) => {

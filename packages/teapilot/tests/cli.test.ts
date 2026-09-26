@@ -11,7 +11,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 
 async function cli(args: string[], env: NodeJS.ProcessEnv = {}) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((done, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', resolve(root, 'src/cli.ts'), ...args], { cwd: root, windowsHide: true, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--import', 'tsx', '--conditions=teapilot-source', resolve(root, 'src/cli.ts'), ...args], { cwd: root, windowsHide: true, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', data => stdout += data);
     child.stderr.on('data', data => stderr += data);

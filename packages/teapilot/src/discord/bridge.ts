@@ -1,4 +1,4 @@
-import { runSession } from '../chat.js';
+import { runSession, type SessionExtension } from '../chat.js';
 import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { EventSink } from '../integration/events.js';
@@ -45,6 +45,7 @@ export interface ConversationOptions {
   once?: boolean;
   approvalTimeoutMs?: number;
   progressIntervalMs?: number;
+  extension?: SessionExtension;
 }
 
 const discordHelp = 'Discord: /stop cancels the running turn; /exit ends this conversation. The repository root is fixed; change it with teapilot discord setup.';
@@ -168,7 +169,7 @@ export class Conversation {
   private async start(): Promise<void> {
     try {
       await runSession({ request: this.options.request, once: this.options.once, maxPromptChars: this.options.maxPromptChars, input: this.input, run: this.run,
-        approve: this.approve, log: text => void this.say(text), onEvent: this.onEvent });
+        approve: this.approve, log: text => void this.say(text), onEvent: this.onEvent, extension: this.options.extension });
       if (!this.options.request.signal?.aborted && !this.options.once) await this.say('Session ended. Send a message to start a new one.');
     } catch (error) {
       if (!this.options.request.signal?.aborted) {

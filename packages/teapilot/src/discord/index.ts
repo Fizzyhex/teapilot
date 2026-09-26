@@ -2,6 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { loadConfig } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
 import { runHost } from '../host.js';
+import { headlessTeachat, openHeadlessTeachat } from '../teachat/session.js';
 import type { SetupUI } from '../setup/terminal.js';
 import { route, routeReply } from './access.js';
 import { AccessStore } from './access-store.js';
@@ -39,6 +40,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   const allowed = (id: string) => access.roleOf(id) !== undefined;
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
+  const teachat = await openHeadlessTeachat(config, log);
 
   const open = async (key: string, transport: DiscordTransport, oneShot = false): Promise<Conversation> => {
     const existing = conversations.get(key);
@@ -50,7 +52,8 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
       once: oneShot,
       request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal },
       maxPromptChars: config.policy.limits.maxPromptChars,
-      run: (request, dependencies) => runHost(config, request, dependencies),
+      run: (request, dependencies) => teachat ? teachat.work(() => runHost(config, request, dependencies)) : runHost(config, request, dependencies),
+      extension: teachat && headlessTeachat(teachat, key),
     });
     conversations.set(key, conversation);
     return conversation;
@@ -119,5 +122,6 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   log('Stopping: pending approvals are denied.');
   await gateway.close();
   await Promise.allSettled([...conversations.values()].map(conversation => conversation.done));
+  await teachat?.close();
   return true;
 }
