@@ -5,7 +5,7 @@
     "confirmation_risk_levels": ["high", "critical"],
     "require_verified_candidates": true
   },
-  "permissions": ["inference", "repository.read", "repository.write", "repository.shell", "web.search"],
+  "permissions": ["inference", "repository.read", "repository.write", "repository.shell", "web.search", "discord.play"],
   "disabledCapabilities": [],
   "budget": {
     "requestUsd": 1,

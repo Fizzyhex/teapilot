@@ -1,12 +1,15 @@
 import { realpath } from 'node:fs/promises';
 import { loadConfig } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
-import { runHost } from '../host.js';
+import { runHost, type HostRequest } from '../host.js';
 import { headlessTeachat, openHeadlessTeachat } from '../teachat/session.js';
 import type { SetupUI } from '../setup/terminal.js';
 import { route, routeReply } from './access.js';
 import { AccessStore } from './access-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
+import { consultant } from './play/consult.js';
+import { PlayRuntime, type PlaySurface } from './play/runtime.js';
+import { PlayStore } from './play/store.js';
 import type { GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
 import { interactionLifetimeMs } from './commands.js';
 import { quoteMessage } from './render.js';
@@ -41,8 +44,18 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
   const teachat = await openHeadlessTeachat(config, log);
+  const run = (request: HostRequest, dependencies: Parameters<typeof runHost>[2]) => teachat ? teachat.work(() => runHost(config, request, dependencies)) : runHost(config, request, dependencies);
+  // The surface is bound once the gateway connects; apps only post after a message arrives or on recovery, both later.
+  let surface: PlaySurface | undefined;
+  const connected = () => { if (!surface) throw new Error('Discord is not connected yet.'); return surface; };
+  const play = new PlayRuntime({
+    store: PlayStore.at(config.stateDir), log,
+    surface: { post: (...args) => connected().post(...args), edit: (...args) => connected().edit(...args), request: (...args) => connected().request(...args) },
+    consult: consultant({ config, root, access, queue, run, signal }),
+  });
 
-  const open = async (key: string, transport: DiscordTransport, oneShot = false): Promise<Conversation> => {
+  /** `channelId` is where discord.play apps post; one-shot replies have none. */
+  const open = async (key: string, transport: DiscordTransport, channelId?: string, oneShot = false): Promise<Conversation> => {
     const existing = conversations.get(key);
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
@@ -52,8 +65,9 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
       once: oneShot,
       request: { prompt: '', cwd: root, mode: settings.startMode, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal },
       maxPromptChars: config.policy.limits.maxPromptChars,
-      run: (request, dependencies) => teachat ? teachat.work(() => runHost(config, request, dependencies)) : runHost(config, request, dependencies),
+      run,
       extension: teachat && headlessTeachat(teachat, key),
+      play: { runtime: play, channelId: oneShot ? undefined : channelId },
     });
     conversations.set(key, conversation);
     return conversation;
@@ -68,13 +82,14 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     const chain = target.kind === 'new-thread' || !conversations.get(target.key)?.active ? await message.replyChain() : undefined;
     const prompt = chain && (chain.messages.length || chain.truncated) ? quoteMessage({ author: message.authorName, text: message.content }, chain) : message.content;
     let key = target.key;
+    let channelId = message.channelId;
     let transport: DiscordTransport;
     if (target.kind === 'new-thread') {
       const thread = await message.startThread(message.content);
-      key = `thread:${thread.id}`; transport = thread.transport;
+      key = `thread:${thread.id}`; transport = thread.transport; channelId = thread.id;
     } else transport = message.transport();
     log(`${key} @${message.authorName}: ${message.content.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport)).push(prompt, { sender: message.authorId });
+    (await open(key, transport, channelId)).push(prompt, { sender: message.authorId, senderName: message.authorName });
   };
   const handleCommand = async (command: GatewayCommand): Promise<void> => {
     const target = route(command, settings, allowed);
@@ -90,13 +105,14 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     if (!target) { await reply.respond('You are not allowed to use teapilot here.'); return; }
     if (!reply.content) { await reply.respond('teapilot reads text messages only.'); return; }
     let key = target.key;
+    let channelId = reply.channelId;
     let transport: DiscordTransport;
     if (reply.oneShot) {
       key = `reply:${reply.id}`; transport = reply.transport();
     } else if (target.kind === 'new-thread') {
       try {
         const thread = await reply.startThread(reply.title);
-        key = `thread:${thread.id}`; transport = thread.transport;
+        key = `thread:${thread.id}`; transport = thread.transport; channelId = thread.id;
       } catch (error) {
         await reply.respond(`teapilot could not start a thread here: ${error instanceof Error ? error.message : String(error)}`);
         return;
@@ -104,7 +120,7 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     } else transport = reply.transport();
     await reply.respond();
     log(`${key} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId });
+    (await open(key, transport, channelId, reply.oneShot)).push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   // discord.js loads only here, so every other command starts without it.
@@ -113,13 +129,19 @@ async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<
     message: message => void handle(message).catch(failed('Message handling')),
     command: command => void handleCommand(command).catch(failed('Command handling')),
     reply: reply => void handleReply(reply).catch(failed('Reply handling')),
+    component: interaction => void (surface ? play.interact(interaction) : interaction.reply('teapilot is still starting; try again in a moment.')).catch(failed('App interaction')),
   }, log);
+  surface = gateway.play;
+  const recovered = await play.recover();
+  if (recovered) log(`Resumed ${recovered} discord.play app(s).`);
+  if (!config.policy.permissions.includes('discord.play')) log('discord.play is off: add "discord.play" to "permissions" in this profile\'s policy.json to let teapilot build interactive Discord apps.');
 
   access.lookup = gateway.username;
   log(`Connected as ${gateway.botName}. Listening to ${settings.allowedUserIds.length} operator(s) and ${access.list().users.length} user(s) in DMs${settings.channelId ? ` and channel ${settings.channelId}` : ''}.`);
   log(`Repository root: ${root}. Sessions start in ${settings.startMode} mode. Press Ctrl+C to stop.`);
   if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
   log('Stopping: pending approvals are denied.');
+  play.close();
   await gateway.close();
   await Promise.allSettled([...conversations.values()].map(conversation => conversation.done));
   await teachat?.close();

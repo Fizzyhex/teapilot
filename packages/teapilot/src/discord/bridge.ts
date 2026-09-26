@@ -3,6 +3,7 @@ import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
+import type { PlayRuntime } from './play/runtime.js';
 import { chunk, ProgressLine, throttle } from './render.js';
 
 /** Everything the bridge needs from Discord for one conversation (a DM or a thread). */
@@ -46,15 +47,18 @@ export interface ConversationOptions {
   approvalTimeoutMs?: number;
   progressIntervalMs?: number;
   extension?: SessionExtension;
+  /** discord.play apps; `channelId` is where they post, absent where teapilot cannot keep a message alive. */
+  play?: { runtime: PlayRuntime; channelId?: string };
 }
 
 const discordHelp = 'Discord: /stop cancels the running turn; /exit ends this conversation. The repository root is fixed; change it with teapilot discord setup.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
-  private readonly inbox: Array<{ text: string; sender?: string }> = [];
+  private readonly inbox: Array<{ text: string; sender?: string; senderName?: string }> = [];
   /** Who sent the message the current turn is answering; a thread can have several people. */
   private speaker?: string;
+  private speakerName?: string;
   private waiting?: { resolve(text: string): void; reject(error: Error): void };
   private turn?: AbortController;
   private sink?: EventSink;
@@ -67,7 +71,7 @@ export class Conversation {
   }
 
   /** Deliver a message from an allowed person. Local commands take effect immediately. */
-  push(text: string, options: { answerOnly?: boolean; sender?: string } = {}): void {
+  push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string } = {}): void {
     // Only the next turn is answer-only, and only if nothing is running to change mid-turn.
     if (options.answerOnly && !this.turn) this.answerOnly = true;
     const trimmed = text.trim();
@@ -80,8 +84,8 @@ export class Conversation {
     if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.', true); return; }
     if (command === '/help') void this.say(discordHelp, true);
     if (this.turn && !['/exit', '/quit'].includes(command ?? '')) void this.say('Queued as your next message.', true);
-    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; waiting.resolve(text); }
-    else this.inbox.push({ text, sender: options.sender });
+    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; this.speakerName = options.senderName; waiting.resolve(text); }
+    else this.inbox.push({ text, sender: options.sender, senderName: options.senderName });
   }
 
   get active(): boolean { return !this.ended; }
@@ -94,7 +98,7 @@ export class Conversation {
 
   private input = (): Promise<string> => {
     const next = this.inbox.shift();
-    if (next) { this.speaker = next.sender; return Promise.resolve(next.text); }
+    if (next) { this.speaker = next.sender; this.speakerName = next.senderName; return Promise.resolve(next.text); }
     const signal = this.options.request.signal;
     return new Promise((resolve, reject) => {
       const closed = () => reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' }));
@@ -125,7 +129,9 @@ export class Conversation {
     const admin = access && this.speaker ? access.adminFor(this.speaker) : undefined;
     // With roles in force, a turn without a known sender holds nothing.
     base.authorization?.setCaller(access ? this.speaker ? access.callerFor(this.speaker) : () => ({ permissions: [] }) : undefined);
-    const request: HostRequest = { ...base, access: admin };
+    const { play } = this.options;
+    const request: HostRequest = { ...base, access: admin,
+      play: play && { runtime: play.runtime, channelId: play.channelId, conversation: this.options.key, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined } };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
     const progress = new ProgressLine(this.options.redact);
