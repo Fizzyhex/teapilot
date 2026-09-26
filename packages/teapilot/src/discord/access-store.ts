@@ -8,7 +8,7 @@ import { snowflake } from './settings.js';
 
 export type Role = 'operator' | 'user';
 /** What a plain user holds without any grant. */
-export const userPermissions: readonly Permission[] = ['inference', 'web.search'];
+export const userPermissions: readonly Permission[] = ['inference', 'web.search', 'discord.play'];
 export const maxGrantMs = 30 * 24 * 60 * 60_000;
 
 const timestamp = z.string().refine(value => !Number.isNaN(Date.parse(value)), 'Expected an ISO timestamp.');
@@ -105,11 +105,12 @@ export class AccessStore {
     return withPrerequisites([...held]).filter(value => this.ceiling.includes(value));
   }
 
-  /** The live view a session checks on every permission test. */
+  /** The live view a session checks on every permission test. discord.play is open to everyone, so it never needs a click. */
   callerFor(id: string): () => Caller {
     return () => {
       const held = this.permissionsOf(id);
-      return { permissions: held, preapproved: this.roleOf(id) === 'user' ? held.filter(value => value === 'web.search') : [] };
+      const preapproved: Permission[] = this.roleOf(id) === 'user' ? ['web.search', 'discord.play'] : ['discord.play'];
+      return { permissions: held, preapproved: held.filter(value => preapproved.includes(value)) };
     };
   }
 

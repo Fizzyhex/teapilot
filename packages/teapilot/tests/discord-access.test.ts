@@ -26,13 +26,13 @@ async function store() {
 }
 const reopen = (access: AccessStore) => new AccessStore(access.file, [op], permissions, () => clock);
 
-it('gives operators every permission and users inference plus web search', async () => {
+it('gives operators every permission and users inference, web search and discord.play', async () => {
   const { access } = await store();
   access.addUser(bob, op);
   expect(access.roleOf(op)).toBe('operator');
   expect(access.permissionsOf(op)).toEqual(permissions);
   expect(access.roleOf(bob)).toBe('user');
-  expect(access.permissionsOf(bob)).toEqual(['inference', 'web.search']);
+  expect(access.permissionsOf(bob)).toEqual(['inference', 'web.search', 'discord.play']);
   expect(access.roleOf(eve)).toBeUndefined();
   expect(access.permissionsOf(eve)).toEqual([]);
 });
@@ -50,11 +50,11 @@ it('grants temporary access that lapses at its persisted timestamp, across resta
   access.addUser(bob, op);
   const expires = access.grant(bob, 'repository.write', 2 * hour, op);
   expect(expires).toBe('2026-01-01T02:00:00.000Z');
-  expect(access.permissionsOf(bob)).toEqual(['inference', 'repository.read', 'repository.write', 'web.search']);
+  expect(access.permissionsOf(bob)).toEqual(['inference', 'repository.read', 'repository.write', 'web.search', 'discord.play']);
   clock += hour;
   expect(reopen(access).permissionsOf(bob)).toContain('repository.write');
   clock += hour + 1;
-  expect(reopen(access).permissionsOf(bob)).toEqual(['inference', 'web.search']);
+  expect(reopen(access).permissionsOf(bob)).toEqual(['inference', 'web.search', 'discord.play']);
   expect(reopen(access).list().users[0]!.grants).toEqual([]);
 });
 
@@ -133,6 +133,20 @@ it('lets a user activate web search without a click but asks for temporarily gra
   expect(approve).toHaveBeenCalledOnce();
   clock += 2 * hour;
   expect(grants.allows('repository.read')).toBe(false);
+});
+
+it('activates discord.play for users and operators without a click, and never offers it as a grant', async () => {
+  const { f, access } = await store();
+  access.addUser(bob, op);
+  const approve = vi.fn<Approve>(async () => true);
+  for (const id of [bob, op]) {
+    const grants = await SessionGrants.create(f.cwd, f.config, 'chat');
+    grants.setCaller(access.callerFor(id));
+    expect(await grants.request(['discord.play'], 'test', approve)).toBe(true);
+    expect(grants.allows('discord.play')).toBe(true);
+  }
+  expect(approve).not.toHaveBeenCalled();
+  expect(() => access.grant(bob, 'discord.play', hour, op)).toThrow(/already hold/);
 });
 
 it('offers management tools to operators only, each behind an approval', async () => {

@@ -1,0 +1,189 @@
+import { colors, type Control, type Embed, type Modal, type View } from '@teapilot/discord-play';
+
+/** A mistake in an app's output. The message is written for the model that wrote the app. */
+export class PlayError extends Error {}
+
+/** Discord API JSON for one message; discord.js accepts these objects as they are. */
+export interface MessagePayload {
+  content: string;
+  embeds: Array<Record<string, unknown>>;
+  components: Array<{ type: 1; components: Array<Record<string, unknown>> }>;
+  allowedMentions: { parse: [] };
+}
+export interface ModalPayload { custom_id: string; title: string; components: Array<{ type: 1; components: Array<Record<string, unknown>> }> }
+
+const limits = { content: 2000, embeds: 10, embedTotal: 6000, title: 256, description: 4096, fields: 25, fieldName: 256, fieldValue: 1024, footer: 2048, rows: 5, buttons: 5, label: 80, options: 25, option: 100, placeholder: 150, modalTitle: 45, modalFields: 5, modalLabel: 45, modalValue: 4000 };
+const styles = { primary: 1, secondary: 2, success: 3, danger: 4 } as const;
+const idPattern = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/** Every Discord custom_id teapilot gives a play control starts with this. */
+export const playPrefix = 'play:';
+export const customId = (playId: string, id: string) => `${playPrefix}${playId}:${id}`;
+export function parseCustomId(value: string): { playId: string; id: string } | undefined {
+  const match = /^play:([a-z0-9]{1,16}):([A-Za-z0-9_.-]{1,64})$/.exec(value);
+  return match ? { playId: match[1]!, id: match[2]! } : undefined;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+function string(value: unknown, what: string, max: number, required = false): string | undefined {
+  if (value === undefined || value === null || value === '') { if (required) throw new PlayError(`${what} is required.`); return undefined; }
+  if (typeof value !== 'string') throw new PlayError(`${what} must be a string.`);
+  if (value.length > max) throw new PlayError(`${what} is ${value.length} characters; Discord allows ${max}.`);
+  return value;
+}
+function list(value: unknown, what: string, max: number): unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new PlayError(`${what} must be an array.`);
+  if (value.length > max) throw new PlayError(`${what} has ${value.length} entries; Discord allows ${max}.`);
+  return value;
+}
+function id(value: unknown, what: string): string {
+  if (typeof value !== 'string' || !idPattern.test(value)) throw new PlayError(`${what} id ${JSON.stringify(value)} must be 1–64 letters, digits, "_", "." or "-".`);
+  return value;
+}
+function color(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xffffff) return value;
+  if (typeof value === 'string' && /^#?[0-9a-f]{6}$/i.test(value)) return Number.parseInt(value.replace('#', ''), 16);
+  if (typeof value === 'string' && value in colors) return colors[value as keyof typeof colors];
+  throw new PlayError(`Embed color ${JSON.stringify(value)} must be 0–0xffffff, "#rrggbb" or one of ${Object.keys(colors).join(', ')}.`);
+}
+/** Custom emoji arrive as <:name:id> or <a:name:id>; anything else is sent as a unicode emoji. */
+function emoji(value: unknown): Record<string, unknown> | undefined {
+  const text = string(value, 'Emoji', 100);
+  if (!text) return undefined;
+  const custom = /^<(a?):(\w{2,32}):(\d{17,20})>$/.exec(text);
+  return custom ? { id: custom[3], name: custom[2], animated: custom[1] === 'a' } : { name: text };
+}
+function url(value: unknown, what: string): string | undefined {
+  const text = string(value, what, 2000);
+  if (text && !/^https?:\/\//i.test(text)) throw new PlayError(`${what} must be an http(s) URL.`);
+  return text;
+}
+const compact = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+
+function renderEmbed(value: unknown, index: number): { json: Record<string, unknown>; size: number } {
+  if (!isRecord(value)) throw new PlayError(`Embed ${index + 1} must be built with embed().`);
+  const title = string(value.title, 'Embed title', limits.title);
+  const description = string(value.description, 'Embed description', limits.description);
+  const footer = string(value.footer, 'Embed footer', limits.footer);
+  const fields = list(value.fields, 'Embed fields', limits.fields).map((field, number) => {
+    if (!isRecord(field)) throw new PlayError(`Embed field ${number + 1} must be { name, value, inline? }.`);
+    return compact({ name: string(field.name, 'Embed field name', limits.fieldName, true), value: string(field.value, 'Embed field value', limits.fieldValue, true), inline: field.inline === true ? true : undefined });
+  });
+  const size = (title?.length ?? 0) + (description?.length ?? 0) + (footer?.length ?? 0) + fields.reduce((sum, field) => sum + String(field.name).length + String(field.value).length, 0);
+  if (!size && !value.image && !value.thumbnail) throw new PlayError(`Embed ${index + 1} is empty.`);
+  const image = url(value.image, 'Embed image'), thumbnail = url(value.thumbnail, 'Embed thumbnail');
+  return { size, json: compact({ title, description, url: url(value.url, 'Embed url'), color: color(value.color), fields: fields.length ? fields : undefined, footer: footer ? { text: footer } : undefined, image: image ? { url: image } : undefined, thumbnail: thumbnail ? { url: thumbnail } : undefined }) };
+}
+
+export function renderEmbeds(value: unknown): Array<Record<string, unknown>> {
+  const rendered = list(value, 'embeds', limits.embeds).map(renderEmbed);
+  const total = rendered.reduce((sum, embed) => sum + embed.size, 0);
+  if (total > limits.embedTotal) throw new PlayError(`Embeds hold ${total} characters in total; Discord allows ${limits.embedTotal}.`);
+  return rendered.map(embed => embed.json);
+}
+
+function renderControl(playId: string, control: unknown, disabled: boolean, seen: Set<string>): Record<string, unknown> {
+  if (!isRecord(control)) throw new PlayError('Rows hold controls built with button() or select().');
+  if (control.type === 'button') {
+    // Discord rejects blank labels; an emoji-only button often arrives with a space as its label.
+    const label = string(control.label, 'Button label', limits.label)?.trim() ? control.label as string : undefined;
+    const icon = emoji(control.emoji);
+    if (!label && !icon) throw new PlayError('A button needs a label or an emoji.');
+    if (control.url !== undefined) return compact({ type: 2, style: 5, label, emoji: icon, url: url(control.url, 'Button url') });
+    const key = id(control.id, 'Button');
+    if (seen.has(key)) throw new PlayError(`Control id "${key}" is used twice in one view.`);
+    seen.add(key);
+    if (control.opens !== undefined) renderModal(playId, control.opens);
+    const style = control.style ?? 'secondary';
+    if (typeof style !== 'string' || !(style in styles)) throw new PlayError(`Button style must be one of ${Object.keys(styles).join(', ')}.`);
+    return compact({ type: 2, style: styles[style as keyof typeof styles], label, emoji: icon, custom_id: customId(playId, key), disabled: disabled || control.disabled === true || undefined });
+  }
+  if (control.type === 'select') {
+    const key = id(control.id, 'Select');
+    if (seen.has(key)) throw new PlayError(`Control id "${key}" is used twice in one view.`);
+    seen.add(key);
+    const options = list(control.options, 'Select options', limits.options).map(option => {
+      if (!isRecord(option)) throw new PlayError('Select options must be strings or { value, label }.');
+      return compact({ value: string(option.value, 'Option value', limits.option, true), label: string(option.label, 'Option label', limits.option, true), description: string(option.description, 'Option description', limits.option), emoji: emoji(option.emoji), default: option.default === true || undefined });
+    });
+    if (!options.length) throw new PlayError(`Select "${key}" needs at least one option.`);
+    const count = (value: unknown, what: string, fallback: number) => {
+      if (value === undefined) return fallback;
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > options.length) throw new PlayError(`Select ${what} must be a whole number from 0 to the number of options.`);
+      return value;
+    };
+    const min = count(control.min, 'min', 1), max = count(control.max, 'max', 1);
+    if (max < Math.max(min, 1)) throw new PlayError('Select max must be at least min and at least 1.');
+    return compact({ type: 3, custom_id: customId(playId, key), options, placeholder: string(control.placeholder, 'Select placeholder', limits.placeholder), min_values: min, max_values: max, disabled: disabled || control.disabled === true || undefined });
+  }
+  throw new PlayError('Rows hold controls built with button() or select().');
+}
+
+/** Checks a view against Discord's limits and renders it; `disabled` greys out every control, for a finished app. */
+export function renderView(playId: string, view: unknown, disabled = false): MessagePayload {
+  if (!isRecord(view)) throw new PlayError('view() must return an object such as { content, embeds, rows }.');
+  const content = string(view.content, 'Message content', limits.content) ?? '';
+  const embeds = renderEmbeds(view.embeds);
+  const seen = new Set<string>();
+  const components = list(view.rows, 'rows', limits.rows).map((value, index) => {
+    if (!isRecord(value) || value.type !== 'row') throw new PlayError(`Row ${index + 1} must be built with row().`);
+    const controls = list(value.controls, `Row ${index + 1}`, limits.buttons);
+    if (!controls.length) throw new PlayError(`Row ${index + 1} is empty.`);
+    if (controls.some(control => isRecord(control) && control.type === 'select') && controls.length > 1) throw new PlayError(`Row ${index + 1}: a select must be alone in its row.`);
+    return { type: 1 as const, components: controls.map(control => renderControl(playId, control, disabled, seen)) };
+  });
+  if (!content && !embeds.length && !components.length) throw new PlayError('view() returned nothing to show.');
+  return { content, embeds, components, allowedMentions: { parse: [] } };
+}
+
+export function renderModal(playId: string, value: unknown): ModalPayload {
+  if (!isRecord(value) || value.type !== 'modal') throw new PlayError('Button opens must be built with modal().');
+  const key = id(value.id, 'Modal');
+  const fields = list(value.fields, 'Modal fields', limits.modalFields);
+  if (!fields.length) throw new PlayError(`Modal "${key}" needs at least one field.`);
+  const seen = new Set<string>();
+  return {
+    custom_id: customId(playId, key),
+    title: string(value.title, 'Modal title', limits.modalTitle, true)!,
+    components: fields.map(field => {
+      if (!isRecord(field)) throw new PlayError('Modal fields must be built with field().');
+      const name = id(field.id, 'Modal field');
+      if (seen.has(name)) throw new PlayError(`Modal field id "${name}" is used twice.`);
+      seen.add(name);
+      const length = (entry: unknown, what: string) => {
+        if (entry === undefined) return undefined;
+        if (typeof entry !== 'number' || !Number.isInteger(entry) || entry < 0 || entry > limits.modalValue) throw new PlayError(`Modal field ${what} must be a whole number from 0 to ${limits.modalValue}.`);
+        return entry;
+      };
+      return { type: 1 as const, components: [compact({
+        type: 4, custom_id: name, label: string(field.label, 'Modal field label', limits.modalLabel, true), style: field.style === 'paragraph' ? 2 : 1,
+        placeholder: string(field.placeholder, 'Modal field placeholder', 100), required: field.required === false ? false : undefined,
+        min_length: length(field.min, 'min'), max_length: length(field.max, 'max'), value: string(field.value, 'Modal field value', limits.modalValue),
+      })] };
+    }),
+  };
+}
+
+/** The control a view shows under this id, if any; link buttons have no id. */
+export function findControl(view: View | undefined, key: string): Control | undefined {
+  for (const row of view?.rows ?? []) for (const control of row.controls) if (control.type === 'select' ? control.id === key : control.id === key && control.url === undefined) return control;
+  return undefined;
+}
+
+/** A plain-text rendering of a view, so the model can check what it built. */
+export function describe(view: View): string {
+  const lines: string[] = [];
+  if (view.content) lines.push(view.content);
+  for (const embed of view.embeds ?? [] as Embed[]) {
+    lines.push(`[embed${embed.color !== undefined ? ` ${String(embed.color)}` : ''}]${embed.title ? ` ${embed.title}` : ''}`);
+    if (embed.description) lines.push(embed.description);
+    for (const field of embed.fields ?? []) lines.push(`${field.name}: ${field.value}`);
+    if (embed.footer) lines.push(`-- ${embed.footer}`);
+  }
+  for (const row of view.rows ?? []) lines.push(row.controls.map(control => control.type === 'select'
+    ? `<select ${control.id}: ${control.options.map(option => option.value).join('|')}>`
+    : `[${[control.emoji, control.label].filter(Boolean).join(' ')}](${control.url ?? control.id}${control.opens ? ` → modal ${(control.opens as Modal).id}` : ''}${control.disabled ? ', disabled' : ''})`).join(' '));
+  return lines.join('\n');
+}

@@ -11,7 +11,7 @@ export const isMode = (value: unknown): value is Mode => modes.includes(value as
 export const workloadFor = (mode: Mode): Workload => mode === 'code' ? 'coder' : 'ask';
 export const modeFor = (workload?: Workload): Mode => workload === 'coder' ? 'code' : 'ask';
 export type Permission = Config['policy']['permissions'][number];
-export const permissions: Permission[] = ['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search'];
+export const permissions: Permission[] = ['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'discord.play'];
 export const repositoryPermissions: Permission[] = ['repository.read', 'repository.write', 'repository.shell'];
 
 export function withPrerequisites(requested: readonly Permission[]): Permission[] {

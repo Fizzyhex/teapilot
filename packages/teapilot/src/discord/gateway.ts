@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { ActionRowBuilder, ButtonBuilder, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, SendableChannels } from 'discord.js';
+import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
 import { commandDefinitions, commandText, interactionLifetimeMs, replyCommand, replyMenu, withoutUserInstall } from './commands.js';
 import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
+import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
+import type { PlayInteraction, PlaySurface } from './play/runtime.js';
 import type { DiscordSettings } from './settings.js';
 
 /** How far the Reply menu follows a message's replies back, and how long it may spend fetching them. */
@@ -47,16 +49,22 @@ export interface GatewayHandlers {
   message(message: GatewayMessage): void;
   command(command: GatewayCommand): void;
   reply(reply: GatewayReply): void;
+  /** A click, selection or form on a discord.play app, from anyone; the runtime decides who may act. */
+  component(interaction: PlayInteraction): void;
 }
 export interface Gateway {
   botName: string;
   /** A user's Discord username, or undefined when it cannot be fetched. */
   username(id: string): Promise<string | undefined>;
+  /** Posts and edits discord.play messages by channel, so apps keep working after a restart. */
+  play: PlaySurface;
   close(): Promise<void>;
 }
 
 const noop = () => undefined;
 const quiet = { allowedMentions: { parse: [] as [] } };
+/** discord.play renders Discord API JSON, which discord.js accepts in place of its builders. */
+const raw = (payload: MessagePayload) => payload as unknown as BaseMessageOptions & { content: string };
 
 /**
  * The only module that loads discord.js. It connects outbound over the Gateway:
@@ -264,6 +272,23 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       });
       return;
     }
+    if ((interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit()) && interaction.customId.startsWith(playPrefix)) {
+      const target = parseCustomId(interaction.customId);
+      if (!target) { await interaction.reply({ content: 'This app is not available.', flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
+      handlers.component({
+        playId: target.playId, controlId: target.id,
+        kind: interaction.isButton() ? 'button' : interaction.isStringSelectMenu() ? 'select' : 'modal',
+        user: { id: interaction.user.id, name: interaction.user.username },
+        values: interaction.isStringSelectMenu() ? [...interaction.values] : undefined,
+        fields: interaction.isModalSubmit() ? Object.fromEntries([...interaction.fields.fields.values()].flatMap(field => 'value' in field && typeof field.value === 'string' ? [[field.customId, field.value]] : [])) : undefined,
+        openModal: async payload => { if (interaction.isModalSubmit()) throw new Error('A form cannot open another form.'); await interaction.showModal(payload as unknown as APIModalInteractionResponseCallbackData); },
+        reply: async content => { await interaction.reply({ content, flags: MessageFlags.Ephemeral, ...quiet }); },
+        defer: async () => { await interaction.deferUpdate(); },
+        update: async payload => { await interaction.editReply(raw(payload)); },
+        followUp: async (content, embeds) => { await interaction.followUp({ content, embeds: embeds as BaseMessageOptions['embeds'], flags: MessageFlags.Ephemeral, ...quiet }); },
+      });
+      return;
+    }
     if (!interaction.isButton()) return;
     const [prefix, nonce, verdict] = interaction.customId.split(':');
     if (prefix !== 'teapilot' || !nonce) return;
@@ -327,9 +352,19 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     throw error;
   }
   await ready;
+  const messages = async (channelId: string) => {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel?.isSendable()) throw new Error('teapilot cannot post in this channel.');
+    return channel;
+  };
   return {
     botName: client.user?.tag ?? 'bot',
     username: id => client.users.fetch(id).then(user => user.username, () => undefined),
+    play: {
+      async post(channelId, payload) { return (await (await messages(channelId)).send(raw(payload))).id; },
+      async edit(channelId, messageId, payload) { await (await (await messages(channelId)).messages.fetch(messageId)).edit(raw(payload)); },
+      request: (method, route, body) => client.rest.request({ method: method as RequestMethod, fullRoute: route as RouteLike, body }),
+    },
     async close() {
       for (const entry of pending.values()) entry.resolve(false);
       pending.clear();

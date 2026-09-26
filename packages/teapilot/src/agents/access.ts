@@ -18,7 +18,7 @@ export interface AccessAdmin {
 }
 
 const text = (value: string) => ({ content: [{ type: 'text' as const, text: value }], details: {} });
-const grantable = permissions.filter(permission => !['inference', 'web.search'].includes(permission));
+const grantable = permissions.filter(permission => !['inference', 'web.search', 'discord.play'].includes(permission));
 const permissionSchema = Type.Union(grantable.map(permission => Type.Literal(permission)));
 const idSchema = Type.String({ description: 'Discord user ID (17–20 digits) copied character for character from a <@id> mention in the message. Always a string; never round or retype it.' });
 

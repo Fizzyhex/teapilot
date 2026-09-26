@@ -60,6 +60,8 @@ try {
   for (const name of ['typing', 'pawing', 'tea-break']) assert(packed.files.some(file => file.path === `dist/art/ascii-${name}.json`));
   assert(packed.bundled.includes('jevrouter') && packed.bundled.includes('yaml') && packed.bundled.includes('teachat'));
   assert(packed.files.some(file => file.path === 'node_modules/teachat/dist/index.js') && !packed.files.some(file => file.path.startsWith('node_modules/teachat/src/')));
+  assert(packed.bundled.includes('@teapilot/discord-play'));
+  assert(packed.files.some(file => file.path === 'node_modules/@teapilot/discord-play/dist/index.js') && !packed.files.some(file => file.path.startsWith('node_modules/@teapilot/discord-play/src/')));
   assert(packed.files.some(file => file.path === 'node_modules/jevrouter/LICENSE'));
   assert(!packed.files.some(file => /(^|\/)\.env($|\.)/.test(file.path) || /^config\/(models|policy)\.json$/.test(file.path)));
   console.log('Installing packed artifact with Git disabled...');

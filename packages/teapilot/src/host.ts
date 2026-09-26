@@ -4,6 +4,7 @@ import { mkdir, realpath, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import type { AccessAdmin } from './agents/access.js';
+import type { PlayContext } from './agents/play.js';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type TierPreference, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
@@ -15,11 +16,11 @@ import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
 import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
-import { capabilityPlanner, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
+import { capabilityPlanner, playQuestion, readPlayGrant, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
 import { markWork } from './teachat/busy.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
@@ -155,8 +156,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     await telemetry.event('request_start', { correction: Boolean(request.correction), web: Boolean(request.web) });
     if (request.authorization && !request.authorization.allows('inference')) return await finish(false, 'blocked', 'Inference access is not granted. Start a new session to restore it.');
     if (request.authorization && request.web && !await activate(['web.search'], 'You requested web research with --web.')) return await finish(false, 'approval_denied', accessFailure!);
+    // discord.play is open to everyone in Discord and needs no prompt; once a conversation has it, it stays active.
+    const playable = Boolean(request.play && request.authorization?.available().includes('discord.play'));
+    if (playable && request.authorization!.allows('discord.play')) activePermissions.push('discord.play');
     const provider = config.routingMode === 'direct' ? undefined : budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
-    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
+    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, { ...(request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)), ...(playable ? playQuestion : {}) }) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
     const physicalOnline = dependencies.localProbe
       ? { fast: await dependencies.localProbe(), capable: await dependencies.localProbe() }
       : { fast: await localAvailable(config, 'fast'), capable: await localAvailable(config, 'capable') };
@@ -197,6 +201,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (decision) receipts.push(await telemetry.receipt(decision));
       if (router) webAutoBasis = request.web ? ['explicit'] : readWebAutoGrant(decision?.raw_jev);
       if (request.teachatIdentities) teachatIdentity ??= readTeachatIdentity(decision?.raw_jev);
+      if (playable && !activePermissions.includes('discord.play') && readPlayGrant(decision?.raw_jev, config.policy.router.min_confidence)) await activate(['discord.play'], 'Planned for your request before starting.');
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
       // An unconfident route falls back to the workload the session's mode already
@@ -262,7 +267,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
       previous = await runAttempt({
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
-        mode: request.mode, conversational: request.conversational, authorization: request.authorization, access: request.access,
+        mode: request.mode, conversational: request.conversational, authorization: request.authorization, access: request.access, play: request.play,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {

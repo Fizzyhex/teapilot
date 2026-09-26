@@ -52,7 +52,7 @@ export type ModelSet = CanonicalModels;
 
 export const policySchema = z.object({
   router: z.object({ min_confidence: z.number().min(0).max(1), allowed_risk_levels: z.array(z.enum(['low', 'medium', 'high', 'critical'])), confirmation_risk_levels: z.array(z.enum(['low', 'medium', 'high', 'critical'])), require_verified_candidates: z.boolean() }).strict(),
-  permissions: z.array(z.enum(['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search'])),
+  permissions: z.array(z.enum(['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'discord.play'])),
   disabledCapabilities: z.array(z.string()),
   budget: z.object({ requestUsd: money, dailyUsd: money, approvalThresholdUsd: money }).strict(),
   limits: z.object({ maxTurns: z.number().int().min(1).max(100), maxToolCalls: z.number().int().min(1).max(300), attemptTimeoutMs: z.number().int().min(1000).max(3_600_000), requestTimeoutMs: z.number().int().min(1000).max(120_000), commandTimeoutSeconds: z.number().int().min(1).max(600), maxPromptChars: z.number().int().min(1).max(20_000) }).strict(),

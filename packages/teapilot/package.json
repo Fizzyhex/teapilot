@@ -14,6 +14,7 @@
     "LICENSE"
   ],
   "bundleDependencies": [
+    "@teapilot/discord-play",
     "jevrouter",
     "teachat"
   ],
@@ -44,10 +45,13 @@
     "@earendil-works/pi-agent-core": "0.87.0",
     "@earendil-works/pi-ai": "0.87.0",
     "@earendil-works/pi-coding-agent": "0.87.0",
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "@teapilot/discord-play": "0.1.0",
     "discord.js": "14.27.0",
     "dotenv": "17.3.1",
     "ignore": "7.0.8",
     "jevrouter": "git+https://github.com/BillionsBobby/JevRouter.git#f944acb6530621bced023352e2358a63218bf4d9",
+    "quickjs-emscripten-core": "0.32.0",
     "teachat": "0.1.0",
     "ws": "8.21.3",
     "zod": "4.3.6"
