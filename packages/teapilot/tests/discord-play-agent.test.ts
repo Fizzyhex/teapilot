@@ -142,14 +142,14 @@ it('returns app mistakes as results to fix, not tool failures', async () => {
   expect(f.posts).toEqual([]);
 });
 
-it('refuses apps where teapilot cannot keep a message alive', async () => {
+it('refuses apps where teapilot has nowhere to post them', async () => {
   const bodies: any[] = [];
   const f = await setup((body, _req, res) => {
     bodies.push(body);
     completion(res, bodies.length === 1 ? { tool: { name: 'play_start', arguments: { title: 'Counter', source } } } : { text: 'Cannot here.' });
   });
   await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'], play: { runtime: f.runtime, conversation: 'reply:1' } });
-  expect(JSON.stringify(bodies[1].messages)).toContain('short-lived interaction');
+  expect(JSON.stringify(bodies[1].messages)).toContain('nowhere to post them');
   expect(f.posts).toEqual([]);
 });
 

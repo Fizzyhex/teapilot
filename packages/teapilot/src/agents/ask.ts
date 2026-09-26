@@ -35,7 +35,7 @@ export function ask(config: Config, web: boolean, repository = false, searchUnav
 function askPrompt(repository: boolean, webSearch: boolean, searchUnavailable: boolean): string {
   return [
     // Identity
-    `- You are teapilot - a british general assistant :3. Answer questions clearly, explain technical topics, and help with planning. Align with the user's typing style and tone - leaning towards informal lowercase responses.`,
+    `- You are teapilot - a brit with some brains :3. Answer questions clearly, explain technical topics, and help with planning. Align with the user's typing style and tone - leaning towards informal lowercase responses.`,
     // Available capabilities
     repository
       ? '- Repository access is limited to the tools currently provided.'

@@ -1,86 +1,103 @@
-# Discord (optional)
+# Discord
 
-Chat with teapilot on your computer from Discord: in DMs, or by @mentioning the bot in the channels you choose. Discord is opt-in and separate from `teapilot setup`; nothing is configured, installed or contacted unless you run the commands below.
+teapilot is available in Discord!
 
-For a source checkout, replace `teapilot` with `npm start --`.
+- Ping `@teapilot`, use `/prompt`, or summon to a message from the context menu.
+- Use `discord.play` to create playable games using Discord emojis and Components, with support for multiplayer and user collaboration.
 
 ```sh
-teapilot discord setup    # guided, opt-in; saves to your profile's private .env
+teapilot discord setup    # interactive setup, saves to your profile's .env
 teapilot discord start    # runs in this terminal until Ctrl+C
-teapilot discord status   # shows settings (never the token); optional token check
+teapilot discord status   # shows your settings
 teapilot discord remove   # deletes the Discord settings from the profile
 ```
 
+
 ## How it works
 
-- **teapilot only runs while `teapilot discord start` is open.** It connects outbound to Discord's Gateway: no public URL, tunnel, webhook or local server. The terminal logs each incoming task, approval and result.
-- **Only people you have let in can use it.** Messages from anyone else, and from bots, are ignored without a reply.
-  - **Operators** (the IDs from setup) have every permission and can approve actions.
-  - **Users** get inference, web search and `discord.play`. Operators add users, and give them extra permissions, for a limited time or until revoked (for example "let <@id> in", or "give <@id> code access for 2 hours"), just by asking teapilot in Discord. Each change needs an operator's Approve click, and timed access expires on its own.
-- **Interactive apps (`discord.play`):** ask for a game, poll or quiz and teapilot posts one message with buttons, menus and forms that it updates in place. Anyone in the channel can use its controls unless you say who it is for. Apps keep running across restarts, and end after a day without activity.
-- **Where it listens:**
-  - Each DM is one session.
-  - In the channels you configured, @mentioning the bot starts a thread, and that thread is one session. Follow-ups in the thread don't need a mention.
-- **Access is the same as in the CLI.** Sessions start in `ask` mode at the configured repository root.
-  - `/mode code` asks for repository access.
-  - Shell commands and large overwrites always ask.
-  - Approvals are **Approve / Deny** buttons that only operators can click. Unanswered approvals are denied after 10 minutes, and when teapilot stops.
-  - There is no auto-approve.
-- **One task runs at a time.** A second conversation waits and is told it is queued. Each conversation keeps its own history and access.
-- **Messages go through Discord's servers,** and so do answers, file paths, commands shown in approvals and tool progress. Model execution stays wherever your profile sends it.
+teapilot only runs while `teapilot discord start` is open. It connects outbound to Discord, so there is no public URL, tunnel or webhook to set up, and the terminal logs each task, approval and result.
+
+- Each DM is one session.
+- In the channels you configure, @mentioning the bot starts a thread, and that thread is one session. Follow-ups in the thread don't need a mention.
+- One task runs at a time. Other conversations wait and are told they are queued.
+
+Messages, answers, file paths, approval details and tool progress pass through Discord's servers. Models run wherever your profile sends them.
+
+## Who can use it
+
+teapilot ignores bots and anyone you have not let in.
+
+| Role | Can |
+| --- | --- |
+| Operators | Everything, including approving actions. Set during setup. |
+| Users | Inference, web search and `discord.play`. |
+
+Operators add users and grant extra access by asking teapilot, for example "let <@id> in" or "give <@id> code access for 2 hours". Each change needs an operator's approval, and timed access expires on its own.
+
+## Access and approvals
+
+Access works as in the CLI. Sessions start in `ask` mode at the configured repository root, `/mode code` asks for repository access, and shell commands and large overwrites always ask.
+
+Approvals are **Approve** / **Deny** buttons that only operators can click. There is no auto-approve. Unanswered approvals are denied after 10 minutes, or when teapilot stops.
 
 ## Setup
 
-`teapilot discord setup` walks through these steps, in tabs like `teapilot setup` (use ←/→ to move between them). It needs an existing profile, so run `teapilot setup` first.
+`teapilot discord setup` walks through these steps. Run `teapilot setup` first; it needs an existing profile.
 
-1. At <https://discord.com/developers/applications>, create an application. Open **Bot**, then **Reset Token**, and copy the token.
-2. On the same page, enable **Message Content Intent** under Privileged Gateway Intents.
-3. Paste the token. It is hidden while you type. teapilot asks before contacting discord.com to check it, and warns if the intent is off.
-4. Enter the Discord user IDs of the operators. To copy one, enable Developer Mode (Settings → Advanced), right-click the user, and choose **Copy User ID**.
-5. Optionally, add the IDs of channels where @mentions should work. With none, teapilot answers DMs only.
+1. At <https://discord.com/developers/applications>, create an application. Open **Bot**, click **Reset Token**, and copy the token.
+2. On the same page, enable **Message Content Intent**.
+3. Paste the token. teapilot asks before contacting Discord to check it.
+4. Enter the operators' Discord user IDs. To copy one, enable Developer Mode (Settings → Advanced), right-click the user, and choose **Copy User ID**.
+5. Optionally, add channel IDs where @mentions should work. With none, teapilot answers DMs only.
 6. Choose the repository root. It defaults to `--cwd`.
-7. Confirm, then open the printed invite link to add the bot to a server you share with the people who will use it. Discord only delivers DMs from people who share a server with the bot.
+7. Open the printed invite link to add the bot to a server. Discord only delivers DMs from people who share a server with the bot.
 
-Settings are stored as `DISCORD_*` values in the profile's private `.env`, which has the same file protection as your other credentials. The token is redacted from logs and messages.
+Settings are stored as `DISCORD_*` values in the profile's private `.env`. The token is redacted from logs and messages.
 
 ## In a conversation
 
-All the [session commands](02-commands.md#interactive-use) work, with these differences:
+All the [session commands](02-commands.md#interactive-use) work, except:
 
 - `/stop` cancels the running turn. Edits already made remain on disk.
-- `/exit` ends the conversation. Your next message starts a new session.
-- `/cd` is unavailable, because the root is fixed. Change it with `teapilot discord setup`.
-- Messages sent while a turn runs are queued as your next message.
+- `/clear` ends the conversation and its history. Your next message starts a new session.
+- `/cd` is unavailable. Change the root with `teapilot discord setup`.
 
-Long answers are split across several messages. Only text is read; attachments are ignored.
+Messages sent during a turn are queued as your next message. Long answers are split across messages, and attachments are ignored.
 
-## `/reply` and the Reply menu
+## Interactive apps
 
-Allowlisted users can also talk to teapilot outside DMs and the configured channels:
+Ask for a game, poll or quiz and teapilot posts one message with buttons, menus and forms that it updates in place. Anyone in the channel can use it unless you say who it is for. Apps survive restarts and end after a day without activity.
 
-- `/reply message:<text>` asks teapilot something in the current channel.
-- Right-click a message → **Apps → Reply** makes teapilot respond to it. teapilot receives the text prefixed with the author's username (`Message from @name:`).
+## Outside DMs and configured channels
 
-With the Reply menu, only teapilot's answer and any approval buttons go to Discord; progress, queue notices and result lines go to the terminal running `teapilot discord start`.
+Operators and users can reach teapilot from any channel:
 
-Where the bot can post, it starts a thread on your prompt or on the selected message, and that thread is one session. Where it can't (no Send Messages permission, or the bot is not in the server at all), it answers through the interaction itself. That needs no channel permission, but it has limits:
+| Use | For |
+| --- | --- |
+| `/prompt` | Ask something, optionally choosing the `mode` and `reasoning` |
+| `/reply` | Ask something |
+| `/collab` | A conversation everyone in the channel shares |
+| Right-click a message → **Apps → Reply** | Have teapilot respond to that message |
 
-- **Each use is a one-shot conversation.** There are no threads and no follow-ups; run `/reply` again for the next question.
-- **It stops after 15 minutes,** when Discord expires the interaction. Pending approvals are denied.
-- **There is no typing indicator.**
+With the Reply menu, only the answer and approvals are posted; progress and results go to the terminal.
 
-For servers where the bot is not installed, enable **Installation → User Install** in the Developer Portal (and keep the *applications.commands* scope), then install the app to your account from its install link. Without it, `teapilot discord start` logs a registration warning and registers server-install commands only.
+Where the bot can post, it starts a thread, and that thread is one session. Otherwise it answers through the interaction, which has limits:
+
+- There are no threads. Run the command again to continue; teapilot remembers your conversation in that channel until you `/clear` it.
+- It stops after 15 minutes, when Discord expires the interaction. Pending approvals are denied.
+- There is no typing indicator.
+
+To use teapilot in servers without the bot, enable **Installation → User Install** in the Developer Portal, then install the app to your account from its install link.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| "Discord refused the Message Content intent" on start | Enable Message Content Intent (step 2) and retry. |
-| The bot gets messages but they arrive empty | Same as above. |
-| DMs get no reply | Check that you are an operator (`teapilot discord status`) or that an operator has let you in and that you share a server with the bot. |
-| Mentions in a channel get no reply | Check that the channel is in the list in `teapilot discord setup`. The bot also needs View Channel, Send Messages, Create Public Threads and Send Messages in Threads there. |
+| "Discord refused the Message Content intent", or messages arrive empty | Enable Message Content Intent (step 2). |
 | "Discord rejected the bot token" | Reset the token and rerun `teapilot discord setup`. |
+| DMs get no reply | Check that you are an operator or have been let in, and that you share a server with the bot. |
+| Mentions in a channel get no reply | Add the channel in `teapilot discord setup`. The bot needs View Channel, Send Messages, Create Public Threads and Send Messages in Threads. |
 
-Keeping it running: `teapilot discord start` is a normal foreground process. If you want it always on, run it under your own service manager.
+To keep teapilot always on, run `teapilot discord start` under your own service manager.
 
 [Back to README](../README.md)

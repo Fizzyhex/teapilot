@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Action, Effect, Embed, Participants, User, View } from '@teapilot/discord-play';
+import { interactionLifetimeMs } from '../commands.js';
 import { maxOutputChars, type CallInput, type ContextData, type PlayEngine } from './engine.js';
 import { describe, findControl, normalizeView, PlayError, renderEmbeds, renderModal, renderView, type MessagePayload, type ModalPayload } from './render.js';
 import { sandbox } from './sandbox.js';
@@ -14,6 +15,11 @@ export interface PlaySurface {
   /** Raw Discord REST, for trusted apps only. */
   request: DiscordRequest;
 }
+/**
+ * An app posted as the reply to an interaction, where teapilot cannot post in the channel. Discord lets that
+ * interaction edit it for 15 minutes; after that only a click on the app, which brings its own 15 minutes, can.
+ */
+export interface HostedMessage { id: string; edit(payload: MessagePayload): Promise<void> }
 /** One click, selection or form submission on an app's message. */
 export interface PlayInteraction {
   playId: string; controlId: string; kind: 'button' | 'select' | 'modal'; user: User;
@@ -32,7 +38,11 @@ export interface PlayInteraction {
 /** Asks the model on the app's behalf; resolves with the answer text. */
 export type Consultant = (play: { title: string; owner: User; channelId: string }, prompt: string) => Promise<string>;
 export type Source = PlayRecord['source'];
-export interface StartOptions { title: string; channelId: string; conversation: string; owner: User; source: Source; participants?: Participants; emojis?: Record<string, string> }
+export interface StartOptions {
+  title: string; channelId: string; conversation: string; owner: User; source: Source; participants?: Participants; emojis?: Record<string, string>;
+  /** Posts the app through an interaction instead of in the channel. */
+  post?: (payload: MessagePayload) => Promise<HostedMessage>;
+}
 export interface TestAction { kind: Action['kind']; id: string; user?: User; values?: string[]; fields?: Record<string, string>; text?: string; error?: string }
 /** Time for apps, timers and expiry; a simulator swaps it to skip ahead. `after` returns a cancel function. */
 export interface Clock { now(): number; after(ms: number, run: () => void): () => void }
@@ -54,6 +64,8 @@ interface Live {
   timers: Map<string, () => void>;
   consulting: boolean;
   chain: Promise<unknown>;
+  /** For an app posted through an interaction: the newest interaction that can still edit its message. */
+  reach?: { edit(payload: MessagePayload): Promise<void>; until: number };
 }
 interface Advance { state: unknown; seed: number; view: View; payload: MessagePayload; effects: Effect[]; timers: PlayRecord['timers']; finished?: { summary?: string } }
 
@@ -262,9 +274,23 @@ export class PlayRuntime {
       try {
         const { payload, notes } = await this.dispatch(live, action, label);
         if (notes.length) this.options.log(`play ${live.record.id}: ${notes.length} private note(s) from ${label} had no one to go to.`);
-        if (live.record.messageId) await this.options.surface.edit(live.record.channelId, live.record.messageId, payload);
+        await this.show(live, payload);
       } catch (error) { this.options.log(`play ${live.record.id}: ${label} failed: ${errorText(error)}`); }
     });
+  }
+
+  /** False only for an app posted through an interaction once nothing can edit its message any more. */
+  private reachable(live: Live): boolean {
+    return !live.record.viaInteraction || (live.reach !== undefined && live.reach.until > this.now());
+  }
+
+  /** Edits the app's message: in the channel, or through the newest interaction that still can. */
+  private async show(live: Live, payload: MessagePayload): Promise<void> {
+    const { record } = live;
+    if (!record.messageId) return;
+    if (!record.viaInteraction) return this.options.surface.edit(record.channelId, record.messageId, payload);
+    if (!this.reachable(live)) throw new Error('not shown yet: no one has used the app for 15 minutes, so its message changes only at the next click.');
+    await live.reach!.edit(payload);
   }
 
   private arm(live: Live): void {
@@ -274,6 +300,8 @@ export class PlayRuntime {
     for (const { id, dueAt } of live.record.timers) {
       live.timers.set(id, this.clock.after(Math.max(0, dueAt - this.now()), () => {
         live.timers.delete(id);
+        // Nobody would see the tick, so it waits in the record for the next click, which re-arms it.
+        if (!this.reachable(live)) return;
         live.record.timers = live.record.timers.filter(entry => entry.id !== id);
         void this.background(live, { kind: 'timer', id }, `timer ${id}`);
       }));
@@ -316,7 +344,7 @@ export class PlayRuntime {
     if (!record.messageId) return;
     let payload: MessagePayload;
     try { payload = renderView(record.id, record.view, true); } catch { payload = { content: '', embeds: [], components: [], allowedMentions: { parse: [] } }; }
-    await this.options.surface.edit(record.channelId, record.messageId, withNote(payload, note))
+    await this.show(live, withNote(payload, note))
       .catch(error => this.options.log(`play ${record.id}: could not update its message: ${errorText(error)}`));
   }
 
@@ -339,13 +367,18 @@ export class PlayRuntime {
         id: randomBytes(8).toString('hex').slice(0, 10), title: clip(options.title, 100), owner: options.owner, channelId: options.channelId, conversation: options.conversation,
         participants: 'everyone', source: options.source, state: null, seed: randomBytes(4).readUInt32LE(), view: {}, emojis: options.emojis ?? {},
         timers: [], consults: [], status: 'running', log: [], createdAt: now, updatedAt: now,
+        ...(options.post ? { viaInteraction: true } : {}),
       };
       const meta = (await engine.call('meta', { ctx: this.context(record) })).value as { participants?: unknown } | null;
       record.participants = checkParticipants(options.participants ?? meta?.participants ?? 'everyone');
       const step = await this.advance(engine, record);
       const notes = await this.probe(engine, record, step);
       const live: Live = { record, engine, timers: new Map(), consulting: false, chain: Promise.resolve() };
-      record.messageId = await this.options.surface.post(record.channelId, step.payload);
+      if (options.post) {
+        const posted = await options.post(step.payload);
+        record.messageId = posted.id;
+        live.reach = { edit: posted.edit, until: this.now() + interactionLifetimeMs };
+      } else record.messageId = await this.options.surface.post(record.channelId, step.payload);
       this.live.set(record.id, live);
       this.commit(live, step, 'start');
       return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
@@ -369,7 +402,9 @@ export class PlayRuntime {
         live.engine = engine;
         live.record = record;
         this.commit(live, step, reset ? 'restart' : 'update');
-        if (record.messageId) await this.options.surface.edit(record.channelId, record.messageId, step.payload);
+        // The change lands even where the message cannot show it yet; the next click does.
+        if (this.reachable(live)) await this.show(live, step.payload);
+        else notes.push('No one has used the app for 15 minutes, so Discord shows this change at the next click.');
         return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
       } catch (error) { if (live.engine !== engine) engine.dispose(); throw error; }
     });
@@ -440,6 +475,8 @@ export class PlayRuntime {
     const control = interaction.kind === 'button' ? findControl(record.view, interaction.controlId) : undefined;
     if (control?.type === 'button' && control.opens) { await interaction.openModal(renderModal(record.id, control.opens)); return; }
     await interaction.defer();
+    // Each click can edit the message for its own 15 minutes, which keeps an app posted through an interaction alive.
+    if (record.viaInteraction) live.reach = { edit: payload => interaction.update(payload), until: this.now() + interactionLifetimeMs };
     await this.serial(live, async () => {
       if (live.record.status !== 'running') { await interaction.followUp('This app has ended.'); return; }
       if (!current()) { await interaction.followUp('That control changed before your action arrived.'); return; }

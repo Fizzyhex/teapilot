@@ -187,6 +187,43 @@ it('fires timers, cancels them, and keeps them across a restart', async () => {
   expect(click.seen.updates[0]!.content).toBe('101 ');
 });
 
+it('runs an app posted through an interaction, and holds its timers while nothing can show them', async () => {
+  let now = 1_000_000;
+  const due: Array<{ at: number; run: () => void }> = [];
+  const clock: Clock = { now: () => now, after(ms, run) { const entry = { at: now + ms, run }; due.push(entry); return () => { if (due.includes(entry)) due.splice(due.indexOf(entry), 1); }; } };
+  const advance = (ms: number) => { now += ms; for (const entry of due.filter(item => item.at <= now)) { due.splice(due.indexOf(entry), 1); entry.run(); } };
+  const { runtime, surface, store } = await setup({ clock });
+  const hosted: MessagePayload[] = [];
+  const post = vi.fn(async (payload: MessagePayload) => { hosted.push(payload); return { id: 'reply-1', edit: async (next: MessagePayload) => { hosted.push(next); } }; });
+  const { record } = await runtime.start({ title: 'Counter', channelId: 'channel-1', conversation: 'reply:1', owner, source: { kind: 'sandbox', code: counter }, post });
+  expect(hosted[0]!.content).toBe('0 ');
+  expect(store.all()[0]).toMatchObject({ messageId: 'reply-1', viaInteraction: true });
+
+  // Within its 15 minutes, a click's own interaction shows what its timer does.
+  const first = act(record.id, 'soon');
+  await runtime.interact(first.interaction);
+  advance(2000);
+  await vi.waitFor(() => expect(first.seen.updates.at(-1)?.content).toBe('100 '));
+
+  // Once no interaction can edit the message, a due timer waits instead of changing what nobody sees.
+  const second = act(record.id, 'soon');
+  await runtime.interact(second.interaction);
+  advance(15 * 60_000);
+  expect(second.seen.updates).toHaveLength(1);
+  expect(store.all()[0]!.state).toMatchObject({ count: 100 });
+  expect(store.all()[0]!.timers).toHaveLength(1);
+  expect((await runtime.update(record.id, 'reply:1', undefined, false)).preview).toContain('shows this change at the next click');
+
+  // The next click brings a new interaction: its action shows, then the held timer runs.
+  const next = act(record.id, 'add');
+  await runtime.interact(next.interaction);
+  expect(next.seen.updates[0]!.content).toBe('101 ');
+  advance(0);
+  await vi.waitFor(() => expect(next.seen.updates.at(-1)?.content).toBe('201 '));
+  expect(surface.post).not.toHaveBeenCalled();
+  expect(surface.edit).not.toHaveBeenCalled();
+});
+
 it('asks the model through consult and caps it', async () => {
   const consult = vi.fn<Consultant>(async (_play, prompt) => `answer to ${prompt}`);
   const { runtime, edits } = await setup({ consult });

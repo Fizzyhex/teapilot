@@ -7,6 +7,7 @@ import type { SetupUI } from '../setup/terminal.js';
 import { route, routeReply } from './access.js';
 import { AccessStore } from './access-store.js';
 import { HistoryStore } from './history-store.js';
+import { SeatStore, type Seat } from './seat-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
 import { consultant } from './play/consult.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
@@ -79,10 +80,48 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   });
 
   /**
-   * `channelId` is where discord.play apps post; one-shot replies have none. `setup` only shapes a new
-   * conversation; access still starts from the configured mode, so a chosen Code mode asks for it when needed.
+   * Where teapilot cannot post, each /reply, /prompt or /collab is its own one-shot conversation, since it answers
+   * through that interaction. They continue a saved history: each person's own in a channel, so nobody sees or
+   * steers another's, or with /collab the one everyone there shares. `seats` records which one each person is in.
    */
-  const open = async (key: string, transport: DiscordTransport, channelId?: string, oneShot = false, setup: PromptSetup = {}): Promise<Conversation> => {
+  const historyKeyOf = (channelId: string, userId: string, seat: Seat) => seat === 'collab' ? `collab:${channelId}` : `reply:${channelId}:${userId}`;
+  const seats = SeatStore.at(stateDir);
+  /** The latest one-shot work per history; the next waits for it so neither overwrites the other's turns. */
+  const tails = new Map<string, Promise<void>>();
+  /** One-shot conversations still running, by history, so /stop can reach them. */
+  const runningOneShots = new Map<string, Conversation>();
+  const enqueue = (historyKey: string, task: () => Promise<void>): Promise<void> => {
+    const turn = (tails.get(historyKey) ?? Promise.resolve()).then(task);
+    const tail = turn.catch(() => undefined);
+    tails.set(historyKey, tail);
+    void tail.then(() => { if (tails.get(historyKey) === tail) tails.delete(historyKey); });
+    return turn;
+  };
+  /**
+   * Takes someone out of `seat` at once. Their own conversation's history goes once its running turn ends; a collab's
+   * stays for the others, and goes only when the last person has left.
+   */
+  const leave = (channelId: string, userId: string, seat: Seat): Promise<void> => {
+    seats.sit(channelId, userId, undefined);
+    const historyKey = historyKeyOf(channelId, userId, seat);
+    // Decided now: whoever joins after the last person left starts with a clean collab.
+    if (seat === 'collab' && seats.collaborators(channelId)) return Promise.resolve();
+    return enqueue(historyKey, async () => {
+      histories.save(historyKey, []);
+      seats.remember(historyKey, undefined);
+    });
+  };
+  const seatName = (seat: Seat) => seat === 'solo' ? 'your own conversation' : 'the collab';
+  const switchNote = (from: Seat) => from === 'solo'
+    ? 'You already have your own conversation with teapilot in this channel. Run /clear to end it before joining the collab, or switch here: your conversation and its history are cleared.'
+    : 'You are in this channel\'s collab. Run /clear to leave it before starting your own conversation, or switch here: the collab carries on for everyone else.';
+
+  /**
+   * `channelId` is where discord.play apps run; a one-shot posts them through its interaction. `setup` only shapes a new
+   * conversation; access still starts from the configured mode, so a chosen Code mode asks for it when needed.
+   * `historyKey` is where turns are kept, the conversation's own key unless a one-shot shares a history.
+   */
+  const open = async (key: string, transport: DiscordTransport, { channelId, oneShot = false, setup = {}, historyKey = key }: { channelId?: string; oneShot?: boolean; setup?: PromptSetup; historyKey?: string } = {}): Promise<Conversation> => {
     const existing = conversations.get(key);
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
@@ -91,13 +130,14 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
       once: oneShot,
       request: { prompt: '', cwd: root, mode: setup.mode ?? settings.startMode, tier: setup.tier, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
-        // A conversation picks up where it was before a restart; a one-shot reply has nothing to continue.
-        history: oneShot ? undefined : histories.load(key) },
-      onHistory: oneShot ? undefined : history => { try { histories.save(key, history); } catch (error) { log(`${key}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
+        // A conversation picks up where it was before a restart, or where the last one-shot in its history left off.
+        history: histories.load(historyKey) },
+      onHistory: history => { try { histories.save(historyKey, history); } catch (error) { log(`${historyKey}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
       maxPromptChars: config.policy.limits.maxPromptChars,
       run,
       extension: teachat && headlessTeachat(teachat, key),
-      play: { runtime: play, channelId: oneShot ? undefined : channelId },
+      // A one-shot posts apps through its interaction, and later one-shots in the same history manage them.
+      play: { runtime: play, conversation: historyKey, ...(!oneShot ? { channelId } : transport.postApp ? { channelId, post: payload => transport.postApp!(payload) } : {}) },
     });
     conversations.set(key, conversation);
     return conversation;
@@ -119,27 +159,81 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       key = `thread:${thread.id}`; transport = thread.transport; channelId = thread.id;
     } else transport = message.transport();
     log(`${key} @${message.authorName}: ${message.content.split('\n')[0]!.slice(0, 80)}`);
-    (await open(key, transport, channelId)).push(prompt, { sender: message.authorId, senderName: message.authorName });
+    (await open(key, transport, { channelId })).push(prompt, { sender: message.authorId, senderName: message.authorName });
   };
   const handleCommand = async (command: GatewayCommand): Promise<void> => {
     const target = route(command, settings, allowed);
-    if (!target) { await command.respond('You are not allowed to use teapilot here.'); return; }
-    const conversation = conversations.get(target.key);
-    if (!conversation?.active) { await command.respond('No active conversation here. Send a message to start one.'); return; }
-    log(`${target.key}: ${command.text}`);
-    conversation.push(command.text, { sender: command.authorId });
-    await command.respond();
+    const conversation = target && conversations.get(target.key);
+    if (target && conversation?.active) {
+      log(`${target.key}: ${command.text}`);
+      conversation.push(command.text, { sender: command.authorId });
+      await command.respond();
+      return;
+    }
+    if (command.authorIsBot || !allowed(command.authorId)) { await command.respond('You are not allowed to use teapilot here.'); return; }
+    // Nothing runs here, so /clear and /stop act on the conversation /reply, /prompt or /collab keeps for this person.
+    const seat = seats.seat(command.channelId, command.authorId);
+    if (command.text === '/exit' && seat) {
+      void leave(command.channelId, command.authorId, seat).catch(failed('Clearing'));
+      log(`${historyKeyOf(command.channelId, command.authorId, seat)}: ${command.authorId} cleared ${seat}`);
+      await command.respond(seat === 'solo' ? 'Ended your conversation here and cleared its history.'
+        : seats.collaborators(command.channelId) ? 'Left the collab. Its history stays for everyone still in it.' : 'Left the collab. You were the last one in it, so its history was cleared.');
+      return;
+    }
+    if (command.text === '/exit' && target?.key) {
+      // A conversation that is not running, such as one from before a restart, still has saved history to clear.
+      histories.save(target.key, []);
+      await command.respond('Cleared this conversation\'s history.');
+      return;
+    }
+    if (command.text === '/stop' && seat) {
+      const turn = runningOneShots.get(historyKeyOf(command.channelId, command.authorId, seat));
+      if (!turn?.active) { await command.respond('Nothing is running.'); return; }
+      turn.push('/stop', { sender: command.authorId });
+      await command.respond();
+      return;
+    }
+    await command.respond(target ? 'No active conversation here. Send a message to start one.' : 'You are not in a conversation with teapilot here.');
   };
   const handleReply = async (reply: GatewayReply): Promise<void> => {
     const target = routeReply(reply, settings, allowed);
     if (!target) { await reply.respond('You are not allowed to use teapilot here.'); return; }
     if (!reply.content) { await reply.respond('teapilot reads text messages only.'); return; }
+    if (reply.oneShot) {
+      const seat: Seat = reply.collab ? 'collab' : 'solo';
+      const current = seats.seat(reply.channelId, reply.authorId);
+      let transport: DiscordTransport;
+      if (current && current !== seat) {
+        // Nobody is in both: offer to leave the current conversation, then send the prompt where it was meant to go.
+        const click = await reply.choose(switchNote(current), [current === 'solo' ? 'Clear it and join the collab' : 'Leave the collab', 'Stay']);
+        if (!click) return;
+        if (click.choice !== 0) { await click.settle(`You stayed in ${seatName(current)}. Your prompt was not sent.`); return; }
+        void leave(reply.channelId, reply.authorId, current).catch(failed('Switching'));
+        await click.settle(`You left ${seatName(current)}. Your prompt goes to ${seatName(seat)}.`).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
+        transport = click.transport();
+      } else {
+        await reply.respond();
+        transport = reply.transport();
+      }
+      seats.sit(reply.channelId, reply.authorId, seat);
+      const historyKey = historyKeyOf(reply.channelId, reply.authorId, seat);
+      const setup = seats.remember(historyKey, reply.setup);
+      const key = `reply:${reply.id}`;
+      log(`${historyKey} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
+      await enqueue(historyKey, async () => {
+        // A one-shot stops after one input, so the chosen mode and tier go in when it opens rather than as commands.
+        const conversation = await open(key, transport, { channelId: reply.channelId, oneShot: true, setup, historyKey });
+        runningOneShots.set(historyKey, conversation);
+        conversation.push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
+        try { await conversation.done; }
+        finally { conversations.delete(key); if (runningOneShots.get(historyKey) === conversation) runningOneShots.delete(historyKey); }
+      });
+      return;
+    }
     let key = target.key;
     let channelId = reply.channelId;
     let transport: DiscordTransport;
-    if (reply.oneShot) {
-      key = `reply:${reply.id}`; transport = reply.transport();
-    } else if (target.kind === 'new-thread') {
+    if (target.kind === 'new-thread') {
       try {
         const thread = await reply.startThread(reply.title);
         key = `thread:${thread.id}`; transport = thread.transport; channelId = thread.id;
@@ -151,9 +245,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     await reply.respond();
     log(`${key} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
     // A new conversation starts with the chosen mode and tier; one already running switches to them first.
-    // Queuing commands would end a one-shot conversation before the prompt, since it stops after one input.
     const running = conversations.get(key)?.active;
-    const conversation = await open(key, transport, channelId, reply.oneShot, reply.setup);
+    const conversation = await open(key, transport, { channelId, setup: reply.setup });
     if (running) for (const command of setupCommands(reply.setup)) conversation.push(command, { sender: reply.authorId, senderName: reply.authorName });
     conversation.push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
   };

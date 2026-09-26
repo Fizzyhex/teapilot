@@ -8,6 +8,8 @@ const user = z.object({ id: z.string(), name: z.string().optional() });
 const recordSchema = z.object({
   id: z.string().regex(/^[a-z0-9]{1,16}$/), title: z.string(),
   owner: user, channelId: z.string(), messageId: z.string().optional(), conversation: z.string(),
+  /** Posted as the reply to an interaction, where teapilot cannot post in the channel; edited through interactions only. */
+  viaInteraction: z.boolean().optional(),
   participants: z.union([z.literal('everyone'), z.literal('invoker'), z.array(z.string())]),
   source: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('sandbox'), code: z.string() }),

@@ -46,3 +46,13 @@ it('maps /prompt mode and reasoning to a starting mode and tier', () => {
   expect(setupCommands({ mode: 'code', tier: 'deep' })).toEqual(['/mode code', '/tier deep']);
   expect(setupCommands({})).toEqual([]);
 });
+
+it('offers /collab with /prompt\'s options, and /clear in place of /new and /exit', () => {
+  const find = (name: string) => commandDefinitions.find(command => command.name === name) as Extract<typeof commandDefinitions[number], { options?: unknown }> | undefined;
+  expect(find('collab')?.options).toEqual(find('prompt')?.options);
+  expect(commandText('collab', null, 'hello')).toBeUndefined();
+  expect(commandText('clear')).toBe('/exit');
+  expect(find('new')).toBeUndefined();
+  expect(find('exit')).toBeUndefined();
+  for (const name of ['collab', 'clear', 'stop']) expect(find(name)).toMatchObject({ integration_types: [0, 1], contexts: [0, 1, 2] });
+});

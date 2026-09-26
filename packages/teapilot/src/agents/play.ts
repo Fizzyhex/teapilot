@@ -5,13 +5,15 @@ import type { User } from '@teapilot/discord-play';
 import type { Config } from '../config.js';
 import type { Approve, ExecutionPolicy } from '../execution/policy.js';
 import { PlayError } from '../discord/play/render.js';
-import { hashFile, type PlayRuntime, type Source, type TestAction } from '../discord/play/runtime.js';
+import { hashFile, type PlayRuntime, type Source, type StartOptions, type TestAction } from '../discord/play/runtime.js';
 
 /** The Discord conversation a request comes from; the host builds this, never the model. */
 export interface PlayContext {
   runtime: PlayRuntime;
-  /** Undefined where teapilot answers through a short-lived interaction and cannot keep a message alive. */
+  /** Where apps run; undefined where there is nowhere to post them. */
   channelId?: string;
+  /** Set where teapilot answers through an interaction and cannot post in the channel: apps post through it instead. */
+  post?: StartOptions['post'];
   conversation: string;
   owner?: User;
 }
@@ -117,11 +119,11 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
       }),
       execute: async (_id, params, signal) => attempt(async () => {
         const args = params as { title: string; source?: string; path?: string; trusted?: boolean; participants?: string | string[]; emojis?: Record<string, string> };
-        if (!context.channelId) return 'Apps cannot run here: teapilot is answering through a short-lived interaction. Ask the user to message teapilot in a channel or DM it can post in.';
+        if (!context.channelId) return 'Apps cannot run here: teapilot has nowhere to post them. Ask the user to message teapilot in a channel or DM it can post in.';
         const source = await resolve(args, signal);
         if (typeof source === 'string') return source;
         const emojis = Object.fromEntries(Object.entries(args.emojis ?? {}).filter(([, value]) => /^<a?:\w{2,32}:\d{17,20}>$/.test(value)));
-        const { record, preview } = await context.runtime.start({ title: args.title, channelId: context.channelId, conversation: context.conversation, owner, source, participants: keyword(args.participants) as never, emojis });
+        const { record, preview } = await context.runtime.start({ title: args.title, channelId: context.channelId, post: context.post, conversation: context.conversation, owner, source, participants: keyword(args.participants) as never, emojis });
         tests = 0;
         return `Started app ${record.id} (${record.participants === 'everyone' ? 'anyone can play' : `participants: ${JSON.stringify(record.participants)}`}). It is live in the channel; do not repeat its contents in your answer.\nPreview:\n${preview}`;
       }),

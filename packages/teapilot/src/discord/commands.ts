@@ -19,6 +19,10 @@ export const interactionLifetimeMs = 14 * 60_000;
 /** Commands that start or continue a conversation instead of controlling one; the gateway handles them itself. */
 export const replyCommand = 'reply';
 export const promptCommand = 'prompt';
+/** Like /prompt, but where teapilot answers through the interaction, everyone in the channel shares one history. */
+export const collabCommand = 'collab';
+/** Ends the conversation and its history: the session's /exit, or leaving a collab. */
+export const clearCommand = 'clear';
 export const replyMenu = 'Reply';
 
 const value = (description: string, values: readonly string[]): Option =>
@@ -27,6 +31,12 @@ const optional = (name: string, description: string, values: readonly string[]):
   ({ type: 3, name, description, required: false, choices: values.map(item => ({ name: item, value: item })) });
 const choice = (name: string, description: string, values: readonly string[]): CommandDefinition =>
   ({ name, description, options: [value(description, values)] });
+/** /prompt and /collab take the same options. */
+const promptOptions: Option[] = [
+  { type: 3, name: 'prompt', description: 'What to ask teapilot', required: true },
+  optional('mode', 'Session mode for this and later turns', modes),
+  optional('reasoning', 'Reasoning effort for this and later turns', reasoningLevels),
+];
 const subcommand = (name: string, description: string, options?: Option[]) => ({ type: 1 as const, name, description, ...(options ? { options } : {}) });
 
 /** These mirror the session commands the bridge already understands; /cd is fixed for Discord. */
@@ -46,19 +56,12 @@ export const commandDefinitions: CommandDefinition[] = [
     options: [{ type: 3, name: 'message', description: 'What to ask teapilot', required: true }],
     ...everywhere,
   },
-  {
-    name: promptCommand, description: 'Talk to teapilot with a chosen mode and reasoning',
-    options: [
-      { type: 3, name: 'prompt', description: 'What to ask teapilot', required: true },
-      optional('mode', 'Session mode for this and later turns', modes),
-      optional('reasoning', 'Reasoning effort for this and later turns', reasoningLevels),
-    ],
-    ...everywhere,
-  },
+  { name: promptCommand, description: 'Talk to teapilot with a chosen mode and reasoning', options: promptOptions, ...everywhere },
+  { name: collabCommand, description: 'Talk to teapilot in a conversation everyone here shares', options: promptOptions, ...everywhere },
   { type: 3, name: replyMenu, ...everywhere },
-  { name: 'new', description: 'Start a new task with a clean history' },
-  { name: 'stop', description: 'Cancel the running turn' },
-  { name: 'exit', description: 'End this conversation' },
+  // Also where teapilot is not invited, where they act on the conversation /reply, /prompt or /collab keeps there.
+  { name: clearCommand, description: 'End your conversation here and clear its history', ...everywhere },
+  { name: 'stop', description: 'Cancel the running turn', ...everywhere },
   { name: 'help', description: 'Show teapilot commands' },
 ];
 
@@ -69,15 +72,16 @@ export const withoutUserInstall = (definitions: CommandDefinition[]): CommandDef
 /** The session text equivalent to an invocation, or undefined for anything teapilot does not define. */
 export function commandText(name: string, subcommandName?: string | null, argument?: string | null): string | undefined {
   const definition = commandDefinitions.find(candidate => candidate.name === name);
-  if (!definition || !('description' in definition) || name === replyCommand || name === promptCommand) return undefined;
+  if (!definition || !('description' in definition) || [replyCommand, promptCommand, collabCommand].includes(name)) return undefined;
   if (name === 'permissions') {
     if (subcommandName === 'list') return '/permissions';
     return (subcommandName === 'grant' || subcommandName === 'revoke') && argument ? `/${subcommandName} ${argument}` : undefined;
   }
+  if (name === clearCommand) return '/exit';
   return definition.options ? (argument ? `/${name} ${argument}` : undefined) : `/${name}`;
 }
 
-/** The mode and tier /prompt asks for; either is left out when not chosen or not recognised. */
+/** The mode and tier /prompt or /collab asks for; either is left out when not chosen or not recognised. */
 export interface PromptSetup { mode?: Mode; tier?: TierPreference }
 
 export function promptSetup(mode?: string | null, reasoning?: string | null): PromptSetup {

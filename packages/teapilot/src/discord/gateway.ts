@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
+import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { DiscordTransport } from './bridge.js';
-import { commandDefinitions, commandText, interactionLifetimeMs, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
+import { collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
 import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
@@ -43,9 +43,25 @@ export interface GatewayReply extends Omit<GatewayMessage, 'replyChain'> {
   oneShot: boolean;
   /** From the Reply menu: only teapilot's answer (and approval buttons) go to Discord; the rest is logged in the terminal. */
   answerOnly: boolean;
-  /** The mode and tier chosen with /prompt, applied before `content`. */
+  /** The mode and tier chosen with /prompt or /collab, applied before `content`. */
   setup: PromptSetup;
+  /** From /collab: where the answer comes through the interaction, everyone in the channel shares the conversation. */
+  collab: boolean;
   respond(text?: string): Promise<void>;
+  /**
+   * Instead of `respond()`: a private note with a button per label, the first one primary. Resolves with the
+   * invoker's click, or undefined once the interaction expires.
+   */
+  choose(note: string, labels: string[]): Promise<GatewayChoice | undefined>;
+}
+/** A button pressed on a `choose()` note; its interaction carries whatever follows. */
+export interface GatewayChoice {
+  /** Index of the pressed label. */
+  choice: number;
+  /** Replaces the note, and removes its buttons. */
+  settle(note: string): Promise<void>;
+  /** Posts publicly as follow-ups to the click, for 15 minutes. */
+  transport(): DiscordTransport;
 }
 export interface GatewayHandlers {
   message(message: GatewayMessage): void;
@@ -64,6 +80,8 @@ export interface Gateway {
 }
 
 const noop = () => undefined;
+/** Custom id prefix of `choose()` buttons: `teapilot-choice:<nonce>:<index>`. */
+const choicePrefix = 'teapilot-choice:';
 const quiet = { allowedMentions: { parse: [] as [] } };
 /** discord.play renders Discord API JSON, which discord.js accepts in place of its builders. */
 const raw = (payload: MessagePayload) => payload as unknown as BaseMessageOptions & { content: string };
@@ -115,22 +133,28 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
    * Where the bot cannot post, answer through the interaction webhook, which needs no channel permission.
    * Discord keeps that webhook valid for 15 minutes, and there is no typing indicator or thread.
    */
-  const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction): DiscordTransport => {
+  const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction): DiscordTransport => {
     const expires = Date.now() + interactionLifetimeMs;
-    let first = true;
+    // A click has no deferred message of its own: its reply is the note it was pressed on, so everything is a follow-up.
+    let first = !interaction.isButton();
     const live = () => { if (Date.now() > expires) throw new Error('This Discord interaction expired after 15 minutes. Run /reply again.'); };
-    const post = async (payload: Payload) => {
+    const post = async (payload: BaseMessageOptions) => {
       live();
       // The deferred "thinking" message becomes the first message; later ones are follow-ups.
       if (first) { first = false; return await interaction.editReply(payload); }
       return await interaction.followUp(payload);
     };
-    const revise = async (id: string, payload: Partial<Payload>) => { live(); await interaction.webhook.editMessage(id, payload); };
+    const revise = async (id: string, payload: BaseMessageOptions) => { live(); await interaction.webhook.editMessage(id, payload); };
     return {
       async send(text) { return (await post({ content: text, components: [], ...quiet })).id; },
       edit: (id, text) => revise(id, { content: text, ...quiet }),
       typing: noop,
       askApproval: (text, signal) => askApproval(text, signal, post, revise),
+      // The runtime stops editing through this interaction once it expires, and uses the app's clicks after that.
+      async postApp(payload) {
+        const message = await post(raw(payload));
+        return { id: message.id, edit: next => revise(message.id, raw(next)) };
+      },
     };
   };
 
@@ -144,6 +168,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
    * keeps it only in the channel's cache, which does not exist where teapilot cannot view the channel.
    */
   const interactionReplies = new Map<string, RawMessage>();
+  /** Open `choose()` notes by nonce: who may press them, and what the press resolves. */
+  const choices = new Map<string, { userId: string; resolve(click: GatewayChoice | undefined): void }>();
 
   /**
    * The messages `message` replies to, oldest first, for mentions and the Reply menu. Discord drops an
@@ -202,8 +228,27 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       const created = await start();
       return { id: created.id, transport: transport(created) };
     };
+    const choose = async (note: string, labels: string[]): Promise<GatewayChoice | undefined> => {
+      if (answered) throw new Error('This interaction was already answered.');
+      answered = true;
+      const nonce = randomUUID();
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(labels.map((label, index) =>
+        new ButtonBuilder().setCustomId(`${choicePrefix}${nonce}:${index}`).setLabel(label).setStyle(index ? ButtonStyle.Secondary : ButtonStyle.Primary)));
+      await interaction.reply({ content: note, components: [row], flags: MessageFlags.Ephemeral, ...quiet });
+      return new Promise(resolve => {
+        const timer = setTimeout(() => {
+          if (!choices.delete(nonce)) return;
+          void interaction.editReply({ content: `${note}
+
+-# Expired.`.slice(0, MESSAGE_LIMIT), components: [] }).catch(noop);
+          resolve(undefined);
+        }, interactionLifetimeMs);
+        choices.set(nonce, { userId: interaction.user.id, resolve: click => { clearTimeout(timer); resolve(click); } });
+      });
+    };
     const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
-    const isPrompt = interaction.isChatInputCommand() && interaction.commandName === promptCommand;
+    const collab = interaction.isChatInputCommand() && interaction.commandName === collabCommand;
+    const isPrompt = interaction.isChatInputCommand() && (interaction.commandName === promptCommand || collab);
     const text = interaction.isChatInputCommand() ? interaction.options.getString(isPrompt ? 'prompt' : 'message', true).trim() : strip(target?.content ?? '', self.id);
     const setup = interaction.isChatInputCommand() && isPrompt ? promptSetup(interaction.options.getString('mode'), interaction.options.getString('reasoning')) : {};
     const repliedTo = interactionReplies.get(interaction.id);
@@ -224,6 +269,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       oneShot,
       answerOnly: !!target,
       setup,
+      collab,
       transport: () => channel && !oneShot ? transport(channel) : interactionTransport(interaction),
       startThread: name => spawn(async () => {
         const options = { name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay };
@@ -236,6 +282,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         return await message.startThread(options);
       }),
       respond: note => respond(note).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`)),
+      choose,
     });
   };
 
@@ -249,7 +296,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   client.on(Events.InteractionCreate, async interaction => {
     // Only the Reply menu reads this; drop it for every other interaction so the map stays empty.
     if (!(interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu)) interactionReplies.delete(interaction.id);
-    if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && (interaction.commandName === replyCommand || interaction.commandName === promptCommand)) {
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && [replyCommand, promptCommand, collabCommand].includes(interaction.commandName)) {
       const self = client.user;
       if (self && (interaction.isMessageContextMenuCommand() || interaction.isChatInputCommand())) await reply(interaction, self).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
       return;
@@ -295,6 +342,21 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       return;
     }
     if (!interaction.isButton()) return;
+    if (interaction.customId.startsWith(choicePrefix)) {
+      const [nonce, index] = interaction.customId.slice(choicePrefix.length).split(':');
+      const entry = choices.get(nonce ?? '');
+      if (!entry) { await interaction.reply({ content: 'This choice is no longer open.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+      if (entry.userId !== interaction.user.id) { await interaction.reply({ content: 'This choice is not yours.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+      choices.delete(nonce!);
+      // Acknowledge at once: whatever the choice leads to may take longer than Discord's 3 seconds.
+      await interaction.deferUpdate().catch(noop);
+      entry.resolve({
+        choice: Number(index),
+        settle: async note => { await interaction.editReply({ content: note, components: [] }); },
+        transport: () => interactionTransport(interaction),
+      });
+      return;
+    }
     const [prefix, nonce, verdict] = interaction.customId.split(':');
     if (prefix !== 'teapilot' || !nonce) return;
     if (!settings.allowedUserIds.includes(interaction.user.id)) {
@@ -373,6 +435,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     async close() {
       for (const entry of pending.values()) entry.resolve(false);
       pending.clear();
+      for (const entry of choices.values()) entry.resolve(undefined);
+      choices.clear();
       await client.destroy();
     },
   };

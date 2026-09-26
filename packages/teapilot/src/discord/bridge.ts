@@ -3,7 +3,8 @@ import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
-import type { PlayRuntime } from './play/runtime.js';
+import type { MessagePayload } from './play/render.js';
+import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
 import { chunk, ProgressLine, throttle } from './render.js';
 
 /** Everything the bridge needs from Discord for one conversation (a DM or a thread). */
@@ -13,6 +14,8 @@ export interface DiscordTransport {
   /** Post approve/deny buttons. Resolves false when `signal` aborts first. */
   askApproval(text: string, signal: AbortSignal): Promise<boolean>;
   typing(): void;
+  /** Where teapilot answers through an interaction: posts a discord.play app as a reply to it. */
+  postApp?(payload: MessagePayload): Promise<HostedMessage>;
 }
 
 /** runHost holds the state lock, so turns from every conversation run one at a time. */
@@ -49,11 +52,14 @@ export interface ConversationOptions {
   extension?: SessionExtension;
   /** Receives the conversation's turns after each change, so they survive a restart. */
   onHistory?: (history: ConversationTurn[]) => void;
-  /** discord.play apps; `channelId` is where they post, absent where teapilot cannot keep a message alive. */
-  play?: { runtime: PlayRuntime; channelId?: string };
+  /**
+   * discord.play apps; `channelId` is where they run, absent where they cannot be posted, and `post` posts them
+   * through an interaction instead. `conversation` manages them, by default this conversation's key.
+   */
+  play?: { runtime: PlayRuntime; channelId?: string; post?: StartOptions['post']; conversation?: string };
 }
 
-const discordHelp = 'Discord: /stop cancels the running turn; /exit ends this conversation. The repository root is fixed; change it with teapilot discord setup.';
+const discordHelp = 'Discord: /stop cancels the running turn; /clear ends this conversation and clears its history. The repository root is fixed; change it with teapilot discord setup.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
@@ -76,6 +82,8 @@ export class Conversation {
   push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string } = {}): void {
     // Only the next turn is answer-only, and only if nothing is running to change mid-turn.
     if (options.answerOnly && !this.turn) this.answerOnly = true;
+    // Discord's /clear is the session's /exit: the conversation ends and its history goes with it.
+    if (text.trim() === '/clear') text = '/exit';
     const trimmed = text.trim();
     const [command] = trimmed.split(/\s+/);
     if (command === '/stop') {
@@ -133,7 +141,7 @@ export class Conversation {
     base.authorization?.setCaller(access ? this.speaker ? access.callerFor(this.speaker) : () => ({ permissions: [] }) : undefined);
     const { play } = this.options;
     const request: HostRequest = { ...base, access: admin,
-      play: play && { runtime: play.runtime, channelId: play.channelId, conversation: this.options.key, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined } };
+      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation: play.conversation ?? this.options.key, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined } };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
     const progress = new ProgressLine(this.options.redact);
