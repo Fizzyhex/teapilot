@@ -15,6 +15,7 @@ import { Evidence, type EscalationReason } from '../routing/escalation.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
+import { casualPrompt } from './casual.js';
 import { coder } from './coder.js';
 import { fitHistory, turnSteps } from './history.js';
 import { files } from './files.js';
@@ -27,7 +28,10 @@ export interface AttemptInput {
   history?: ConversationTurn[]; onEvent?: EventSink; onActivity?: ActivitySink; beforeMutation?: BeforeMutation;
   /** The model's reasoning as it streams, redacted; only callers that show it ask for it. */
   onReasoning?: (text: string) => void;
-  mode?: Mode; conversational?: boolean; authorization?: import('../execution/grants.js').SessionGrants;
+  mode?: Mode; conversational?: boolean;
+  /** Conversational mode: the casual prompt and no tools; see routing/intent.ts. */
+  casual?: boolean;
+  authorization?: import('../execution/grants.js').SessionGrants;
   activePermissions?: Permission[];
   /** Set only for a Discord sender with a role; drives the access-management tools. */
   access?: AccessAdmin;
@@ -90,6 +94,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // of it in tokens, so the attempt keeps room to reason and answer.
   const reader = input.webController && { controller: input.webController, maxChars: Math.min(12_000, Math.floor(profile.contextTokens * 0.35)), budget: { remaining: profile.contextTokens } };
   const compose = async () => {
+    if (input.casual) return { systemPrompt: casualPrompt(), tools: [] as AgentTool[] };
     const repository = effectiveConfig.policy.permissions.includes('repository.read');
     if (repository && !repositorySetup) {
       input.onAgenticWork?.();
@@ -132,7 +137,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     setup.tools.push(...controlTools);
     return setup;
   };
-  if (model.toolCalling) controlTools.push({
+  if (model.toolCalling && !input.casual) controlTools.push({
     name: 'request_escalation', label: 'Request escalation',
     description: 'Stop this attempt when concrete uncertainty or unsupported capability prevents progress. The host decides whether escalation is allowed.',
     parameters: Type.Object({ reason: Type.Union([Type.Literal('uncertainty'), Type.Literal('unsupported')]) }),
@@ -144,7 +149,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let toolsChanged = false;
   // discord.play means nothing outside Discord, so only Discord conversations can ask for it.
   const requestable: Permission[] = ['repository.read', 'repository.write', 'repository.shell', 'web.search', ...(input.play ? ['discord.play' as const] : [])];
-  if (input.requestCapabilities && model.toolCalling) controlTools.push({
+  if (input.requestCapabilities && model.toolCalling && !input.casual) controlTools.push({
     name: 'request_capabilities', label: 'Request access',
     description: `Request narrowly scoped host-granted access when the user request requires repository reading, editing, shell commands, or live web research${input.play ? ', or interactive Discord apps (discord.play)' : ''}.`,
     parameters: Type.Object({ permissions: Type.Array(Type.Union(requestable.map(permission => Type.Literal(permission))), { minItems: 1, maxItems: requestable.length }) }),
@@ -169,7 +174,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       return { content: [{ type: 'text', text: `Active access: ${effectiveConfig.policy.permissions.join(', ')}. Continue with the tools provided on the next turn.` }], details: {} };
     },
   });
-  if (input.access && model.toolCalling) controlTools.push(...accessTools(input.access, input.approve, input.prompt));
+  if (input.access && model.toolCalling && !input.casual) controlTools.push(...accessTools(input.access, input.approve, input.prompt));
   const setup = await compose();
   if (!model.toolCalling && setup.tools.length) throw new Error('Selected model cannot use the required tools');
   // Earlier turns get at most half of what the instructions, tools and request leave, so this turn's own

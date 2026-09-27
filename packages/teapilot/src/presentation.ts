@@ -96,6 +96,8 @@ export function certainRows(text: string, columns: number): number | undefined {
 export class TerminalPresentation implements ActivityUI {
   private readonly colour = terminalColour(process.stderr.isTTY && process.stdout.isTTY);
   private readonly stream = Boolean(process.stdout.isTTY && process.stderr.isTTY && process.env.TERM !== 'dumb');
+  /** A conversational reply is not streamed: it is shown a line at a time once it is complete. */
+  private casual = false;
   private readonly markdown = new MarkdownOutput(text => this.output(text), terminalColour(process.stdout.isTTY));
   private readonly playback = new Playback(() => this.draw());
   private current?: Activity;
@@ -282,7 +284,7 @@ export class TerminalPresentation implements ActivityUI {
       this.scopes = this.scopes.filter(item => item !== scope); this.update();
     };
   };
-  start(): void { this.setActivity({ kind: 'waiting', label: 'Preparing request...' }); }
+  start(): void { this.casual = false; this.setActivity({ kind: 'waiting', label: 'Preparing request...' }); }
   pause(): void { this.base = undefined; this.scopes = []; this.current = undefined; this.clipKind = undefined; this.collapse(); }
   suspend = (): (() => void) => {
     this.collapse(); this.suspended++;
@@ -409,7 +411,7 @@ export class TerminalPresentation implements ActivityUI {
   event(event: HostEvent): void {
     if (this.json) return;
     if (event.type === 'text' && typeof event.text === 'string') {
-      if (!this.stream) return;
+      if (!this.stream || this.casual) return;
       this.clear();
       if (!this.messageOpen) {
         const clips = this.eligible() ? loadClips() : undefined;
@@ -430,7 +432,8 @@ export class TerminalPresentation implements ActivityUI {
       }
       if (this.literal) this.output(event.text);
       else { this.markdown.push(event.text); this.showPreview(); this.draw(); }
-    } else if (event.type === 'message_end') { this.clear(); this.endMessage(); this.draw(); }
+    } else if (event.type === 'route') this.casual = event.casual === true;
+    else if (event.type === 'message_end') { this.clear(); this.endMessage(); this.draw(); }
     else if (event.type === 'tool_execution_start') this.setActivity({ kind: 'waiting', label: `Running ${String(event.tool)}...` });
     else if (event.type === 'tool_execution_end') this.write(`${paint(describeTool(event), '2', this.colour)}\n`);
     else if (event.type === 'request_end' || event.type === 'request_error') this.pause();
@@ -445,7 +448,7 @@ export class TerminalPresentation implements ActivityUI {
   }
   answer(text: string): void {
     this.pause(); this.endMessage();
-    if (this.stream && text === this.lastMessage) return;
+    if (this.stream && !this.casual && text === this.lastMessage) return;
     this.markdown.push(text); this.markdown.finish();
     if (!text.endsWith('\n')) process.stdout.write('\n');
   }

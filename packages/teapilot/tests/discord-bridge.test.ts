@@ -35,7 +35,7 @@ const finished = (cards: Array<{ text: string }>) => vi.waitFor(() => expect(car
 function conversation(overrides: Partial<ConversationOptions> & Pick<ConversationOptions, 'transport'>) {
   const controller = new AbortController();
   const chat = new Conversation({
-    key: 'dm:test', queue: new TurnQueue(), maxPromptChars: 20_000, log: vi.fn(),
+    key: 'dm:test', queue: new TurnQueue(), maxPromptChars: 20_000, log: vi.fn(), cardDelayMs: 0,
     redact: text => text.replaceAll('secret-token', '[REDACTED]'),
     request: { prompt: '', cwd: '.', mode: 'ask', signal: controller.signal },
     run: vi.fn(async () => result),

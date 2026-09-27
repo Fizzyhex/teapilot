@@ -21,7 +21,7 @@ teapilot has a minimalist philosophy for system prompts - much like `pi.dev`.
 
 At the end, write your report to `feedback/finetuning-reports/yyyy-mm-dd-finetune-<index>.md`
 
-YOU ARE ALLOWED TO IMPROVE TEAPILOT IN GENERIC WAYS. THIS MAY INCLUDE INTRODUCING NEW SKILLS, FINE TUNING OR EXPANDING CAPABILITIES.
+YOU ARE ALLOWED TO IMPROVE TEAPILOT IN GENERIC WAYS, AND ARE ENCOURAGED TO DO SO AFTER EACH RUN. THIS MAY INCLUDE INTRODUCING NEW SKILLS, FINE TUNING OR EXPANDING CAPABILITIES.
 ```
 
 ## Verifying a case
@@ -36,12 +36,13 @@ Don't judge a case by teapilot's reply alone. Check the app itself:
 - Survival: `restart <name>` mid-game should leave the app working.
 - Files: attach with `say <name> "..." --attach path`. Open the path on each `📎` line to check what teapilot sent or an app shows (images can be viewed directly), not only its name.
 
-## Special Challenge Cases (Ultra/Image)
+## Special Challenge Cases (Ultra/File/Conversation)
 
 If you're specifically asked to attempt challenge cases, do the cases at one of the following directories, NOT the ones listed in this document.
 
 - `ultra challenges` -> `./ultra-challenges.md`
 - `file challenges` -> `./file-challenges.md`
+- `conversation challenges` -> `./conversation-challenges.md`
 
 ## Case 1: Snake Game
 
