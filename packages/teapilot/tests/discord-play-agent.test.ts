@@ -142,6 +142,22 @@ it('returns app mistakes as results to fix, not tool failures', async () => {
   expect(f.posts).toEqual([]);
 });
 
+it('resends the newest app shown in the channel, even one another conversation started', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => {
+    bodies.push(body);
+    completion(res, bodies.length === 1 ? { tool: { name: 'play_resend', arguments: {} } } : { text: 'Here it is again.' });
+  });
+  const { record } = await f.runtime.start({ title: 'Counter', channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' }, source: { kind: 'sandbox', code: source } });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'resend the game, it got buried', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:2', owner: { id: '222222222222222222' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(names(bodies[0])).toContain('play_resend');
+  expect(JSON.stringify(bodies[0].messages)).toContain(`Running here: ${record.id}`);
+  expect(JSON.stringify(bodies[1].messages)).toContain(`Resent app ${record.id}.`);
+  expect(f.posts).toEqual(['Count 0', 'Count 0']);
+});
+
 it('refuses apps where teapilot has nowhere to post them', async () => {
   const bodies: any[] = [];
   const f = await setup((body, _req, res) => {

@@ -88,9 +88,20 @@ export class TeachatService {
     await this.refreshRoster().catch(() => {});
   }
 
+  /**
+   * Claims an identity for the conversation. When every one is held, it takes the one renewed longest ago: names
+   * belong to whoever is gossiping, and the conversation that loses one picks another when its renewal fails.
+   */
   private async assign(session: Session, request: string, answer?: TeachatIdentityAnswer, decider?: Decider, signal?: AbortSignal): Promise<void> {
-    const pick = await pickIdentity({ decider, request, identities: await this.room.identities(), holder: session.holder, answer, signal });
-    if (pick && await this.room.claim(pick.username, session.holder, LEASE_MS)) session.identity = pick.username;
+    const identities = await this.room.identities();
+    const pick = await pickIdentity({ decider, request, identities, holder: session.holder, answer, signal });
+    const stalest = identities.filter(identity => identity.lease && identity.lease.holder !== session.holder)
+      .sort((a, b) => Date.parse(a.lease!.until) - Date.parse(b.lease!.until))[0];
+    const claimed = pick ? await this.room.claim(pick.username, session.holder, LEASE_MS)
+      : !!stalest && await this.room.claim(stalest.username, session.holder, LEASE_MS, { takeover: true });
+    if (!claimed) return;
+    session.identity = pick?.username ?? stalest!.username;
+    session.announced = false;
   }
 
   pending(key?: string): boolean {
@@ -198,10 +209,10 @@ export class TeachatService {
       if (!found) throw new Error('no local model is available for gossip');
       return found;
     };
+    if (session.identity && !await room.renew(session.identity, session.holder, LEASE_MS)) session.identity = undefined;
     if (!session.identity) await this.assign(session, session.transcript[0]?.user ?? '', undefined, decider, signal);
     const identity = session.identity;
-    if (!identity) throw new Error('every teachat identity is taken');
-    await room.renew(identity, session.holder, LEASE_MS);
+    if (!identity) throw new Error('could not claim a teachat identity');
     view.activity?.(`${displayName(identity)} is gossiping...`);
     if (!session.announced) {
       const summary = await gossipCall(config, tier(['fast', 'normal']), budget, telemetry, announcePrompt(session.transcript[0]?.user ?? ''), { signal });

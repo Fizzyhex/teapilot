@@ -34,7 +34,7 @@ async function oneShots() {
 
   let invocations = 0;
   const sent: string[] = [];
-  const transport: DiscordTransport = { send: async text => { sent.push(text); return String(sent.length); }, edit: async () => undefined, typing: () => undefined, askApproval: async () => false };
+  const transport: DiscordTransport = { send: async text => { sent.push(text); return String(sent.length); }, edit: async () => undefined, card: async text => { sent.push(text); return 'card'; }, typing: () => undefined, askApproval: async () => false };
   /** Switch notes shown so far; `pick` is the button pressed on the next one. */
   const notes: string[] = [];
   let pick = 0;

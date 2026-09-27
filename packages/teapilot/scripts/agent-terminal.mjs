@@ -22,7 +22,7 @@ const describe = meta => meta.expired ? 'expired (stopped after --ttl without co
 // ConPTY moves between rows with cursor positioning instead of newlines; keep those as line breaks.
 const plain = text => stripVTControlCharacters(text.replace(/\x1b\[[\d;]*[HfBEF]/g, '\n')).replace(/\r\n?/g, '\n');
 const keys = { enter: '\r', tab: '\t', esc: '\x1b', backspace: '\x7f', delete: '\x1b[3~', up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D',
-  home: '\x1b[H', end: '\x1b[F', 'shift-enter': '\x1b[13;2u', 'alt-enter': '\x1b\r', submit: '\x1b\r' };
+  home: '\x1b[H', end: '\x1b[F', pageup: '\x1b[5~', pagedown: '\x1b[6~', 'shift-enter': '\x1b[13;2u', 'alt-enter': '\x1b\r', submit: '\x1b\r' };
 const key = name => keys[name] ?? (/^ctrl-[a-z]$/.test(name) ? String.fromCharCode(name.charCodeAt(5) - 96) : undefined);
 
 const usage = `Usage: node scripts/agent-terminal.mjs <command>

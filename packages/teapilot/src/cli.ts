@@ -25,6 +25,7 @@ teapilot doctor [--live]
 teapilot search status|start|stop|remove
 teapilot runtime status|start|stop   (the model server TeaPilot installed, e.g. after a restart)
 teapilot discord setup|start|status|remove   (optional; chat from Discord)
+teapilot teachat   (browse the agents' chatroom)
 teapilot bridge host [port] [--ts] [--token]   (share this computer's teapilot over your tailnet)
 teapilot bridge connect [port|host]
 teapilot serve --stdio
@@ -55,8 +56,19 @@ async function main(): Promise<void> {
   if (values.help) { console.log(help); return; }
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 19)) throw new Error('TeaPilot requires Node >=22.19.0.');
-  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search', 'runtime', 'discord', 'bridge'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
+  const command = ['setup', 'doctor', 'ask', 'chat', 'code', 'serve', 'search', 'runtime', 'discord', 'bridge', 'teachat'].includes(positionals[0] ?? '') ? positionals.shift() : undefined;
   if (command === 'serve') { if (!values.stdio) throw new Error('serve requires --stdio'); await serve(); return; }
+  if (command === 'teachat') {
+    if (positionals.length) throw new Error('Use teapilot teachat.');
+    // The viewer reads keys itself, so it opens before the line-based terminal does.
+    const { viewTeachat } = await import('./teachat/viewer.js');
+    const controller = new AbortController();
+    const onInterrupt = () => controller.abort();
+    process.once('SIGINT', onInterrupt);
+    try { process.exitCode = await viewTeachat(values['config-dir'], controller.signal) ? 0 : 1; }
+    finally { process.removeListener('SIGINT', onInterrupt); }
+    return;
+  }
   if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
   if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');

@@ -33,6 +33,21 @@ it('records the written file size and the largest observed tool payload', async 
   expect(await readFile(join(f.cwd, 'index.html'), 'utf8')).toBe(content);
 });
 
+it('streams redacted reasoning to callers that ask, and says what a tool is about to run', async () => {
+  let calls = 0;
+  const f = await setup((_body, _req, res) => {
+    calls++;
+    completion(res, calls === 1 ? { reasoning: 'check with hunter2', tool: { name: 'read', arguments: { path: 'missing.txt' } } } : { text: 'Nothing there.' });
+  });
+  f.config.secrets = { ...f.config.secrets, fast: 'hunter2' };
+  const reasoning: string[] = [];
+  const starts: unknown[] = [];
+  await runAttempt({ ...f, tier: 'normal', workload: 'coder', web: false, approve: async () => true, prompt: 'read it',
+    onReasoning: text => reasoning.push(text), onEvent: event => { if (event.type === 'tool_execution_start') starts.push(event); } });
+  expect(reasoning.join('')).toBe('check with [REDACTED]');
+  expect(starts).toEqual([{ type: 'tool_execution_start', tool: 'read', path: 'missing.txt' }]);
+});
+
 it('does not size a failed write and records no observed edit', async () => {
   const f = await setup((_body, _req, res) => completion(res, { text: 'No tools used.' }));
   const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'hello' });

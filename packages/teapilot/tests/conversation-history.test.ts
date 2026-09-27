@@ -67,7 +67,7 @@ it('reports each turn with its steps, and clears the history on /new', async () 
   const run = vi.fn<ConversationOptions['run']>(async () => answer);
   const chat = new Conversation({
     key: 'dm:test', queue: new TurnQueue(), maxPromptChars: 20_000, log: vi.fn(), redact: text => text, run,
-    transport: { send: vi.fn(async () => '1'), edit: vi.fn(async () => undefined), typing: vi.fn(), askApproval: vi.fn(async () => false) },
+    transport: { send: vi.fn(async () => '1'), edit: vi.fn(async () => undefined), card: vi.fn(async () => 'card'), typing: vi.fn(), askApproval: vi.fn(async () => false) },
     request: { prompt: '', cwd: '.', mode: 'ask', signal: controller.signal, history: [{ user: 'earlier', assistant: 'before a restart' }] },
     onHistory: history => histories.push(history),
   });

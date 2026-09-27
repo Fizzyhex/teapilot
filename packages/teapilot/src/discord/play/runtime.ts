@@ -23,6 +23,8 @@ export interface HostedMessage { id: string; edit(payload: MessagePayload): Prom
 /** One click, selection or form submission on an app's message. */
 export interface PlayInteraction {
   playId: string; controlId: string; kind: 'button' | 'select' | 'modal'; user: User;
+  /** The message that was used; a copy the app has since moved away from is turned away. */
+  messageId?: string;
   values?: string[]; fields?: Record<string, string>;
   /** First response only: show a form. */
   openModal(payload: ModalPayload): Promise<void>;
@@ -72,6 +74,7 @@ interface Advance { state: unknown; seed: number; view: View; payload: MessagePa
 export const hashFile = async (path: string) => createHash('sha256').update(await readFile(path)).digest('hex');
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+const moved = 'This app moved to a newer message below.';
 const withNote = (payload: MessagePayload, note?: string): MessagePayload => note ? { ...payload, content: clip(`${payload.content}${payload.content ? '\n' : ''}-# ${note}`, 2000) } : payload;
 
 function normalize(value: unknown): { state: unknown; effects: unknown[] } {
@@ -441,8 +444,45 @@ export class PlayRuntime {
   /** The code an app runs now, so a change can be made as small edits to it. */
   source(id: string, conversation: string): Source { return this.owned(id, conversation).record.source; }
 
-  list(conversation: string): Array<{ id: string; title: string; status: string }> {
-    return [...this.live.values()].map(live => live.record).filter(record => record.conversation === conversation).map(({ id, title, status }) => ({ id, title, status }));
+  /** Apps this conversation started, and with `channelId` also the others shown in that channel. */
+  list(conversation: string, channelId?: string): Array<{ id: string; title: string; status: string }> {
+    return [...this.live.values()].map(live => live.record).filter(record => record.conversation === conversation || (channelId !== undefined && record.channelId === channelId)).map(({ id, title, status }) => ({ id, title, status }));
+  }
+
+  /**
+   * Posts an app again at the bottom with its current view, when its message is buried. Anyone who can
+   * see the app may bring it back, so it is found by conversation or by the channel it is shown in. The
+   * old copy says where the app went, and clicks on it are turned away.
+   */
+  async resend(id: string, conversation: string, target: { channelId: string; post?: StartOptions['post'] }): Promise<{ record: PlayRecord; preview: string }> {
+    const live = this.live.get(id);
+    if (!live || (live.record.conversation !== conversation && live.record.channelId !== target.channelId)) throw new PlayError(`No app ${id} here. Use play_list.`);
+    return this.serial(live, async () => {
+      const { record } = live;
+      const ended = record.status !== 'running';
+      const payload = withNote(renderView(record.id, record.view, ended), ended ? record.note : undefined);
+      const old = { messageId: record.messageId, channelId: record.channelId, viaInteraction: record.viaInteraction, reach: this.reachable(live) ? live.reach : undefined };
+      if (target.post) {
+        const posted = await target.post(payload);
+        record.messageId = posted.id; record.viaInteraction = true;
+        live.reach = { edit: posted.edit, until: this.now() + interactionLifetimeMs };
+      } else {
+        record.messageId = await this.options.surface.post(target.channelId, payload);
+        delete record.viaInteraction;
+        live.reach = undefined;
+      }
+      record.channelId = target.channelId; record.updatedAt = this.now();
+      this.remember(record, 'resend');
+      this.options.store.save(record);
+      // Timers held back while nothing could edit the message run again now that something can.
+      this.arm(live);
+      if (old.messageId) {
+        const stub: MessagePayload = { content: `-# ${moved}`, embeds: [], components: [], allowedMentions: { parse: [] } };
+        await (old.viaInteraction ? old.reach?.edit(stub) : this.options.surface.edit(old.channelId, old.messageId, stub))
+          ?.catch(error => this.options.log(`play ${record.id}: could not retire its old message: ${errorText(error)}`));
+      }
+      return { record, preview: describe(record.view) };
+    });
   }
 
   async stop(id: string, conversation: string, summary = 'Stopped.'): Promise<void> {
@@ -460,6 +500,7 @@ export class PlayRuntime {
   async interact(interaction: PlayInteraction): Promise<void> {
     const live = this.live.get(interaction.playId);
     const record = live?.record;
+    if (live && record?.messageId && interaction.messageId && interaction.messageId !== record.messageId) { await interaction.reply(moved); return; }
     if (!live || !record || record.status !== 'running') { await interaction.reply(record?.status === 'paused' ? `This app is paused. ${record.note ?? ''}`.trim() : 'This app has ended.'); return; }
     if (!this.allowed(record, interaction.user.id)) {
       await interaction.reply(record.participants === 'invoker' ? `Only <@${record.owner.id}> can use this app.` : `This app is for ${(record.participants as string[]).map(id => `<@${id}>`).join(', ')}.`);

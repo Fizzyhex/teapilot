@@ -5,12 +5,18 @@ import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
 import type { MessagePayload } from './play/render.js';
 import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
-import { chunk, ProgressLine, throttle } from './render.js';
+import { chunk, StatusCard, throttle, type CardReply } from './render.js';
+
+export type CardButton = 'stop' | 'details';
+/** A status card's buttons: Details always, Stop while `stop` is set. */
+export interface CardControls { stop: boolean; press(button: CardButton, userId: string): CardReply }
 
 /** Everything the bridge needs from Discord for one conversation (a DM or a thread). */
 export interface DiscordTransport {
   send(text: string): Promise<string>;
   edit(messageId: string, text: string): Promise<void>;
+  /** Posts a turn's status card, or with `id` replaces it. Each press is answered privately with `press`'s reply. */
+  card(text: string, controls: CardControls, id?: string): Promise<string>;
   /** Post approve/deny buttons. Resolves false when `signal` aborts first. */
   askApproval(text: string, signal: AbortSignal): Promise<boolean>;
   typing(): void;
@@ -39,7 +45,7 @@ export interface ConversationOptions {
   request: HostRequest;
   maxPromptChars: number;
   queue: TurnQueue;
-  run: (request: HostRequest, dependencies: Pick<HostDependencies, 'approve' | 'onEvent'>) => Promise<HostResult>;
+  run: (request: HostRequest, dependencies: Pick<HostDependencies, 'approve' | 'onEvent' | 'onReasoning'>) => Promise<HostResult>;
   redact: (text: string) => string;
   /** Operator log in the terminal running teapilot discord start. */
   log: (text: string) => void;
@@ -49,6 +55,8 @@ export interface ConversationOptions {
   once?: boolean;
   approvalTimeoutMs?: number;
   progressIntervalMs?: number;
+  /** How often a running turn's status card moves on by itself. */
+  heartbeatMs?: number;
   extension?: SessionExtension;
   /** Receives the conversation's turns after each change, so they survive a restart. */
   onHistory?: (history: ConversationTurn[]) => void;
@@ -70,6 +78,9 @@ export class Conversation {
   private waiting?: { resolve(text: string): void; reject(error: Error): void };
   private turn?: AbortController;
   private sink?: EventSink;
+  private reasoning?: (text: string) => void;
+  /** The running turn's status card, and how to show a change on it. */
+  private live?: { card: StatusCard; refresh(): void };
   private ended = false;
   private answerOnly = false;
   readonly done: Promise<void>;
@@ -87,7 +98,7 @@ export class Conversation {
     const trimmed = text.trim();
     const [command] = trimmed.split(/\s+/);
     if (command === '/stop') {
-      if (this.turn && !this.turn.signal.aborted) { this.turn.abort(); void this.say('Stopping the current turn. Edits already made remain on disk.', true); }
+      if (this.turn && !this.turn.signal.aborted) { this.stop(); void this.say('Stopping the current turn. Edits already made remain on disk.', true); }
       else void this.say('Nothing is running.', true);
       return;
     }
@@ -124,14 +135,35 @@ export class Conversation {
     if (signal.aborted) return false;
     const text = this.options.redact(`**Approval needed** (${approval.kind})\n${approval.summary}${approval.details ? `\n\`\`\`\n${approval.details}\n\`\`\`` : ''}`);
     const parts = chunk(text);
+    const live = this.live;
+    const previous = live?.card.set('approval');
+    live?.refresh();
     // Show everything; the buttons go on the last part so the whole request is read first.
     for (const part of parts.slice(0, -1)) await this.options.transport.send(part);
-    const approved = await this.options.transport.askApproval(parts.at(-1) ?? 'Approval needed.', signal);
+    const approved = await this.options.transport.askApproval(parts.at(-1) ?? 'Approval needed.', signal).finally(() => {
+      if (!live || !previous) return;
+      // Put the phase back unless something else, such as Stop, changed it meanwhile.
+      const current = live.card.set(previous);
+      if (current !== 'approval') live.card.set(current);
+      live.refresh();
+    });
     this.options.log(`${this.options.key}: ${approval.kind} ${approved ? 'approved' : 'denied'}: ${this.options.redact(approval.summary).split('\n')[0]}`);
     return approved;
   };
 
   private onEvent: EventSink = event => this.sink?.(event);
+  private onReasoning = (text: string) => this.reasoning?.(text);
+
+  /** Operators hold every permission; without roles, everyone who may talk to teapilot counts as one. */
+  private operator(id?: string): boolean {
+    const { access } = this.options;
+    return !access || (id !== undefined && access.roleOf(id) === 'operator');
+  }
+
+  private stop(): void {
+    this.turn?.abort();
+    if (this.live) { this.live.card.set('stopping'); this.live.refresh(); }
+  }
 
   private run = async (base: HostRequest): Promise<HostResult> => {
     // Bind this turn to its sender before anything can check a permission.
@@ -144,24 +176,42 @@ export class Conversation {
       play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation: play.conversation ?? this.options.key, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined } };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
-    const progress = new ProgressLine(this.options.redact);
-    let status: Promise<string> | undefined;
-    const update = throttle(async () => {
-      const text = progress.render();
-      if (!text) return;
-      if (!status) status = this.options.transport.send(text);
-      else await this.options.transport.edit(await status, text);
-    }, this.options.progressIntervalMs ?? 1500);
     const answerOnly = this.answerOnly;
-    this.sink = event => { if (typeof event.result === 'string') this.options.log(`${this.options.key}: ${String(event.tool)} -> ${this.options.redact(event.result)}`); if (!answerOnly && progress.push(event)) update.request(); };
+    const speaker = this.speaker;
+    const card = new StatusCard(this.options.redact);
+    /** The turn's status once it has ended; from then on the card no longer changes. */
+    let outcome: string | undefined;
+    const controls = (stop: boolean): CardControls => ({ stop, press: (button, userId) => {
+      if (button === 'details') return card.details(outcome ?? 'running');
+      if (outcome || this.turn !== turn || turn.signal.aborted) return { text: 'This turn is already ending.' };
+      if (userId !== speaker && !this.operator(userId)) return { text: 'Only the person who asked, or an operator, can stop this turn.' };
+      this.options.log(`${this.options.key}: stopped from the status card by ${userId}`);
+      this.stop();
+      return { text: 'Stopping. Edits already made remain on disk.' };
+    } });
+    const failed = (error: unknown) => { this.options.log(`${this.options.key}: status card failed: ${error instanceof Error ? error.message : String(error)}`); return undefined; };
+    let posted: Promise<string | undefined> | undefined;
+    /** Posts or replaces the card; false when it could not be posted. */
+    const show = async (text: string, stop: boolean): Promise<boolean> => {
+      const first = !posted;
+      posted ??= this.options.transport.card(text, controls(stop)).catch(failed);
+      const id = await posted;
+      if (!first && id) await this.options.transport.card(text, controls(stop), id).catch(failed);
+      return Boolean(id);
+    };
+    const update = throttle(async () => { if (outcome === undefined) await show(card.render(), true); }, this.options.progressIntervalMs ?? 1500);
+    if (!answerOnly) { this.live = { card, refresh: () => update.request() }; update.request(); }
+    this.sink = event => { if (typeof event.result === 'string') this.options.log(`${this.options.key}: ${String(event.tool)} -> ${this.options.redact(event.result)}`); if (!answerOnly && card.push(event)) update.request(); };
+    this.reasoning = answerOnly ? undefined : text => { if (card.reason(text)) update.request(); };
     const typing = answerOnly ? undefined : setInterval(() => this.options.transport.typing(), 8000);
+    const heartbeat = answerOnly ? undefined : setInterval(() => { card.tick(); update.request(); }, this.options.heartbeatMs ?? 5000);
     let result: HostResult;
     try {
       result = await this.options.queue.run(async () => {
         signal.throwIfAborted();
-        if (!answerOnly) this.options.transport.typing();
-        return await this.options.run({ ...request, signal }, { approve: this.approve, onEvent: this.onEvent });
-      }, () => void this.say('Queued behind another task.'));
+        if (!answerOnly) { this.options.transport.typing(); if (card.set('thinking') === 'queued') update.request(); }
+        return await this.options.run({ ...request, signal }, { approve: this.approve, onEvent: this.onEvent, onReasoning: this.onReasoning });
+      }, () => { if (answerOnly) void this.say('Queued behind another task.'); else { card.set('queued'); update.request(); } });
     } catch (error) {
       const stopped = turn.signal.aborted;
       if (!stopped && this.options.request.signal?.aborted) throw error;
@@ -170,13 +220,21 @@ export class Conversation {
       result = { requestId: '', success: false, status: stopped ? 'stopped' : 'error', text: stopped ? 'Stopped.' : `teapilot could not finish: ${message}`, spentUsd: 0, receipts: [], attempts: 0 };
     } finally {
       clearInterval(typing);
+      clearInterval(heartbeat);
       this.sink = undefined;
-      await update.flush();
+      this.reasoning = undefined;
+      this.live = undefined;
       if (this.turn === turn) this.turn = undefined;
     }
     await this.say(result.text || '(no answer)', true);
-    // The terminal log below already records the result of an answer-only turn.
-    if (!answerOnly) await this.say(`-# Result: ${result.status}; accounted $${result.spentUsd.toFixed(6)}${result.requestId ? `; request ${result.requestId}` : ''}`);
+    // The terminal log below already records the result of an answer-only turn. Otherwise the card collapses to
+    // its result once the answer is up, so the result stays the turn's last word and Details stays under it.
+    if (!answerOnly) {
+      outcome = result.status;
+      await update.flush();
+      const summary = card.summary(result);
+      if (!await show(summary, false)) await this.say(summary);
+    }
     this.options.log(`${this.options.key}: ${result.status}; $${result.spentUsd.toFixed(6)}`);
     this.answerOnly = false;
     return result;

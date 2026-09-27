@@ -1,7 +1,7 @@
 // An in-memory Discord for testing teapilot's Discord features without Discord. It stands in for
 // src/discord/gateway.ts only: routing, conversations, models and discord.play all run for real.
 // Everything the bot sends is checked the way discord.js and Discord would check it.
-import type { DiscordTransport } from '../../src/discord/bridge.js';
+import type { CardButton, CardControls, DiscordTransport } from '../../src/discord/bridge.js';
 import type { connect, GatewayHandlers } from '../../src/discord/gateway.js';
 import { parseCustomId, type ModalPayload } from '../../src/discord/play/render.js';
 import type { PlayInteraction } from '../../src/discord/play/runtime.js';
@@ -52,6 +52,8 @@ export class World {
   private handlers?: GatewayHandlers;
   private operators: readonly string[] = [];
   private counters = { message: 0, thread: 0, approval: 0 };
+  /** Status cards by message id, as the gateway keeps them; a restart forgets them. */
+  private cards = new Map<string, CardControls['press']>();
   private recent?: Channel;
   private lastEvent = Date.now();
 
@@ -92,6 +94,7 @@ export class World {
       },
       close: async () => {
         this.handlers = undefined;
+        this.cards.clear();
         // Like the real gateway: pending approvals resolve as denied, and their buttons stay behind.
         for (const message of this.messages) { const resolve = message.approval; message.approval = undefined; resolve?.(false); }
       },
@@ -157,6 +160,16 @@ export class World {
     return {
       send: async text => this.post(channel, bot.name, { content: text }).id,
       edit: async (id, text) => this.update(this.find(id), { content: text }),
+      card: async (text, controls, id) => {
+        const payload = { content: text, components: [{ type: 1, components: [
+          ...(controls.stop ? [{ type: 2, style: 2, label: 'Stop', custom_id: 'teapilot-card:stop' }] : []),
+          { type: 2, style: 2, label: 'Details', custom_id: 'teapilot-card:details' },
+        ] }] };
+        const message = id ? this.find(id) : this.post(channel, bot.name, payload);
+        if (id) this.update(message, payload);
+        this.cards.set(message.id, controls.press);
+        return message.id;
+      },
       typing: () => undefined,
       askApproval: (text, signal) => {
         if (signal.aborted) return Promise.resolve(false);
@@ -217,7 +230,7 @@ export class World {
   private controls(message: Message): Json[] { return message.components.flatMap(row => row.components); }
   private controlId(control: Json): string | undefined {
     if (typeof control.custom_id !== 'string') return undefined;
-    return parseCustomId(control.custom_id)?.id ?? control.custom_id.split(':')[2];
+    return parseCustomId(control.custom_id)?.id ?? control.custom_id.split(':').at(-1);
   }
   private control(message: Message, id: string): Json {
     const control = this.controls(message).find(entry => this.controlId(entry) === id || (entry.url && entry.label === id));
@@ -237,6 +250,7 @@ export class World {
     if (typeof control.url === 'string') return `${person.name} opened ${control.url}; links never reach teapilot.`;
     const custom = String(control.custom_id);
     if (custom.startsWith('teapilot:')) return this.answerApproval(person, message, custom.endsWith(':approve'));
+    if (custom.startsWith('teapilot-card:')) return this.pressCard(person, message, custom.slice('teapilot-card:'.length) as CardButton);
     return this.interact(person, message, 'button', custom, `clicked [${this.label(control)}]`);
   }
 
@@ -250,6 +264,15 @@ export class World {
     this.update(message, { content: settle(message.content, `**${approved ? 'Approved' : 'Denied'}** by <@${person.id}>`), components: [] });
     resolve(approved);
     return `${person.name} ${approved ? 'approved' : 'denied'} ${message.id}.`;
+  }
+
+  /** Like the real gateway: anyone may press, the conversation decides, and only the presser sees the answer. */
+  private pressCard(person: Person, message: Message, button: CardButton): string {
+    const press = this.cards.get(message.id);
+    const reply = press ? press(button, person.id) : { text: 'This turn is no longer available: teapilot restarted since, or the turn is too old.' };
+    const note = this.post(message.channel, bot.name, { content: reply.text }, person.name);
+    const file = reply.file ? `\n  📎 ${reply.file.name}:\n${reply.file.content.split('\n').map(line => `    ${line}`).join('\n')}` : '';
+    return `${person.name} clicked [${button === 'stop' ? 'Stop' : 'Details'}] on ${message.id}.\n${this.render(note)}${file}`;
   }
 
   /** The newest approval still waiting, if any. */
@@ -311,7 +334,7 @@ export class World {
       seen.push(this.render(this.post(message.channel, bot.name, { content, embeds }, person.name)));
     };
     const interaction: PlayInteraction = {
-      playId: target.playId, controlId: target.id, kind, user: { id: person.id, name: person.name }, values, fields,
+      playId: target.playId, controlId: target.id, messageId: message.id, kind, user: { id: person.id, name: person.name }, values, fields,
       openModal: async payload => {
         if (kind === 'modal') throw new Error('A form cannot open another form.');
         first('showModal');

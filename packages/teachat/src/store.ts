@@ -41,13 +41,18 @@ export interface Room {
   channels(): Promise<ChannelMeta[]>;
   /** The live log, oldest first; the last `limit` messages when given. */
   read(channel: string, options?: { limit?: number }): Promise<Message[]>;
+  /** Messages moved out of the live log by `archive`, oldest first. */
+  archived(channel: string): Promise<Message[]>;
   post(input: { channel: string; author: string; text: string; replyTo?: number }): Promise<Message>;
   /** A system event in #offtopic. */
   event(text: string): Promise<Message>;
   /** Expired leases are left out. */
   identities(): Promise<Identity[]>;
-  /** False when another holder's lease is still running. */
-  claim(username: string, holder: string, ttlMs: number): Promise<boolean>;
+  /**
+   * False when another holder's lease is still running, unless `takeover` is set. A holder named `<pid>:<anything>`
+   * lets go when that process exits, so a crashed process does not keep its identities until the lease runs out.
+   */
+  claim(username: string, holder: string, ttlMs: number, options?: { takeover?: boolean }): Promise<boolean>;
   /** False unless `holder` still holds the lease. */
   renew(username: string, holder: string, ttlMs: number): Promise<boolean>;
   release(username: string, holder: string): Promise<boolean>;
@@ -59,7 +64,8 @@ export interface Room {
 
 export const defaultRoomDir = (): string => process.env.TEACHAT_DIR || join(homedir(), '.teachat');
 export const displayName = (username: string): string => username === SYSTEM_AUTHOR ? SYSTEM_AUTHOR : `teapilot:${username}`;
-export const leaseActive = (identity: Identity, now: number): boolean => !!identity.lease && Date.parse(identity.lease.until) > now;
+const holderAlive = (holder: string): boolean => { const pid = /^(\d+):/.exec(holder)?.[1]; return !pid || pidAlive(Number(pid)); };
+export const leaseActive = (identity: Identity, now: number): boolean => !!identity.lease && Date.parse(identity.lease.until) > now && holderAlive(identity.lease.holder);
 
 export interface LockOptions { staleMs?: number; timeoutMs?: number }
 
@@ -193,6 +199,13 @@ class FileRoom implements Room {
     });
   }
 
+  archived(channel: string): Promise<Message[]> {
+    return this.locked(async () => {
+      await this.meta(channel);
+      return readJsonl(this.archiveFile(channel), messageSchema);
+    });
+  }
+
   post({ channel, author, text, replyTo }: { channel: string; author: string; text: string; replyTo?: number }): Promise<Message> {
     const body = text.trim();
     if (!body) return Promise.reject(new RoomError('The message is empty.'));
@@ -218,11 +231,11 @@ class FileRoom implements Room {
   identities(): Promise<Identity[]> {
     return this.locked(async () => {
       const now = this.now();
-      return (await this.loadIdentities()).map(({ lease, ...identity }) => lease && Date.parse(lease.until) > now ? { ...identity, lease } : identity);
+      return (await this.loadIdentities()).map(({ lease, ...identity }) => lease && leaseActive({ ...identity, lease }, now) ? { ...identity, lease } : identity);
     });
   }
 
-  private lease(username: string, holder: string, ttlMs: number, renewing: boolean): Promise<boolean> {
+  private lease(username: string, holder: string, ttlMs: number, renewing: boolean, takeover = false): Promise<boolean> {
     if (!holder) return Promise.reject(new RoomError('A lease needs a holder.'));
     if (!(Number.isFinite(ttlMs) && ttlMs > 0)) return Promise.reject(new RoomError('A lease needs a positive duration.'));
     return this.locked(async () => {
@@ -230,14 +243,14 @@ class FileRoom implements Room {
       const identity = identities.find(i => i.username === username);
       if (!identity) return false;
       const now = this.now();
-      if (renewing ? identity.lease?.holder !== holder : identity.lease && identity.lease.holder !== holder && Date.parse(identity.lease.until) > now) return false;
+      if (renewing ? identity.lease?.holder !== holder : !takeover && identity.lease?.holder !== holder && leaseActive(identity, now)) return false;
       identity.lease = { holder, until: new Date(now + ttlMs).toISOString() };
       await writeJson(this.identitiesFile(), identities);
       return true;
     });
   }
 
-  claim(username: string, holder: string, ttlMs: number): Promise<boolean> { return this.lease(username, holder, ttlMs, false); }
+  claim(username: string, holder: string, ttlMs: number, { takeover = false }: { takeover?: boolean } = {}): Promise<boolean> { return this.lease(username, holder, ttlMs, false, takeover); }
   renew(username: string, holder: string, ttlMs: number): Promise<boolean> { return this.lease(username, holder, ttlMs, true); }
 
   release(username: string, holder: string): Promise<boolean> {
@@ -263,7 +276,7 @@ class FileRoom implements Room {
       identity.updatedAt = this.iso();
       await writeJson(this.identitiesFile(), identities);
       const { lease, ...rest } = identity;
-      return lease && Date.parse(lease.until) > this.now() ? { ...rest, lease } : rest;
+      return leaseActive(identity, this.now()) ? { ...rest, lease } : rest;
     });
   }
 

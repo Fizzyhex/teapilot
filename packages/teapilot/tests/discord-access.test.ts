@@ -201,7 +201,7 @@ it('resolves permissions per message in a shared conversation', async () => {
   const grants = await SessionGrants.create(f.cwd, f.config, 'code');
   const seen: Array<{ role?: string; write: boolean }> = [];
   const result: HostResult = { requestId: '', success: true, status: 'completed', text: 'ok', spentUsd: 0, receipts: [], attempts: 1 };
-  const transport: DiscordTransport = { send: vi.fn(async () => '1'), edit: vi.fn(async () => undefined), typing: vi.fn(), askApproval: vi.fn(async () => true) };
+  const transport: DiscordTransport = { send: vi.fn(async () => '1'), edit: vi.fn(async () => undefined), card: vi.fn(async () => 'card'), typing: vi.fn(), askApproval: vi.fn(async () => true) };
   const controller = new AbortController();
   const run = vi.fn<ConversationOptions['run']>(async request => { seen.push({ role: request.access?.role, write: request.authorization!.allows('repository.write') }); return result; });
   const chat = new Conversation({ key: 'thread:1', transport, queue: new TurnQueue(), maxPromptChars: 20_000, log: vi.fn(), redact: text => text, access,

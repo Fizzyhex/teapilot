@@ -224,6 +224,59 @@ it('runs an app posted through an interaction, and holds its timers while nothin
   expect(surface.edit).not.toHaveBeenCalled();
 });
 
+it('resends a buried app with its state, points the old copy at it, and turns away clicks there', async () => {
+  const { runtime, surface, posts, edits, store, log } = await setup();
+  const { record } = await start(runtime);
+  await runtime.interact(act(record.id, 'add').interaction);
+  vi.mocked(surface.post).mockImplementationOnce(async (_channel, payload) => { posts.push(payload); return 'message-2'; });
+  const { preview } = await runtime.resend(record.id, 'dm:1', { channelId: 'channel-1' });
+  expect(preview).toContain('[Add](add)');
+  expect(posts.at(-1)!.content).toBe('1 ');
+  expect(edits.at(-1)).toMatchObject({ content: '-# This app moved to a newer message below.', components: [] });
+  expect(store.all()[0]).toMatchObject({ id: record.id, messageId: 'message-2', state: { count: 1 } });
+  expect(store.all()[0]!.log.at(-1)).toMatchObject({ action: 'resend' });
+  expect(log).not.toHaveBeenCalled();
+
+  const stale = act(record.id, 'add', owner.id, { messageId: 'message-1' });
+  await runtime.interact(stale.interaction);
+  expect(stale.seen.replies).toEqual(['This app moved to a newer message below.']);
+  expect(store.all()[0]!.state).toMatchObject({ count: 1 });
+  const fresh = act(record.id, 'add', owner.id, { messageId: 'message-2' });
+  await runtime.interact(fresh.interaction);
+  expect(fresh.seen.updates[0]!.content).toBe('2 ');
+});
+
+it('lets anyone in the channel resend an app, and resends a finished one with its controls disabled', async () => {
+  const { runtime, posts } = await setup();
+  const { record } = await start(runtime);
+  await expect(runtime.resend(record.id, 'dm:2', { channelId: 'channel-9' })).rejects.toThrow('No app');
+  await runtime.resend(record.id, 'dm:2', { channelId: 'channel-1' });
+  await runtime.interact(act(record.id, 'end', owner.id, { messageId: 'message-1' }).interaction);
+  await runtime.resend(record.id, 'dm:1', { channelId: 'channel-1' });
+  expect(posts.at(-1)!.content).toBe('0 \n-# Final: 0');
+  expect(posts.at(-1)!.components.flatMap(row => row.components).every(control => control.disabled === true)).toBe(true);
+});
+
+it('resends through a new interaction, which lets held timers show again', async () => {
+  let now = 1_000_000;
+  const due: Array<{ at: number; run: () => void }> = [];
+  const clock: Clock = { now: () => now, after(ms, run) { const entry = { at: now + ms, run }; due.push(entry); return () => { if (due.includes(entry)) due.splice(due.indexOf(entry), 1); }; } };
+  const advance = (ms: number) => { now += ms; for (const entry of due.filter(item => item.at <= now)) { due.splice(due.indexOf(entry), 1); entry.run(); } };
+  const { runtime, store } = await setup({ clock });
+  const hosted = (id: string, seen: MessagePayload[]) => vi.fn(async (payload: MessagePayload) => { seen.push(payload); return { id, edit: async (next: MessagePayload) => { seen.push(next); } }; });
+  const first: MessagePayload[] = [], second: MessagePayload[] = [];
+  const { record } = await runtime.start({ title: 'Counter', channelId: 'channel-1', conversation: 'reply:1', owner, source: { kind: 'sandbox', code: counter }, post: hosted('reply-1', first) });
+  const click = act(record.id, 'soon');
+  await runtime.interact(click.interaction);
+  advance(15 * 60_000);
+  expect(store.all()[0]!.timers).toHaveLength(1);
+
+  await runtime.resend(record.id, 'reply:1', { channelId: 'channel-1', post: hosted('reply-2', second) });
+  expect(store.all()[0]).toMatchObject({ messageId: 'reply-2', viaInteraction: true });
+  advance(0);
+  await vi.waitFor(() => expect(second.at(-1)?.content).toBe('100 '));
+});
+
 it('asks the model through consult and caps it', async () => {
   const consult = vi.fn<Consultant>(async (_play, prompt) => `answer to ${prompt}`);
   const { runtime, edits } = await setup({ consult });

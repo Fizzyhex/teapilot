@@ -60,27 +60,115 @@ export function quoteMessage(message: QuotedMessage, chain: ReplyChain = { messa
   return `Reply chain, oldest first:\n${[...(chain.truncated ? [truncatedNote] : []), ...earlier, selected].join('\n\n')}`;
 }
 
-/** One status message per turn: the running tool, then completed tool lines, newest last. */
-export class ProgressLine {
-  private lines: string[] = [];
+/** What a turn is doing now, as its status card's first line shows it. */
+export type CardPhase = 'queued' | 'thinking' | 'running' | 'writing' | 'approval' | 'stopping';
+/** What a press on a status card shows the person who pressed it, and only them. */
+export interface CardReply { text: string; file?: { name: string; content: string } }
+type Step = { tool: string } | { reasoning: string };
+
+const phases: Record<CardPhase, string> = {
+  queued: '⏳ queued behind another task', thinking: '🫖 thinking', running: '⚙️ running', writing: '✍️ writing',
+  approval: '⏸️ waiting for approval', stopping: '⏹️ stopping',
+};
+/** Reasoning kept per turn for Details, so a runaway model cannot grow it without bound. */
+const reasoningLimit = 100_000;
+
+/** Literal text inside Discord markdown: nothing in it formats, links or mentions. */
+export function escapeMarkdown(text: string): string {
+  return text.replace(/[\\*_~`|>#[\]<]/g, '\\$&').replace(/^([-+]|\d+\.) /, '\\$1 ');
+}
+/** The last `max` characters of `text` on one line, starting at a word where one is near. */
+export function tail(text: string, max: number): string {
+  const line = text.replace(/<\/?think>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (line.length <= max) return line;
+  const cut = line.slice(-max);
+  const word = cut.indexOf(' ');
+  return `…${word >= 0 && word < 30 ? cut.slice(word + 1) : cut}`;
+}
+export function elapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`;
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
+}
+
+/**
+ * One status card per turn. While the turn runs it says what is happening now, lists the latest steps, and
+ * previews the reasoning or answer being written in small text. `summary` collapses it to one line, and
+ * `details` is the whole log for whoever asks.
+ */
+export class StatusCard {
+  private readonly steps: Step[] = [];
+  private phase: CardPhase = 'thinking';
   private running?: string;
-  constructor(private readonly redact: (text: string) => string, private readonly maxLines = 15) {}
+  private answer = '';
+  private reasoned = 0;
+  private frame = 0;
+  private readonly started: number;
+  /** Set by `summary`: the turn is over and its clock stops. */
+  private ended?: number;
+  constructor(private readonly redact: (text: string) => string, private readonly options: { now?: () => number; maxSteps?: number } = {}) {
+    this.started = this.now();
+  }
+  private now(): number { return (this.options.now ?? Date.now)(); }
+
+  /** Returns whether the card changed. */
   push(event: HostEvent): boolean {
-    if (event.type === 'tool_execution_start') { this.running = String(event.tool ?? 'tool'); return true; }
-    if (event.type !== 'tool_execution_end') return false;
-    this.running = undefined;
-    this.lines.push(this.redact(describeTool(event)));
+    if (event.type === 'tool_execution_start') { this.phase = 'running'; this.running = this.redact(describeTool(event)); this.answer = ''; return true; }
+    if (event.type === 'tool_execution_end') { this.phase = 'thinking'; this.running = undefined; this.steps.push({ tool: this.redact(describeTool(event)) }); return true; }
+    if (event.type === 'text' && typeof event.text === 'string') { this.phase = 'writing'; this.answer = (this.answer + event.text).slice(-2000); return true; }
+    if (event.type === 'message_end') { if (this.phase === 'writing') this.phase = 'thinking'; this.answer = ''; return true; }
+    return false;
+  }
+  /** Reasoning as it streams. Returns whether the card changed. */
+  reason(text: string): boolean {
+    if (this.reasoned >= reasoningLimit) return false;
+    const kept = this.redact(text).slice(0, reasoningLimit - this.reasoned);
+    this.reasoned += kept.length;
+    const last = this.steps.at(-1);
+    if (last && 'reasoning' in last) last.reasoning += kept;
+    else this.steps.push({ reasoning: kept });
+    if (this.phase === 'writing') this.phase = 'thinking';
     return true;
   }
-  get empty(): boolean { return !this.lines.length && !this.running; }
+  /** Sets the phase and returns the one it replaces, so a pause can put it back. */
+  set(phase: CardPhase): CardPhase { const previous = this.phase; this.phase = phase; return previous; }
+  /** The heartbeat: moves the card on when nothing else has, so it never looks stuck. */
+  tick(): void { this.frame++; }
+
   render(): string {
-    const hidden = Math.max(0, this.lines.length - this.maxLines);
-    const shown = this.lines.slice(hidden).map(line => `- ${line.length > 180 ? `${line.slice(0, 177)}...` : line}`);
-    return [
-      ...(hidden ? [`- ... ${hidden} earlier`] : []),
-      ...shown,
-      ...(this.running ? [`- running ${this.running}...`] : []),
-    ].join('\n').slice(0, MESSAGE_LIMIT);
+    const label = this.phase === 'running' && this.running ? `⚙️ running ${escapeMarkdown(this.running.slice(0, 120))}` : phases[this.phase];
+    const header = `${label}${this.phase === 'stopping' ? '' : '.'.repeat(this.frame % 3 + 1)} · ${elapsed(this.now() - this.started)}`;
+    const last = this.steps.at(-1);
+    const preview = this.phase === 'writing' && this.answer.trim() ? `-# ${escapeMarkdown(tail(this.redact(this.answer), 160))}`
+      : this.phase === 'thinking' && last && 'reasoning' in last && last.reasoning.trim() ? `-# 💭 ${escapeMarkdown(tail(last.reasoning, 160))}` : undefined;
+    const tools = this.steps.flatMap(step => 'tool' in step ? [`-# ${escapeMarkdown(step.tool.length > 150 ? `${step.tool.slice(0, 147)}...` : step.tool)}`] : []);
+    let shown = tools.slice(-(this.options.maxSteps ?? 8));
+    const compose = () => [header, ...(tools.length > shown.length ? [`-# … ${tools.length - shown.length} earlier`] : []), ...shown, ...(preview ? [preview] : [])].join('\n');
+    while (shown.length && compose().length > MESSAGE_LIMIT) shown = shown.slice(1);
+    return compose().slice(0, MESSAGE_LIMIT);
+  }
+
+  private facts(status: string): string {
+    const count = this.steps.filter(step => 'tool' in step).length;
+    return `${status} · ${count} step${count === 1 ? '' : 's'} · ${elapsed((this.ended ?? this.now()) - this.started)}`;
+  }
+  /** The card once the turn has ended: one line, with the whole log behind Details. */
+  summary(result: { status: string; spentUsd: number; requestId?: string }): string {
+    this.ended ??= this.now();
+    return `-# Result: ${this.facts(result.status)} · accounted $${result.spentUsd.toFixed(6)}${result.requestId ? ` · request ${result.requestId}` : ''}`;
+  }
+  /** Every step, with the reasoning between them; attached as a file when too long for a message. */
+  details(status: string): CardReply {
+    const { steps } = this;
+    const title = `**Turn details** · ${this.facts(status)}`;
+    if (!steps.length) return { text: `${title}\n${this.ended === undefined ? 'No steps yet.' : 'No steps.'}` };
+    const markdown = steps.map(step => 'tool' in step ? `- ${escapeMarkdown(step.tool)}` : step.reasoning.trim().split('\n').map((line, index) => `> ${index ? '' : '💭 '}${escapeMarkdown(line)}`).join('\n')).join('\n');
+    const text = `${title}\n${markdown}`;
+    if (text.length <= MESSAGE_LIMIT) return { text };
+    const plain = steps.map(step => 'tool' in step ? `- ${step.tool}` : `\n${step.reasoning.trim()}\n`).join('\n');
+    return { text: `${title}\nThe full log is attached.`, file: { name: 'turn-details.md', content: `${this.facts(status)}\n\n${plain.trim()}\n` } };
   }
 }
 

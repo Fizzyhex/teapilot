@@ -67,10 +67,10 @@ export interface ScreenState {
   notice?: string;
 }
 
-type Part = readonly [text: string, style?: string];
-const BOLD = '1', DIM = '2', ITALIC = '3', RED = '31', GREEN = '32', YELLOW = '33', CYAN = '36';
-const LAVENDER = '38;2;186;187;241'; // catppuccin lavender, as in the activity art
-const BORDER = '38;2;98;100;118';
+export type Part = readonly [text: string, style?: string];
+export const BOLD = '1', DIM = '2', ITALIC = '3', RED = '31', GREEN = '32', YELLOW = '33', CYAN = '36';
+export const LAVENDER = '38;2;186;187;241'; // catppuccin lavender, as in the activity art
+export const BORDER = '38;2;98;100;118';
 
 /** Terminal cells taken by the leading graphemes of text that fit within width. */
 function take(text: string, width: number): string {
@@ -82,13 +82,13 @@ function take(text: string, width: number): string {
   }
   return out;
 }
-function clip(text: string, width: number): string {
+export function clip(text: string, width: number): string {
   if (width <= 0) return '';
   return cellWidth(text) <= width ? text : `${take(text, width - 1)}…`;
 }
-const partsWidth = (parts: Part[]) => parts.reduce((total, [text]) => total + cellWidth(text), 0);
+export const partsWidth = (parts: Part[]) => parts.reduce((total, [text]) => total + cellWidth(text), 0);
 /** Exactly width cells: clipped with an ellipsis, or padded with spaces. */
-function fitParts(parts: Part[], width: number): Part[] {
+export function fitParts(parts: Part[], width: number): Part[] {
   const out: Part[] = [];
   let left = width;
   for (const [text, style] of parts) {
@@ -126,19 +126,23 @@ function logStyle(message: string): string | undefined {
   return undefined;
 }
 
+export const paintParts = (parts: Part[], colour: boolean): string => parts.map(([text, style]) => colour && style && text ? `\x1b[${style}m${text}\x1b[0m` : text).join('');
+/** A rounded box of width cells around content, each line fitted to the inside. */
+export function boxLines(content: Part[][], { width, colour, border = BORDER, indent = 0 }: { width: number; colour: boolean; border?: string; indent?: number }): string[] {
+  const pad = ' '.repeat(indent);
+  return [
+    pad + paintParts([[`╭${'─'.repeat(width - 2)}╮`, border]], colour),
+    ...content.map(line => pad + paintParts([['│ ', border], ...fitParts(line, width - 4), [' │', border]], colour)),
+    pad + paintParts([[`╰${'─'.repeat(width - 2)}╯`, border]], colour),
+  ];
+}
+
 /** Lay the screen out top to bottom: installs, tabs, art, the current tab, then the input box. */
 export function renderScreen(state: ScreenState, columns: number, rows: number, colour: boolean): { lines: string[]; cursor?: { row: number; col: number } } {
   const width = Math.max(24, Math.min(columns - 1, 110));
   const inner = width - 4;
-  const paint = (parts: Part[]) => parts.map(([text, style]) => colour && style && text ? `\x1b[${style}m${text}\x1b[0m` : text).join('');
-  const box = (content: Part[][], border = BORDER, boxWidth = width, indent = 0): string[] => {
-    const pad = ' '.repeat(indent);
-    return [
-      pad + paint([[`╭${'─'.repeat(boxWidth - 2)}╮`, border]]),
-      ...content.map(line => pad + paint([['│ ', border], ...fitParts(line, boxWidth - 4), [' │', border]])),
-      pad + paint([[`╰${'─'.repeat(boxWidth - 2)}╯`, border]]),
-    ];
-  };
+  const paint = (parts: Part[]) => paintParts(parts, colour);
+  const box = (content: Part[][], border = BORDER, boxWidth = width, indent = 0): string[] => boxLines(content, { width: boxWidth, colour, border, indent });
 
   const top: string[] = [];
   if (state.banner) {

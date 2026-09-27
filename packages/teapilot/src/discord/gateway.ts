@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
-import type { DiscordTransport } from './bridge.js';
+import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
 import { collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
 import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
@@ -82,6 +82,10 @@ export interface Gateway {
 const noop = () => undefined;
 /** Custom id prefix of `choose()` buttons: `teapilot-choice:<nonce>:<index>`. */
 const choicePrefix = 'teapilot-choice:';
+/** Custom id prefix of status card buttons: `teapilot-card:<button>`; the card's message id finds its turn. */
+const cardPrefix = 'teapilot-card:';
+/** Status cards whose buttons still answer; the oldest are forgotten first. */
+const cardLimit = 500;
 const quiet = { allowedMentions: { parse: [] as [] } };
 /** discord.play renders Discord API JSON, which discord.js accepts in place of its builders. */
 const raw = (payload: MessagePayload) => payload as unknown as BaseMessageOptions & { content: string };
@@ -98,6 +102,18 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     allowedMentions: { parse: [] },
   });
   const pending = new Map<string, { text: string; resolve(approved: boolean): void }>();
+  const cards = new Map<string, CardControls['press']>();
+  const remember = (id: string, controls: CardControls) => {
+    cards.delete(id); cards.set(id, controls.press);
+    if (cards.size > cardLimit) cards.delete(cards.keys().next().value!);
+  };
+  /** A status card: links in its previews stay text rather than growing embeds. */
+  const cardPayload = (text: string, controls: CardControls): BaseMessageOptions & { flags: typeof MessageFlags.SuppressEmbeds } => ({
+    content: text, flags: MessageFlags.SuppressEmbeds, ...quiet,
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      ...(controls.stop ? [new ButtonBuilder().setCustomId(`${cardPrefix}stop`).setLabel('Stop').setStyle(ButtonStyle.Secondary)] : []),
+      new ButtonBuilder().setCustomId(`${cardPrefix}details`).setLabel('Details').setStyle(ButtonStyle.Secondary))],
+  });
   const settle = (text: string, verdict: string) => `${text.slice(0, MESSAGE_LIMIT - verdict.length - 2)}\n\n${verdict}`;
 
   type Payload = { content: string; components: Array<ActionRowBuilder<ButtonBuilder>>; allowedMentions: { parse: [] } };
@@ -124,6 +140,12 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     return {
       async send(text) { const message = await channel.send({ content: text, ...quiet }); sent.set(message.id, message); return message.id; },
       async edit(id, text) { const message = sent.get(id) ?? await channel.messages.fetch(id); await message.edit({ content: text, ...quiet }); },
+      async card(text, controls, id) {
+        const payload = cardPayload(text, controls);
+        const message = id ? await (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload) : await channel.send(payload);
+        sent.set(message.id, message); remember(message.id, controls);
+        return message.id;
+      },
       typing() { void channel.sendTyping().catch(noop); },
       askApproval: (text, signal) => askApproval(text, signal, payload => channel.send(payload), async (id, payload) => (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload)),
     };
@@ -138,16 +160,22 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     // A click has no deferred message of its own: its reply is the note it was pressed on, so everything is a follow-up.
     let first = !interaction.isButton();
     const live = () => { if (Date.now() > expires) throw new Error('This Discord interaction expired after 15 minutes. Run /reply again.'); };
-    const post = async (payload: BaseMessageOptions) => {
+    const post = async (payload: BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds }) => {
       live();
       // The deferred "thinking" message becomes the first message; later ones are follow-ups.
       if (first) { first = false; return await interaction.editReply(payload); }
       return await interaction.followUp(payload);
     };
-    const revise = async (id: string, payload: BaseMessageOptions) => { live(); await interaction.webhook.editMessage(id, payload); };
+    const revise = async (id: string, payload: BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds }) => { live(); await interaction.webhook.editMessage(id, payload); };
     return {
       async send(text) { return (await post({ content: text, components: [], ...quiet })).id; },
       edit: (id, text) => revise(id, { content: text, ...quiet }),
+      async card(text, controls, id) {
+        const payload = cardPayload(text, controls);
+        if (id) await revise(id, payload); else id = (await post(payload)).id;
+        remember(id, controls);
+        return id;
+      },
       typing: noop,
       askApproval: (text, signal) => askApproval(text, signal, post, revise),
       // The runtime stops editing through this interaction once it expires, and uses the app's clicks after that.
@@ -328,7 +356,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       const target = parseCustomId(interaction.customId);
       if (!target) { await interaction.reply({ content: 'This app is not available.', flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
       handlers.component({
-        playId: target.playId, controlId: target.id,
+        playId: target.playId, controlId: target.id, messageId: interaction.message?.id,
         kind: interaction.isButton() ? 'button' : interaction.isStringSelectMenu() ? 'select' : 'modal',
         user: { id: interaction.user.id, name: interaction.user.username },
         values: interaction.isStringSelectMenu() ? [...interaction.values] : undefined,
@@ -355,6 +383,14 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         settle: async note => { await interaction.editReply({ content: note, components: [] }); },
         transport: () => interactionTransport(interaction),
       });
+      return;
+    }
+    if (interaction.customId.startsWith(cardPrefix)) {
+      const press = cards.get(interaction.message.id);
+      let reply: { text: string; file?: { name: string; content: string } };
+      try { reply = press ? press(interaction.customId.slice(cardPrefix.length) as CardButton, interaction.user.id) : { text: 'This turn is no longer available: teapilot restarted since, or the turn is too old.' }; }
+      catch (error) { reply = { text: `That did not work: ${error instanceof Error ? error.message : String(error)}` }; }
+      await interaction.reply({ content: reply.text, files: reply.file ? [{ attachment: Buffer.from(reply.file.content), name: reply.file.name }] : [], flags: MessageFlags.Ephemeral, ...quiet }).catch(noop);
       return;
     }
     const [prefix, nonce, verdict] = interaction.customId.split(':');

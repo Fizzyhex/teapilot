@@ -23,6 +23,8 @@ export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
   budget: SpendGovernor; telemetry: Telemetry; approve: Approve; signal?: AbortSignal;
   history?: ConversationTurn[]; onEvent?: EventSink; onActivity?: ActivitySink; beforeMutation?: BeforeMutation;
+  /** The model's reasoning as it streams, redacted; only callers that show it ask for it. */
+  onReasoning?: (text: string) => void;
   mode?: Mode; conversational?: boolean; authorization?: import('../execution/grants.js').SessionGrants;
   activePermissions?: Permission[];
   /** Set only for a Discord sender with a role; drives the access-management tools. */
@@ -227,11 +229,17 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   });
   const start = history.length + 1;
   messages = () => agent.state.messages.slice(start) as Message[];
-  const redactor = new StreamRedactor([input.config.router.apiKey ?? '', ...Object.values(input.config.secrets).map(value => value ?? '')]);
+  const secrets = [input.config.router.apiKey ?? '', ...Object.values(input.config.secrets).map(value => value ?? '')];
+  const redactor = new StreamRedactor(secrets);
+  const reasoning = new StreamRedactor(secrets);
   agent.subscribe(event => {
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_start') {
       input.onActivity?.({ kind: 'reasoning', label: 'Thinking...' });
+    } else if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_delta') {
+      const text = input.onReasoning && reasoning.push(event.assistantMessageEvent.delta);
+      if (text) input.onReasoning?.(text);
     } else if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_end') {
+      const text = input.onReasoning && reasoning.push('', true); if (text) input.onReasoning?.(text);
       input.onActivity?.({ kind: 'composing', label: 'composing response...' });
     } else if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
       const text = redactor.push(event.assistantMessageEvent.delta);
@@ -242,7 +250,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
       if (event.type === 'tool_execution_start') input.onActivity?.({ kind: 'waiting', label: `Running ${event.toolName}...` });
       let detail: { path?: string; size?: number; command?: string; refused?: boolean } | undefined;
-      if (event.type === 'tool_execution_end') {
+      if (event.type === 'tool_execution_start') {
+        // What is about to run, for progress displays; the end event reports what actually ran.
+        const args = (event.args ?? {}) as { path?: unknown; command?: unknown };
+        if (typeof args.command === 'string') detail = { command: args.command };
+        else if (typeof args.path === 'string') detail = { path: relative(policy.root, resolve(policy.root, args.path)) || args.path };
+      } else {
         const state = settled.get(event.toolCallId); settled.delete(event.toolCallId);
         if (!state) evidence.refuse();
         detail = { ...toolDetails.get(event.toolCallId), ...(state !== 'ran' ? { refused: true } : {}) }; toolDetails.delete(event.toolCallId);

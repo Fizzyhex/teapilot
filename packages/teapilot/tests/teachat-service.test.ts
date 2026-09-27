@@ -137,6 +137,22 @@ it('releases the identity lease on reset', async () => {
   expect(service.pending()).toBe(false);
 });
 
+it('takes the identity renewed longest ago when every one is held, and the loser picks again', async () => {
+  const { service, view } = await setup();
+  const names = SEED_IDENTITIES.map(seed => seed.username);
+  // Other live conversations hold every name; the first was renewed longest ago.
+  for (const [i, name] of names.entries()) expect(await service.room.claim(name, `${process.pid}:other-${i}`, 60_000 + i * 1000)).toBe(true);
+  await service.observe(turn);
+  expect(service.identity()).toBe(names[0]);
+  expect(await service.run(view)).toBe(true);
+  // The conversation that lost it finds out when it renews, and takes the next stalest.
+  await service.room.claim(names[1]!, `${process.pid}:someone`, 1, { takeover: true });
+  await service.room.claim(names[0]!, `${process.pid}:other-0`, 60_000, { takeover: true });
+  await service.observe(turn);
+  expect(await service.run(view)).toBe(true);
+  expect(service.identity()).toBe(names[1]);
+});
+
 it('mostly plays the identity the routing answer favours', async () => {
   const { service } = await setup();
   const teachatIdentity = { choice: 'oona', probabilities: { oona: 0.9, pip: 0.1 }, confidence: 0.9 };

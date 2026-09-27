@@ -40,6 +40,8 @@ export interface HostDependencies {
   localProbe?: () => Promise<boolean>;
   onProgress?: (message: string) => void;
   onEvent?: EventSink; beforeMutation?: BeforeMutation;
+  /** The model's reasoning as it streams, redacted; see AttemptInput.onReasoning. */
+  onReasoning?: (text: string) => void;
   continueWithoutSearch?: (message: string) => Promise<boolean>;
 }
 
@@ -163,8 +165,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     // discord.play is open to everyone in Discord and needs no prompt; once a conversation has it, it stays active.
     const playable = Boolean(request.play && request.authorization?.available().includes('discord.play'));
     if (playable && request.authorization!.allows('discord.play')) activePermissions.push('discord.play');
-    // Apps outlive a conversation's history (a restart starts it over), so one with an app still running keeps discord.play.
-    else if (playable && request.play!.runtime.list(request.play!.conversation).some(app => app.status === 'running')) await activate(['discord.play'], 'An app started in this conversation is still running.');
+    // Apps outlive a conversation's history (a restart starts it over), so an app still running here keeps discord.play, even one another conversation started in this channel.
+    else if (playable && request.play!.runtime.list(request.play!.conversation, request.play!.channelId).some(app => app.status === 'running')) await activate(['discord.play'], 'An app is still running here.');
     const provider = config.routingMode === 'direct' ? undefined : budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
     const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, { ...(request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)), ...(playable ? playQuestion : {}) }) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
     const physicalOnline = dependencies.localProbe
@@ -287,7 +289,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         } : undefined,
         unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled,
         // Each attempt fits earlier turns, with their steps, to its own model's context.
-        history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, beforeMutation: dependencies.beforeMutation,
+        history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, onReasoning: dependencies.onReasoning, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
           const approved = await dependencies.approve(approval);
           await telemetry.event('approval', { kind: approval.kind, approved });

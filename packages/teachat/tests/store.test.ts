@@ -112,6 +112,18 @@ it('leases identities to one holder at a time until they expire', async () => {
   expect(await room.claim('juner', 'a', 60_000)).toBe(true);
 });
 
+it('frees leases whose process has exited, and hands over a live one only on takeover', async () => {
+  const room = await openRoom({ dir: await directory() });
+  const lease = async () => (await room.identities()).find(i => i.username === 'juner')?.lease;
+  expect(await room.claim('juner', `${deadPid()}:gone`, 60_000)).toBe(true);
+  expect(await lease()).toBeUndefined();
+  expect(await room.claim('juner', `${process.pid}:a`, 60_000)).toBe(true);
+  expect(await room.claim('juner', `${process.pid}:b`, 60_000)).toBe(false);
+  expect(await room.claim('juner', `${process.pid}:b`, 60_000, { takeover: true })).toBe(true);
+  expect((await lease())?.holder).toBe(`${process.pid}:b`);
+  expect(await room.renew('juner', `${process.pid}:a`, 60_000)).toBe(false);
+});
+
 it('archives the oldest live messages without renumbering', async () => {
   const dir = await directory();
   const room = await openRoom({ dir });
@@ -120,6 +132,8 @@ it('archives the oldest live messages without renumbering', async () => {
   expect((await room.read('venting')).map(m => m.n)).toEqual([3, 4, 5]);
   const archived = (await readFile(join(dir, 'channels', 'venting.archive.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line).text);
   expect(archived).toEqual(['a', 'b']);
+  expect((await room.archived('venting')).map(m => m.text)).toEqual(['a', 'b']);
+  expect(await room.archived('ysk')).toEqual([]);
   expect((await room.post({ channel: 'venting', author: 'basil', text: 'f', replyTo: 1 })).n).toBe(6);
   expect(await room.archive('venting', 0)).toEqual([]);
   await room.setSummary('venting', 'complaints about flaky CI', 6);

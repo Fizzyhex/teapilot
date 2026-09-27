@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { route, type IncomingMessage } from '../src/discord/access.js';
-import { chunk, ProgressLine, quoteMessage, throttle } from '../src/discord/render.js';
+import { chunk, quoteMessage, StatusCard, throttle } from '../src/discord/render.js';
 import { readDiscordSettings } from '../src/discord/settings.js';
 
 const alice = '111111111111111111', mallory = '222222222222222222', channel = '333333333333333333', guild = '444444444444444444';
@@ -53,16 +53,41 @@ it('hard-splits a single line longer than the limit', () => {
   expect(parts.join('')).toBe('x'.repeat(4500));
 });
 
-it('folds tool events into one redacted progress message', () => {
-  const progress = new ProgressLine(text => text.replace('secret', '[REDACTED]'), 2);
-  expect(progress.push({ type: 'text', text: 'ignored' })).toBe(false);
-  progress.push({ type: 'tool_execution_start', tool: 'read' });
-  expect(progress.render()).toBe('- running read...');
-  progress.push({ type: 'tool_execution_end', tool: 'read', path: 'a.ts' });
-  progress.push({ type: 'tool_execution_end', tool: 'bash', command: 'echo secret' });
-  progress.push({ type: 'tool_execution_end', tool: 'write', path: 'b.ts', size: 10, isError: true });
-  expect(progress.render()).toBe('- ... 1 earlier\n- shell: echo [REDACTED]\n- write b.ts (10 B) — failed');
+it('folds a turn into one redacted status card with its latest steps', () => {
+  let now = 0;
+  const card = new StatusCard(text => text.replace('secret', '[REDACTED]'), { now: () => now, maxSteps: 2 });
+  expect(card.push({ type: 'attempt_start' })).toBe(false);
+  expect(card.render()).toBe('🫖 thinking. · 0s');
+  card.push({ type: 'tool_execution_start', tool: 'read', path: 'a.ts' });
+  card.tick(); now = 65_000;
+  expect(card.render()).toBe('⚙️ running read a.ts.. · 1m 05s');
+  card.push({ type: 'tool_execution_end', tool: 'read', path: 'a.ts' });
+  card.push({ type: 'tool_execution_end', tool: 'bash', command: 'echo secret' });
+  card.push({ type: 'tool_execution_end', tool: 'write', path: 'b_c.ts', size: 10, isError: true });
+  card.reason('a'.repeat(300) + ' the <think>last</think> **thought**');
+  expect(card.render()).toBe(`🫖 thinking.. · 1m 05s\n-# … 1 earlier\n-# shell: echo \\[REDACTED\\]\n-# write b\\_c.ts (10 B) — failed\n-# 💭 …${'a'.repeat(139)} the last \\*\\*thought\\*\\*`);
+  expect(card.summary({ status: 'completed', spentUsd: 0.25, requestId: 'r1' })).toBe('-# Result: completed · 3 steps · 1m 05s · accounted $0.250000 · request r1');
+  // The turn's clock stops with it.
+  now = 200_000;
+  expect(card.details('completed').text).toMatch(/^\*\*Turn details\*\* · completed · 3 steps · 1m 05s\n/);
 });
+
+it('escapes a preview that would start a list, and clears it when the message ends', () => {
+  const card = new StatusCard(text => text);
+  card.push({ type: 'text', text: '- first\n2. second' });
+  expect(card.render()).toBe('✍️ writing. · 0s\n-# \\- first 2. second');
+  card.push({ type: 'message_end' });
+  expect(card.render()).toBe('🫖 thinking. · 0s');
+});
+
+it('attaches the whole log when Details would not fit in one message', () => {
+  const card = new StatusCard(text => text);
+  card.reason('x'.repeat(3000));
+  card.push({ type: 'tool_execution_end', tool: 'read', path: 'a.ts' });
+  const details = card.details('completed');
+  expect(details.text).toBe('**Turn details** · completed · 1 step · 0s\nThe full log is attached.');
+  expect(details.file?.name).toBe('turn-details.md');
+  expect(details.file?.content).toBe(`completed · 1 step · 0s\n\n${'x'.repeat(3000)}\n\n- read a.ts\n`);});
 
 it('coalesces frequent progress updates and delivers the latest on flush', async () => {
   const action = vi.fn(async () => undefined);

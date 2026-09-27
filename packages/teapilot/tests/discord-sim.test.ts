@@ -104,6 +104,18 @@ it('fires app timers when the clock jumps', async () => {
   await vi.waitFor(() => expect(world.render(world.find(message))).toContain('Count 100'));
 });
 
+it('resends a buried app at the bottom and turns away clicks on the old copy', async () => {
+  const { world, runtime, record, message } = await playWorld();
+  await world.click('op', message, 'add');
+  const { record: moved } = await runtime.resend(record.id, 'dm:x', { channelId });
+  const fresh = moved.messageId!;
+  expect(fresh).not.toBe(message);
+  expect(world.render(world.find(message))).toContain('This app moved to a newer message below.');
+  expect(world.render(world.find(fresh))).toContain('Count 1');
+  expect(world.logs.filter(line => line.startsWith('⚠'))).toEqual([]);
+  expect(await world.click('op', fresh, 'add')).toContain('Count 2');
+});
+
 it('flags what Discord would reject instead of accepting it', async () => {
   const { world, gateway } = await playWorld();
   await expect(gateway.play.post(channelId, { content: '', embeds: [], components: [], allowedMentions: { parse: [] } })).rejects.toThrow(DiscordRejected);
@@ -154,6 +166,9 @@ it('runs teapilot discord start against the simulator: a model builds an app, pe
   await vi.waitFor(() => expect(world.screen('dm-op')).toContain('Result: completed'), { timeout: 20_000 });
   expect(world.screen('dm-op')).toContain('Your counter is up.');
   expect(world.screen('dm-stranger')).not.toContain('teapilot');
+  const card = world.messages.find(message => message.content.startsWith('-# Result: completed'))!;
+  expect(card.components[0]!.components.map(control => control.label)).toEqual(['Details']);
+  expect(await world.click('op', card.id, 'details')).toMatch(/\(only op sees this\).*\n {2}\*\*Turn details\*\* · completed · 1 step · \d+s\n {2}- play\\_start/);
   const app = world.messages.find(message => message.content.startsWith('Count 0'))!;
   expect(app.channel.name).toBe('dm-op');
   expect(await world.click('op', app.id, 'add')).toContain('Count 1');
