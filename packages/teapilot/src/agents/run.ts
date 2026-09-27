@@ -18,6 +18,7 @@ import { ask } from './ask.js';
 import { coder } from './coder.js';
 import { fitHistory, turnSteps } from './history.js';
 import { latestCode, play, withoutCode, type Drafts, type PlayContext } from './play.js';
+import type { WebController } from '../web/controller.js';
 
 export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
@@ -36,6 +37,8 @@ export interface AttemptInput {
   unresolvedChecks?: string[];
   /** Search already failed or ran dry earlier in this request; this attempt runs without it. */
   searchUnavailable?: boolean;
+  /** The request's web controller: reads, budgets and the URLs seen so far outlast a single attempt. */
+  webController?: WebController;
 }
 export interface AttemptResult {
   success: boolean; text: string; reason?: EscalationReason;
@@ -80,6 +83,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const drafts: Drafts = { latest: () => latestCode(messages()), used: new Set<string>() };
   // Models that call a play tool without writing its code tend to repeat that call; a reply without tools cannot.
   let paused: AgentTool[] | undefined, writing = false, pauses = 0;
+  // A page is at most about a third of this model's context, and pages together at most about a quarter
+  // of it in tokens, so the attempt keeps room to reason and answer.
+  const reader = input.webController && { controller: input.webController, maxChars: Math.min(12_000, Math.floor(profile.contextTokens * 0.35)), budget: { remaining: profile.contextTokens } };
   const compose = async () => {
     const repository = effectiveConfig.policy.permissions.includes('repository.read');
     if (repository && !repositorySetup) {
@@ -90,7 +96,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${inventory.content.filter(part => part.type === 'text').map(part => part.text).join('\n')}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
       await telemetry.event('repository_inventory', { succeeded: true });
     }
-    const setup = ask(effectiveConfig, effectiveConfig.policy.permissions.includes('web.search'), repository, input.searchUnavailable);
+    const setup = ask(effectiveConfig, effectiveConfig.policy.permissions.includes('web.search'), repository, input.searchUnavailable, reader);
     if (repository && repositorySetup) {
       // Rebuild declarations after additional grants without rereading instructions
       // or reinventorying. Tool execution still checks the current effective policy.
@@ -165,7 +171,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const stream = guardedStream(config, tier, input.budget, telemetry, inference, playing ? { outputTokens: profile.maxOutputTokens } : undefined);
   // Populated in afterToolCall (which has args) and consumed once by the matching
   // tool_execution_end event below (which only carries the result).
-  const toolDetails = new Map<string, { path?: string; size?: number; command?: string }>();
+  const toolDetails = new Map<string, { path?: string; size?: number; command?: string; url?: string }>();
   // Calls that ran, or that the host stopped; any other finished call was refused before execution.
   const settled = new Map<string, 'ran' | 'stopped'>();
   const agent = new Agent({
@@ -194,9 +200,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (evidence.answerNow && context.tools?.length) {
         return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: `[host notice] ${evidence.answerWhy}, so tools are withdrawn for this attempt. Answer now from what you already have, clearly stating any gaps.`, timestamp: Date.now() }] };
       }
-      // Once search is exhausted or down, take the tool away: a refusal message alone does not stop a model retrying it.
-      const withoutSearch = <T extends { name: string }>(tools: T[]) => evidence.searchExhausted ? tools.filter(tool => tool.name !== 'web_search') : tools;
-      if (!toolsChanged) return evidence.searchExhausted && context.tools?.some(tool => tool.name === 'web_search') ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
+      // Once search or reading is exhausted, take the tool away: a refusal message alone does not stop a model retrying it.
+      const withdrawn = (name: string) => (evidence.searchExhausted && name === 'web_search') || (evidence.readsExhausted && name === 'web_read');
+      const withoutSearch = <T extends { name: string }>(tools: T[]) => tools.filter(tool => !withdrawn(tool.name));
+      if (!toolsChanged) return context.tools?.some(tool => withdrawn(tool.name)) ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
       toolsChanged = false;
       const next = await compose();
       return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[host notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
@@ -204,6 +211,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     beforeToolCall: async ({ toolCall }) => {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) { settled.set(toolCall.id, 'stopped'); return { block: true, terminate: true, reason: 'Attempt stopped' }; }
       if (evidence.searchExhausted && toolCall.name === 'web_search') return { block: true, reason: 'Search refused: search is unavailable or repeated searches found no new evidence. Continue without it, clearly stating any gaps.' };
+      if (evidence.readsExhausted && toolCall.name === 'web_read') return { block: true, reason: 'Reading refused: the page budget is spent or reads kept returning the same page. Continue without it, clearly stating any gaps.' };
       if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
       return undefined;
     },
@@ -212,7 +220,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
       evidence.observe(toolCall.name, args, isError, result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
-      const data = args as { path?: string; command?: string };
+      const data = args as { path?: string; command?: string; url?: string };
       // Tools normalize args.path to an absolute path before executing; keep that
       // for evidence (unambiguous for the model's continuation) but show relative
       // paths in the per-call trail, matching how a person names files here.
@@ -224,6 +232,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         toolDetails.set(toolCall.id, { path: relPath(data.path), size });
       } else if (toolCall.name === 'read' && data.path) toolDetails.set(toolCall.id, { path: relPath(data.path) });
       else if (['bash', 'powershell'].includes(toolCall.name) && data.command) toolDetails.set(toolCall.id, { command: data.command });
+      else if (toolCall.name === 'web_read' && typeof data.url === 'string') toolDetails.set(toolCall.id, { url: shortUrl(data.url) });
       if (evidence.warning) return { content: [...result.content, { type: 'text' as const, text: evidence.warning }] };
       return undefined;
     },
@@ -257,11 +266,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       input.onEvent?.({ type: 'message_end' });
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
       if (event.type === 'tool_execution_start') input.onActivity?.({ kind: 'waiting', label: `Running ${event.toolName}...` });
-      let detail: { path?: string; size?: number; command?: string; refused?: boolean } | undefined;
+      let detail: { path?: string; size?: number; command?: string; url?: string; refused?: boolean } | undefined;
       if (event.type === 'tool_execution_start') {
         // What is about to run, for progress displays; the end event reports what actually ran.
-        const args = (event.args ?? {}) as { path?: unknown; command?: unknown };
+        const args = (event.args ?? {}) as { path?: unknown; command?: unknown; url?: unknown };
         if (typeof args.command === 'string') detail = { command: args.command };
+        else if (typeof args.url === 'string') detail = { url: shortUrl(args.url) };
         else if (typeof args.path === 'string') detail = { path: relative(policy.root, resolve(policy.root, args.path)) || args.path };
       } else {
         const state = settled.get(event.toolCallId); settled.delete(event.toolCallId);
@@ -321,4 +331,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     check: evidence.unresolvedChecks.size ? 'failed' : evidence.lastCheck,
     ending: { stopReason: last?.role === 'assistant' ? last.stopReason : undefined, error: last?.role === 'assistant' ? last.errorMessage?.slice(0, 300) : undefined, textChars: text.length },
   };
+}
+
+/** A URL as progress displays show it: host and path, without scheme or query, within 80 characters. */
+export function shortUrl(raw: string): string {
+  let text = raw;
+  try { const url = new URL(raw); text = `${url.host}${url.pathname === '/' ? '' : url.pathname}${url.search ? '?…' : ''}`; } catch { /* shown as given */ }
+  return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }
