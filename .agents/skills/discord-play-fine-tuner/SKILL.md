@@ -11,11 +11,17 @@ Your goal is recursive improvement and alignment of teapilot's output (response 
 Use the `agent-discord.mjs` to interact with teapilot. Discover frustrations, bugs, and opportunities for improvement. You may fine tune by:
 
 - Tweaking the `src/agents/play.ts` system prompt, and anything relevant to improving the result / your testing experience.
-- Iterating on, and improving agent tooling.
+- Iterating on, adding, and improving agent tooling.
 
 You should produce a short report before/after runs for review - and score output for comparison at the end.
 
 Tweaks to system prompts should be generalised - and not 'cheat' by optimising for specific case-by-case scenarios.
+
+teapilot has a minimalist philosophy for system prompts - much like `pi.dev`.
+
+At the end, write your report to `feedback/finetuning-reports/yyyy-mm-dd-finetune-<index>.md`
+
+YOU ARE ALLOWED TO IMPROVE TEAPILOT IN GENERIC WAYS. THIS MAY INCLUDE INTRODUCING NEW SKILLS, FINE TUNING OR EXPANDING CAPABILITIES.
 ```
 
 ## Verifying a case
@@ -28,10 +34,14 @@ Don't judge a case by teapilot's reply alone. Check the app itself:
 - Timers: use `advance <name> 30s` instead of waiting, and check whether the app ticks with `after()` and how often.
 - Rejections: `screen` only lists tool names. `log <name>` shows what each `play_*` tool returned (e.g. why a `play_start` was rejected), so check it when a turn retries or hits the context limit.
 - Survival: `restart <name>` mid-game should leave the app working.
+- Files: attach with `say <name> "..." --attach path`. Open the path on each `📎` line to check what teapilot sent or an app shows (images can be viewed directly), not only its name.
 
-## Ultra Challenge Cases
+## Special Challenge Cases (Ultra/Image)
 
-If you're asked to attempt challenge cases, you should do the cases in `./ultra-challenges.md`. DO NOT do the cases listed below.
+If you're specifically asked to attempt challenge cases, do the cases at one of the following directories, NOT the ones listed in this document.
+
+- `ultra challenges` -> `./ultra-challenges.md`
+- `file challenges` -> `./file-challenges.md`
 
 ## Case 1: Snake Game
 

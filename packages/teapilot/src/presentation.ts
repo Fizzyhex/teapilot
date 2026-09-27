@@ -25,6 +25,7 @@ export function describeTool(event: HostEvent): string {
   }
   if (tool === 'read' && path) return `read ${path}${suffix}`;
   if (typeof event.command === 'string') return `shell: ${event.command}${suffix}`;
+  if (tool === 'web_read' && typeof event.url === 'string') return `web_read ${event.url}${suffix}`;
   return `${tool}${suffix}`;
 }
 

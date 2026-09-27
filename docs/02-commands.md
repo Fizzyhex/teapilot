@@ -45,7 +45,7 @@ Configure `SEARCH_BASE_URL` with a SearXNG JSON endpoint, or use the search setu
 teapilot ask --web "Research current information and cite sources"
 ```
 
-Only that request receives search. Search returns bounded snippets and does not fetch arbitrary pages. Noninteractive requests fail if search is unavailable rather than silently answering without it.
+Only that request receives search. Teapilot can open pages from the results as bounded text; local and private network addresses are never read. Noninteractive requests fail if search is unavailable rather than silently answering without it.
 
 ## Discord
 

@@ -3,6 +3,7 @@ import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
+import type { FileStore } from './files.js';
 import type { MessagePayload } from './play/render.js';
 import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
 import { chunk, StatusCard, throttle, type CardReply } from './render.js';
@@ -20,6 +21,8 @@ export interface DiscordTransport {
   /** Post approve/deny buttons. Resolves false when `signal` aborts first. */
   askApproval(text: string, signal: AbortSignal): Promise<boolean>;
   typing(): void;
+  /** Posts files as attachments, with a line of text. */
+  sendFiles?(text: string, files: Array<{ name: string; data: Buffer }>): Promise<string>;
   /** Where teapilot answers through an interaction: posts a discord.play app as a reply to it. */
   postApp?(payload: MessagePayload): Promise<HostedMessage>;
 }
@@ -65,6 +68,8 @@ export interface ConversationOptions {
    * through an interaction instead. `conversation` manages them, by default this conversation's key.
    */
   play?: { runtime: PlayRuntime; channelId?: string; post?: StartOptions['post']; conversation?: string };
+  /** Attachments and files teapilot makes, kept per conversation under the same key as its apps. */
+  files?: FileStore;
 }
 
 const discordHelp = 'Discord: /stop cancels the running turn; /clear ends this conversation and clears its history. The repository root is fixed; change it with teapilot discord setup.';
@@ -171,9 +176,11 @@ export class Conversation {
     const admin = access && this.speaker ? access.adminFor(this.speaker) : undefined;
     // With roles in force, a turn without a known sender holds nothing.
     base.authorization?.setCaller(access ? this.speaker ? access.callerFor(this.speaker) : () => ({ permissions: [] }) : undefined);
-    const { play } = this.options;
+    const { play, files, transport } = this.options;
+    const conversation = play?.conversation ?? this.options.key;
     const request: HostRequest = { ...base, access: admin,
-      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation: play.conversation ?? this.options.key, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined } };
+      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined,
+        files: files && { store: files, conversation, send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) } } };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
     const answerOnly = this.answerOnly;

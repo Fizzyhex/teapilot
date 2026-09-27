@@ -105,11 +105,14 @@ export class AccessStore {
     return withPrerequisites([...held]).filter(value => this.ceiling.includes(value));
   }
 
-  /** The live view a session checks on every permission test. discord.play is open to everyone, so it never needs a click. */
+  /**
+   * The live view a session checks on every permission test. Web search (and reading, which comes with it) and
+   * discord.play are open to users and operators alike, so neither needs a click; repository access always does.
+   */
   callerFor(id: string): () => Caller {
     return () => {
       const held = this.permissionsOf(id);
-      const preapproved: Permission[] = this.roleOf(id) === 'user' ? ['web.search', 'discord.play'] : ['discord.play'];
+      const preapproved: Permission[] = ['web.search', 'discord.play'];
       return { permissions: held, preapproved: held.filter(value => preapproved.includes(value)) };
     };
   }

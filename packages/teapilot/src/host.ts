@@ -20,6 +20,7 @@ import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Per
 import { capabilityPlanner, playQuestion, readPlayGrant, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
 import { markWork } from './teachat/busy.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
+import { WebController } from './web/controller.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
@@ -73,6 +74,13 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   let teachatIdentity: TeachatIdentityAnswer | undefined;
   const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value)), dependencies.onEvent);
   const budget = new SpendGovernor(join(config.stateDir, 'spend.jsonl'), requestId, config.policy.budget);
+  // URLs the user wrote or earlier tools returned may be read; anything the model composes may not.
+  const web = new WebController(config, { event: (type, fields) => telemetry.event(type, fields) });
+  web.remember(currentPrompt);
+  for (const turn of request.history ?? []) {
+    web.remember(turn.user);
+    for (const step of turn.steps ?? []) if (step.role === 'toolResult') web.remember(JSON.stringify(step.content));
+  }
   const receipts: string[] = [];
   let attempts = 0;
   let selected: string | undefined;
@@ -287,7 +295,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           }
           return activate(required, reason, signal);
         } : undefined,
-        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled,
+        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web,
         // Each attempt fits earlier turns, with their steps, to its own model's context.
         history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, onReasoning: dependencies.onReasoning, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {

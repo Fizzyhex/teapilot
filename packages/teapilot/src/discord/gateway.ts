@@ -15,9 +15,12 @@ const replyChainMessageChars = 2000;
 /** The fields teapilot reads from a message in a raw Gateway payload. */
 interface RawMessage { author?: { username?: string }; content?: string; message_reference?: { type?: number; message_id?: string } }
 
+/** A file attached to a message; downloaded only for messages teapilot answers. */
+export interface IncomingFile { name: string; size: number; contentType?: string; download(): Promise<Buffer> }
 export interface GatewayMessage extends IncomingMessage {
   /** Message text with the bot mention removed. */
   content: string;
+  attachments: IncomingFile[];
   authorName: string;
   transport(): DiscordTransport;
   startThread(name: string): Promise<{ id: string; transport: DiscordTransport }>;
@@ -31,7 +34,7 @@ export interface GatewayCommand extends IncomingMessage {
   respond(text?: string): Promise<void>;
 }
 /** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
-export interface GatewayReply extends Omit<GatewayMessage, 'replyChain'> {
+export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'attachments'> {
   title: string;
   /** Interaction id, unique per invocation. */
   id: string;
@@ -87,8 +90,15 @@ const cardPrefix = 'teapilot-card:';
 /** Status cards whose buttons still answer; the oldest are forgotten first. */
 const cardLimit = 500;
 const quiet = { allowedMentions: { parse: [] as [] } };
-/** discord.play renders Discord API JSON, which discord.js accepts in place of its builders. */
-const raw = (payload: MessagePayload) => payload as unknown as BaseMessageOptions & { content: string };
+/**
+ * discord.play renders Discord API JSON, which discord.js accepts in place of its builders. Its pictures travel as
+ * files; an edit replaces the attachments it had, so an earlier picture never lingers under the new one.
+ */
+const raw = (payload: MessagePayload, edit = false) => {
+  const { files, pictures: _, ...rest } = payload;
+  return { ...rest, files: (files ?? []).map(file => ({ attachment: file.data, name: file.name })), ...(edit ? { attachments: [] } : {}) } as unknown as BaseMessageOptions & { content: string };
+};
+const attachments = (files: Array<{ name: string; data: Buffer }>) => files.map(file => ({ attachment: file.data, name: file.name }));
 
 /**
  * The only module that loads discord.js. It connects outbound over the Gateway:
@@ -139,6 +149,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     const sent = new Map<string, Message>();
     return {
       async send(text) { const message = await channel.send({ content: text, ...quiet }); sent.set(message.id, message); return message.id; },
+      async sendFiles(text, files) { return (await channel.send({ content: text, files: attachments(files), ...quiet })).id; },
       async edit(id, text) { const message = sent.get(id) ?? await channel.messages.fetch(id); await message.edit({ content: text, ...quiet }); },
       async card(text, controls, id) {
         const payload = cardPayload(text, controls);
@@ -169,6 +180,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     const revise = async (id: string, payload: BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds }) => { live(); await interaction.webhook.editMessage(id, payload); };
     return {
       async send(text) { return (await post({ content: text, components: [], ...quiet })).id; },
+      async sendFiles(text, files) { return (await post({ content: text, files: attachments(files), components: [], ...quiet })).id; },
       edit: (id, text) => revise(id, { content: text, ...quiet }),
       async card(text, controls, id) {
         const payload = cardPayload(text, controls);
@@ -181,7 +193,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       // The runtime stops editing through this interaction once it expires, and uses the app's clicks after that.
       async postApp(payload) {
         const message = await post(raw(payload));
-        return { id: message.id, edit: next => revise(message.id, raw(next)) };
+        return { id: message.id, edit: next => revise(message.id, raw(next, true)) };
       },
     };
   };
@@ -364,7 +376,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         openModal: async payload => { if (interaction.isModalSubmit()) throw new Error('A form cannot open another form.'); await interaction.showModal(payload as unknown as APIModalInteractionResponseCallbackData); },
         reply: async content => { await interaction.reply({ content, flags: MessageFlags.Ephemeral, ...quiet }); },
         defer: async () => { await interaction.deferUpdate(); },
-        update: async payload => { await interaction.editReply(raw(payload)); },
+        update: async payload => { await interaction.editReply(raw(payload, true)); },
         followUp: async (content, embeds) => { await interaction.followUp({ content, embeds: embeds as BaseMessageOptions['embeds'], flags: MessageFlags.Ephemeral, ...quiet }); },
       });
       return;
@@ -422,6 +434,12 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       ownThread: thread?.ownerId === self.id,
       mentionsBot: message.mentions.users.has(self.id),
       content: strip(message.content, self.id),
+      attachments: [...message.attachments.values()].map(file => ({ name: file.name, size: file.size, contentType: file.contentType ?? undefined,
+        async download() {
+          const response = await fetch(file.url, { signal: AbortSignal.timeout(30_000) });
+          if (!response.ok) throw new Error(`Discord returned ${response.status} for ${file.name}.`);
+          return Buffer.from(await response.arrayBuffer());
+        } })),
       replyChain: () => replyChain(message, self.id),
       transport: () => transport(channel),
       async startThread(name) {
@@ -465,7 +483,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     username: id => client.users.fetch(id).then(user => user.username, () => undefined),
     play: {
       async post(channelId, payload) { return (await (await messages(channelId)).send(raw(payload))).id; },
-      async edit(channelId, messageId, payload) { await (await (await messages(channelId)).messages.fetch(messageId)).edit(raw(payload)); },
+      async edit(channelId, messageId, payload) { await (await (await messages(channelId)).messages.fetch(messageId)).edit(raw(payload, true)); },
       request: (method, route, body) => client.rest.request({ method: method as RequestMethod, fullRoute: route as RouteLike, body }),
     },
     async close() {

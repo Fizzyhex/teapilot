@@ -7,6 +7,7 @@ import { endpointDriver, managedRuntimes, type ProvisionedModel, type RuntimeDri
 import { configureOllamaModel, hardware, isTeapilotAlias, ollamaAlias, ollamaJSON, presets, provisionedOllama, roleChoices, roleLabel, type OllamaModel, type PreparedModel } from '../runtime/ollama.js';
 import { Navigation, runTabs, type ScreenTab, type SetupScreen } from './screen.js';
 import { configureSearch } from './search.js';
+import { configureReader } from './reader.js';
 import type { SetupUI } from './terminal.js';
 
 export const setupTabs: ScreenTab[] = [
@@ -378,12 +379,14 @@ async function checks(s: Session, signal: AbortSignal): Promise<TabResult> {
 
 async function search(s: Session, signal: AbortSignal): Promise<TabResult> {
   const config = cloneConfig(s.draft.config), env = { ...s.draft.env };
-  const status = await configureSearch(config, env, s.draft.directory, s.screen, signal);
+  let status = await configureSearch(config, env, s.draft.directory, s.screen, signal);
+  if (config.searchUrl && config.policy.permissions.includes('web.search')) status += ` · ${await configureReader(config, env, s.screen, signal)}`;
   s.searchStatus = status;
   s.draft.config.searchUrl = config.searchUrl;
+  s.draft.config.webReader = config.webReader;
   s.draft.config.policy.permissions = config.policy.permissions;
   s.draft.env = env;
-  s.screen.mark('search', config.searchUrl !== s.original.search ? 'changed' : undefined);
+  s.screen.mark('search', config.searchUrl !== s.original.search || env.WEB_READER !== s.original.env.WEB_READER || env.AGENT_BROWSER_BIN !== s.original.env.AGENT_BROWSER_BIN ? 'changed' : undefined);
   return undefined;
 }
 

@@ -340,7 +340,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
       else if (req.url?.endsWith('/models')) res.end('{}');
       else if (req.url?.startsWith('/search?')) { searches++; res.end(JSON.stringify({ results: [{ title: 'Source', url: 'https://example.com/source', content: 'Evidence' }] })); }
       else if (++calls === 1) {
-        expect(body.tools.map((tool: any) => tool.function.name)).toEqual(['web_search', 'request_escalation']);
+        expect(body.tools.map((tool: any) => tool.function.name)).toEqual(['web_search', 'web_read', 'request_escalation']);
         completion(res, { tool: { name: 'web_search', arguments: { query: 'current facts' } } });
       } else { expect(JSON.stringify(body.messages)).toContain('https://example.com/source'); completion(res, { text: 'Evidence [Source](https://example.com/source)' }); }
     });

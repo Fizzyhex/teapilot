@@ -10,6 +10,7 @@ import { endpointDriver, isRuntimeError, managedRuntimes, RuntimeError, type Run
 import { command, windowsTool } from '../runtime/process.js';
 import type { SetupUI } from './terminal.js';
 import { configureSearch } from './search.js';
+import { configureReader } from './reader.js';
 
 export type { CredentialStorage } from './draft.js';
 export interface SetupOptions {
@@ -142,7 +143,8 @@ async function linearSetup(draft: Draft, options: SetupOptions, ui: SetupUI, sig
   applyReports(config, roles, reports);
   const report = reports.get('capable') ?? reports.get('fast');
   const routingReady = config.routingMode === 'direct' || await during(ui, 'Verifying hosted routing...', () => routingCheck(config, ui.confirm, ui.log, signal));
-  const searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, draft.directory, ui, signal);
+  let searchStatus = options.nonInteractive ? (config.searchUrl ? 'Unchanged · not tested' : 'Disabled') : await configureSearch(config, env, draft.directory, ui, signal);
+  if (!options.nonInteractive && config.searchUrl && config.policy.permissions.includes('web.search')) searchStatus += ` · ${await configureReader(config, env, ui, signal)}`;
   ui.log('\nReady to save');
   for (const line of summaryLines(draft, config, roles, { displayModel, checks: checksLine(report), routingReady, searchStatus })) ui.log(line);
   if (!options.nonInteractive && !await ui.confirm(draft.hasConfiguration ? 'Save these settings? The previous configuration will be kept for rollback.' : 'Save these settings?')) {

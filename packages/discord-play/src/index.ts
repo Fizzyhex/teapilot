@@ -31,11 +31,15 @@ export interface Modal { type: 'modal'; id: string; title: string; fields: Modal
 export type Control = Button | Select;
 export interface Row { type: 'row'; controls: Control[] }
 export interface EmbedField { name: string; value: string; inline?: boolean }
+/** An image from the conversation's files, edited as it is shown; `filter` takes CSS filters such as "grayscale(1) sepia(1)". */
+export interface Picture { type: 'picture'; file: string; rotate?: number; flip?: 'horizontal' | 'vertical' | 'both'; filter?: string; width?: number }
 export interface Embed {
   type: 'embed'; title?: string; description?: string;
   /** A number such as 0x5865f2, a hex string such as "#5865f2", or a name from `colors`. */
   color?: number | string;
-  fields?: EmbedField[]; footer?: string; url?: string; thumbnail?: string; image?: string;
+  fields?: EmbedField[]; footer?: string; url?: string;
+  /** An http(s) URL, or a picture() of a conversation file. */
+  thumbnail?: string | Picture; image?: string | Picture;
 }
 /** One Discord message. Apps edit the same message in place as their state changes. */
 export interface View { content?: string; embeds?: Embed[]; rows?: Row[] }
@@ -129,6 +133,12 @@ export function meter(value: number, max: number, width = 10, full = '🟩', emp
   const filled = max > 0 ? Math.round(Math.min(Math.max(value / max, 0), 1) * width) : 0;
   return full.repeat(filled) + empty.repeat(Math.max(width - filled, 0));
 }
+
+/**
+ * A file shared in the conversation, shown as an embed's image or thumbnail: rotated by degrees, flipped,
+ * filtered and scaled to `width` as it is shown. picture("cat.png", { rotate: 90, filter: "sepia(1)" })
+ */
+export function picture(file: string, options: Omit<Picture, 'type' | 'file'> = {}): Picture { return { type: 'picture', file, ...options }; }
 
 /** Hidden until clicked. */
 export function spoiler(value: string): string { return `||${value.replace(/\|\|/g, '| |')}||`; }

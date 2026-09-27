@@ -62,7 +62,9 @@ All the [session commands](02-commands.md#interactive-use) work, except:
 - `/clear` ends the conversation and its history. Your next message starts a new session.
 - `/cd` is unavailable. Change the root with `teapilot discord setup`.
 
-Messages sent during a turn are queued as your next message. Long answers are split across messages, and attachments are ignored.
+Messages sent during a turn are queued as your next message. Long answers are split across messages.
+
+Files you attach to a message (up to 5, 10 MB each) stay with the conversation: teapilot can edit images, run an attached app, and send files back as attachments. Files on messages answered through the Reply menu are ignored.
 
 ## Interactive apps
 
