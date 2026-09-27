@@ -23,3 +23,11 @@ expectation: app is loaded, chair emojis become pig emojis, teapilot sends the c
 2. ask teapilot to convert the image to an 85% quality webp.
 
 expectation: (1) creates the image as expected, teapilot sends it back. (2) has teapilot send the image at 85% quality, with the edits preserved.
+
+## Case 4F: freestyle
+
+This case has no set design.
+
+Study the above challenges, and pick something fun and creative that will challenge teapilot's capabilities.
+
+Start with an initial request, then, have 3-5 more ideas queued up to make the final end result.

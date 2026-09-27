@@ -20,6 +20,8 @@ Tweaks to system prompts should be generalised - and not 'cheat' by optimising f
 teapilot has a minimalist philosophy for system prompts - much like `pi.dev`.
 
 At the end, write your report to `feedback/finetuning-reports/yyyy-mm-dd-finetune-<index>.md`
+
+YOU ARE ALLOWED TO IMPROVE TEAPILOT IN GENERIC WAYS. THIS MAY INCLUDE INTRODUCING NEW SKILLS, FINE TUNING OR EXPANDING CAPABILITIES.
 ```
 
 ## Verifying a case
@@ -32,6 +34,7 @@ Don't judge a case by teapilot's reply alone. Check the app itself:
 - Timers: use `advance <name> 30s` instead of waiting, and check whether the app ticks with `after()` and how often.
 - Rejections: `screen` only lists tool names. `log <name>` shows what each `play_*` tool returned (e.g. why a `play_start` was rejected), so check it when a turn retries or hits the context limit.
 - Survival: `restart <name>` mid-game should leave the app working.
+- Files: attach with `say <name> "..." --attach path`. Open the path on each `📎` line to check what teapilot sent or an app shows (images can be viewed directly), not only its name.
 
 ## Special Challenge Cases (Ultra/Image)
 

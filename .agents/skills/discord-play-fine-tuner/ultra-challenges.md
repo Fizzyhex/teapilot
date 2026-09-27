@@ -30,7 +30,7 @@ expectations - game is as described. controls move the player around.
 
 ## Case 3U: freestyle
 
-This challenge has no set design.
+This case has no set design.
 
 Study the above challenges, and pick something fun and creative that will challenge teapilot's capabilities.
 
