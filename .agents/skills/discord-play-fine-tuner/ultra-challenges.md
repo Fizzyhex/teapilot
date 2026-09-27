@@ -33,3 +33,7 @@ expectations - game is as described. controls move the player around.
 This challenge has no set design.
 
 Study the above challenges, and pick something fun and creative that will challenge teapilot's capabilities.
+
+(examples: non-infinite paper minecraft, bomberman, repo access read-only file browser)
+
+Start with an initial request, then, have 3-5 more ideas queued up to make the final end result.
