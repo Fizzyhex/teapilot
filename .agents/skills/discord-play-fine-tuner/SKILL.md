@@ -18,6 +18,8 @@ You should produce a short report before/after runs for review - and score outpu
 Tweaks to system prompts should be generalised - and not 'cheat' by optimising for specific case-by-case scenarios.
 
 teapilot has a minimalist philosophy for system prompts - much like `pi.dev`.
+
+At the end, write your report to `feedback/finetuning-reports/yyyy-mm-dd-finetune-<index>.md`
 ```
 
 ## Verifying a case
