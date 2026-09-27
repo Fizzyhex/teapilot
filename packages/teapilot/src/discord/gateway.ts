@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
+import { createRequire } from 'node:module';
+import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, ClientOptions, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
 import { collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
@@ -101,6 +102,17 @@ const raw = (payload: MessagePayload, edit = false) => {
 const attachments = (files: Array<{ name: string; data: Buffer }>) => files.map(file => ({ attachment: file.data, name: file.name }));
 
 /**
+ * A dispatcher from the undici discord.js itself loads. Its REST client otherwise uses undici's process-wide
+ * dispatcher, which pi-coding-agent replaces with its newer undici on import; that one cannot send the
+ * older undici's FormData, so every upload hung until discord.js timed out ("This operation was aborted").
+ */
+function restAgent(): NonNullable<NonNullable<ClientOptions['rest']>['agent']> {
+  const discord = createRequire(createRequire(import.meta.url).resolve('discord.js'));
+  const { Agent } = createRequire(discord.resolve('@discordjs/rest'))('undici') as { Agent: new () => NonNullable<NonNullable<ClientOptions['rest']>['agent']> };
+  return new Agent();
+}
+
+/**
  * The only module that loads discord.js. It connects outbound over the Gateway:
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
@@ -110,6 +122,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Channel],
     allowedMentions: { parse: [] },
+    rest: { agent: restAgent() },
   });
   const pending = new Map<string, { text: string; resolve(approved: boolean): void }>();
   const cards = new Map<string, CardControls['press']>();

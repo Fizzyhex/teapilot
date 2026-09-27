@@ -28,8 +28,8 @@ export interface Drafts {
   block?(): { tag: string; body: string } | undefined;
   /** Code the tools took, so it can be left out of the answer people see. */
   used: Set<string>;
-  /** Set when a tool found no code, so the runner can ask for the code with tools paused. */
-  missing?: boolean;
+  /** Set when a tool found no code, so the runner can ask for it with tools paused: an app's, or a file's content. */
+  missing?: 'app' | 'file';
 }
 
 const fence = /```([\w-]*)[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
@@ -52,11 +52,13 @@ export function latestCode(messages: Message[]): string | undefined {
   return undefined;
 }
 
-/** The newest code block of any language in the model's replies. */
+/** The newest code block of any language in the model's replies, or as latestCode, in its thinking when the reply has none. */
 export function latestBlock(messages: Message[]): { tag: string; body: string } | undefined {
   for (const message of [...messages].reverse()) {
     if (message.role !== 'assistant') continue;
-    const found = message.content.flatMap(part => part.type === 'text' ? [...part.text.matchAll(fence)] : []).at(-1);
+    const written = message.content.flatMap(part => part.type === 'text' ? [...part.text.matchAll(fence)] : []);
+    const thought = message.content.flatMap(part => part.type === 'thinking' ? [...part.thinking.matchAll(fence)] : []);
+    const found = written.at(-1) ?? thought.at(-1);
     if (found) return { tag: found[1]!.toLowerCase(), body: found[2]! };
   }
   return undefined;
@@ -159,9 +161,9 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     if (args.source !== undefined && args.path !== undefined) return 'Give the code block or path, not both.';
     if (args.path === undefined) {
       const code = draft(args);
-      if (code === undefined) { if (drafts) drafts.missing = true; return noCode; }
+      if (code === undefined) { if (drafts) drafts.missing = 'app'; return noCode; }
       // Small models resend the block that just failed instead of fixing it; the second time, tools pause until new code is written.
-      if (code.trim() === rejected) { if (++resent > 1 && drafts) drafts.missing = true; return 'That is the code that was just rejected, unchanged. Fix the problem first: pass edits (exact find/replace on that code), or write a new whole ```js code block.'; }
+      if (code.trim() === rejected) { if (++resent > 1 && drafts) drafts.missing = 'app'; return 'That is the code that was just rejected, unchanged. Fix the problem first: pass edits (exact find/replace on that code), or write a new whole ```js code block.'; }
       resent = 0; trying = code.trim(); tried = code;
       return args.trusted ? 'Trusted apps load from a repository file; pass path.' : { kind: 'sandbox', code };
     }

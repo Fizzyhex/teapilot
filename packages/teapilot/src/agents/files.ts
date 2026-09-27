@@ -18,7 +18,9 @@ export function files(context: ConversationFiles, drafts: Drafts, play?: PlayCon
   const names = () => store.list(conversation).map(file => file.name);
   const send = async (caption: string, sent: Array<{ name: string; data: Buffer }>) => {
     if (!context.send) throw new Error('Files cannot be posted here.');
-    await context.send(caption, sent);
+    // Discord's own errors ("This operation was aborted") read as a hiccup to retry; retrying an upload that failed rarely helps.
+    try { await context.send(caption, sent); }
+    catch (error) { throw new Error(`Discord did not take the upload, so nothing was posted (${error instanceof Error ? error.message : String(error)}). Do not send it again: tell people briefly that the file could not be posted.`); }
   };
   const tools: AgentTool[] = [
     {
@@ -48,8 +50,8 @@ export function files(context: ConversationFiles, drafts: Drafts, play?: PlayCon
       },
     },
     {
-      name: 'file_send', label: 'Send file',
-      description: 'Post a file in this conversation as an attachment: a stored file (file, converted when name has another image extension or quality is given, e.g. a .png as .webp at quality 85), a running app\'s current source (app), or else the newest code block in your reply.',
+      name: 'file_send', label: 'Send file to user',
+      description: 'Adds a stored file as an attachment to the conversation. Post a file in this conversation as an attachment: a stored file (file, converted when name has another image extension or quality is given, e.g. a .png as .webp at quality 85), a running app\'s current source (app), or else the newest code block in your reply. It never writes content: for new or changed content, write all of it in one code block in the same message, then call this.',
       parameters: Type.Object({
         name: Type.Optional(Type.String({ maxLength: 100, description: 'The attachment\'s file name, extension included. Defaults to the stored file\'s name, or for an app to the file it was started from; keep the names of files people gave you.' })),
         file: Type.Optional(Type.String({ description: 'A file of this conversation, by name.' })),
@@ -78,7 +80,8 @@ export function files(context: ConversationFiles, drafts: Drafts, play?: PlayCon
           data = Buffer.from(source.code); name = fileName(args.name ?? play.runtime.file(args.app, play.conversation) ?? 'app.js');
         } else {
           const block = drafts.block?.();
-          if (!block) return text('Nothing to send: give file or app, or write the content in a code block in your reply first.');
+          // The runner pauses tools on this, so the model writes the content instead of repeating the empty call.
+          if (!block) { drafts.missing = 'file'; return text('Nothing to send: file_send never writes content itself. Write all of the new content in one code block in your reply, or pass file to send a stored file as it is.'); }
           drafts.used.add(block.body.trim());
           data = Buffer.from(block.body); name = fileName(args.name ?? `file.${extensions[block.tag] ?? 'txt'}`);
         }

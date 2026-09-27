@@ -36,7 +36,8 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
   apps <name>                        every discord.play app
   app <name> <id>                    one app: state, view, timers, recent actions and its source
   advance <name> <duration>          move the clock ahead, e.g. 30s, 5m, 25h
-  restart <name>                     restart teapilot; apps are recovered, conversations start over
+  restart <name>                     restart teapilot; apps and conversation history are recovered
+                                     (say "/clear" to start a conversation over)
   log <name> [--last N]              teapilot's operator log
   status <name>
   stop <name>

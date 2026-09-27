@@ -278,9 +278,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       }
       // Jev can also establish a web.search basis without a confident access plan (or when the plan
       // did not ask for search), so grant it whenever it is usable rather than waiting for a mid-run request.
-      if (request.authorization && !casual && webAutoBasis.length && !activePermissions.includes('web.search') && config.searchUrl
+      // Where search needs no approval anyway (Discord), a missed basis must not leave the model answering from memory.
+      if (request.authorization && !casual && (webAutoBasis.length || request.authorization.free('web.search')) && !activePermissions.includes('web.search') && config.searchUrl
         && config.policy.permissions.includes('web.search') && modelFor(config, selected.split('.')[1] as Tier).toolCalling) {
-        await activate(['web.search'], `Web search allowed automatically (${webAutoBasis.join(', ')}).`, request.signal, true);
+        await activate(['web.search'], webAutoBasis.length ? `Web search allowed automatically (${webAutoBasis.join(', ')}).` : 'Web search needs no approval here.', request.signal, true);
       }
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');

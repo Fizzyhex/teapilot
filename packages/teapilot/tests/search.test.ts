@@ -91,7 +91,7 @@ it('keeps search off for later attempts once it was unavailable', async () => {
   expect(later.some(offersSearch)).toBe(false);
 });
 
-const routed = async (web: Parameters<typeof jev>[4], webConfidence: number, ceiling = true) => {
+const routed = async (web: Parameters<typeof jev>[4], webConfidence: number, ceiling = true, preapproved = false) => {
   const f = await fixture(); cleanup.push(f.cleanup);
   const server = await mockServer((_body, req, res) => {
     if (req.url === '/jev') jev(res, 'ask.normal', 0.99, undefined, web, webConfidence);
@@ -103,6 +103,7 @@ const routed = async (web: Parameters<typeof jev>[4], webConfidence: number, cei
   if (!f.config.policy.permissions.includes('web.search') && ceiling) f.config.policy.permissions.push('web.search');
   if (!ceiling) f.config.policy.permissions = f.config.policy.permissions.filter(permission => permission !== 'web.search');
   const grants = await SessionGrants.create(f.cwd, f.config, 'ask');
+  if (preapproved) grants.setCaller(() => ({ permissions: ['inference', 'web.search'], preapproved: ['web.search'] }));
   const approvals: string[] = [];
   const result = await runHost(f.config, { cwd: f.cwd, prompt: 'What is the weather now?', mode: 'ask', authorization: grants },
     { approve: async approval => { approvals.push(approval.kind); return false; }, localProbe: async () => true });
@@ -121,6 +122,13 @@ it('prompts as before when web.search is needed but no auto-grant condition is c
   expect(approvals).toEqual(['capability']);
   expect(result.status).toBe('approval_denied');
   expect(grants.list()).not.toContain('web.search');
+});
+
+it('grants web.search that needs no approval even when Jev sees no reason to search', async () => {
+  const { result, approvals, grants } = await routed({}, 0.9, true, true);
+  expect(approvals).toEqual([]);
+  expect(result.success).toBe(true);
+  expect(grants.list()).toContain('web.search');
 });
 
 it('never auto-grants web.search that the policy ceiling disallows', async () => {

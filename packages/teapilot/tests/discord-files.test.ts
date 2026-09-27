@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { files } from '../src/agents/files.js';
 import { runAttempt } from '../src/agents/run.js';
 import { runImageScript, ScriptError } from '../src/discord/canvas-script.js';
 import { FileStore, pictures, type ConversationFiles } from '../src/discord/files.js';
@@ -221,4 +222,29 @@ export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: '
   const answer = await runAttempt({ ...f, ...f.base, prompt: 'how do I play?', activePermissions: ['inference', 'discord.play'], play: f.play });
   expect(answer.text).toBe('Press Go to count up.');
   expect(bodies).toHaveLength(1);
+});
+
+it('reports a failed upload as not posted, rather than as Discord\'s own error', async () => {
+  const store = FileStore.at(await directory('teapilot-files-'));
+  const context: ConversationFiles = { store, conversation: 'dm:1', send: async () => { throw new Error('This operation was aborted'); } };
+  const drafts = { latest: () => undefined, block: () => ({ tag: 'txt', body: 'olleh' }), used: new Set<string>() };
+  const send = files(context, drafts).tools.find(tool => tool.name === 'file_send')!;
+  await expect(send.execute('call', { name: 'helo.txt' })).rejects.toThrow(/nothing was posted.*This operation was aborted.*Do not send it again/);
+});
+
+it('pauses tools when file_send is called before the content is written, then sends what the model writes', async () => {
+  const bodies: any[] = [];
+  const steps = [
+    { tool: { name: 'file_send', arguments: { name: 'helo.txt' } } },
+    { text: '```txt\nolleh\n```' },
+    { tool: { name: 'file_send', arguments: { name: 'helo.txt' } } },
+    { text: 'sent.' },
+  ];
+  const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'reverse helo.txt and send it back', activePermissions: ['inference'], play: f.play });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(bodies[1].tools ?? []).toHaveLength(0);
+  expect(JSON.stringify(bodies[1].messages)).toContain('file_send never writes content itself');
+  expect(JSON.stringify(bodies[2].messages)).toContain('Call file_send now');
+  expect(f.sent.map(entry => entry.files.map(file => [file.name, file.data.toString()]))).toEqual([[['helo.txt', 'olleh']]]);
 });

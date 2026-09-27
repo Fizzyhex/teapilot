@@ -86,8 +86,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // has to be escaped into JSON arguments; blocks it used are left out of the answer shown to people.
   let messages = (): Message[] => [];
   const drafts: Drafts = { latest: () => latestCode(messages()), block: () => latestBlock(messages()), used: new Set<string>() };
-  // Models that call a play tool without writing its code tend to repeat that call; a reply without tools cannot.
-  let paused: AgentTool[] | undefined, writing = false, pauses = 0;
+  // Models that call a play tool or file_send without writing its code tend to repeat that call; a reply without tools cannot.
+  let paused: AgentTool[] | undefined, pausedFor: Drafts['missing'], writing = false, pauses = 0;
   // Small models sometimes answer "done" to a change request without calling a tool; the host holds them to it once.
   let changed = false, claimChecked = false, claimNotice = false;
   // A page is at most about a third of this model's context, and pages together at most about a quarter
@@ -205,12 +205,16 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         return { context: { ...context, messages }, messages: [{ role: 'user', content: '[host notice] The model server could not read your last tool call, so nothing ran. Keep tool arguments short: put code and long text in your reply (an app goes in one ```js code block), then call the tool again.', timestamp: Date.now() }] };
       }
       if (drafts.missing && context.tools?.length && pauses < 2) {
-        drafts.missing = false; pauses++; paused = context.tools; writing = true;
-        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: '[host notice] That call had no new app code to use. Tools are paused for this reply: write the whole app now as one ```js code block, with at most a sentence around it. The tools return on your next turn.', timestamp: Date.now() }] };
+        pausedFor = drafts.missing; drafts.missing = undefined; pauses++; paused = context.tools; writing = true;
+        const write = pausedFor === 'file'
+          ? 'That call had nothing to send: file_send never writes content itself. Tools are paused for this reply: write the whole content to send now as one code block, with at most a sentence around it.'
+          : 'That call had no new app code to use. Tools are paused for this reply: write the whole app now as one ```js code block, with at most a sentence around it.';
+        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: `[host notice] ${write} The tools return on your next turn.`, timestamp: Date.now() }] };
       }
       if (paused) {
         const tools = paused; paused = undefined;
-        return { context: { ...context, tools }, messages: [{ role: 'user', content: '[host notice] Tools are back. Call play_start (or play_update) now; it reads the code block you just wrote.', timestamp: Date.now() }] };
+        const call = pausedFor === 'file' ? 'Call file_send now with the file name; it sends' : 'Call play_start (or play_update) now; it reads';
+        return { context: { ...context, tools }, messages: [{ role: 'user', content: `[host notice] Tools are back. ${call} the code block you just wrote.`, timestamp: Date.now() }] };
       }
       // The last turn of a discord.play attempt answers about what is live rather than ending mid-call at the limit.
       if (playing && !evidence.answerNow && inference.turns >= config.policy.limits.maxTurns - 1) { evidence.answerNow = true; evidence.answerWhy = 'This is the last turn'; }
@@ -258,7 +262,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
       // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
       if (lost(message) && lostCalls < 2) { lostCalls++; lostNotice = true; return { action: 'continue' }; }
-      if (writing) { writing = false; if (drafts.latest()) return { action: 'continue' }; paused = undefined; }
+      if (writing) { writing = false; if (pausedFor === 'file' ? drafts.block?.() : drafts.latest()) return { action: 'continue' }; paused = undefined; }
       if (playing && !changed && !claimChecked && message.stopReason === 'stop' && !message.content.some(part => part.type === 'toolCall')
         && claimsChange(message.content.map(part => part.type === 'text' ? part.text : '').join('\n'))
         && input.play!.runtime.list(input.play!.conversation, input.play!.channelId).some(app => app.status === 'running')) {

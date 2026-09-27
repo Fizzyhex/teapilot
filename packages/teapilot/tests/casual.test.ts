@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { casualPrompt } from '../src/agents/casual.js';
 import { casualLines, paceLines } from '../src/casual.js';
 import { Conversation, TurnQueue, type CardControls, type ConversationOptions, type DiscordTransport } from '../src/discord/bridge.js';
 import { SessionGrants } from '../src/execution/grants.js';
@@ -64,10 +65,8 @@ it('answers a conversational message on the least-reasoning ask tier, with the c
   expect(events).toContainEqual({ type: 'route', capability: 'ask.normal', casual: true });
   expect(bodies).toHaveLength(1);
   expect(bodies[0].tools ?? []).toEqual([]);
-  const system = JSON.stringify(bodies[0].messages[0]);
-  for (const line of ['user: what does it mean to be conscious, are you conscious?', 'teapilot: duno mate\\\\n my source is public haha',
-    'user: i want you so bad', 'teapilot: _ _\\\\nyea ig we all want things jake :3',
-    'user: do you think we should go to the bar?', 'teapilot: yeah the views and food are like exactly what you asked go for it :P']) expect(system).toContain(line);
+  const system = bodies[0].messages[0].content;
+  expect(system).toContain(casualPrompt());
   expect(system).not.toContain('request_capabilities');
 });
 

@@ -61,11 +61,11 @@ export function readPlayGrant(raw: JevRawResponse | null | undefined, threshold:
  */
 const conversationSignals = {
   'conversation.threat': ['+', 'Is the current message a threat or insult aimed at teapilot itself?'],
-  'conversation.personal': ['+', 'Does the current message concern teapilot as a person, such as its opinions, feelings or likeability?'],
+  'conversation.personal': ['+', 'Does the current message concern teapilot as a person, such as its opinions, feelings, likeability or the way it talks?'],
   'conversation.existential': ['+', 'Is the current message an existential question about teapilot itself, such as whether it is conscious or alive?'],
   'conversation.banter': ['+', 'Is the current message banter, small talk or joking around with teapilot?'],
   'conversation.romance': ['+', 'Is the current message romantic or flirting with teapilot?'],
-  'conversation.task': ['-', 'Is the user tasking teapilot with a job, such as work, research, a fix, a lookup or an explanation of a topic?'],
+  'conversation.task': ['-', 'Is the user tasking teapilot with a job, such as work, research, a fix, a lookup or an explanation of a topic other than teapilot itself?'],
   'conversation.make': ['-', 'Is the user asking teapilot to make, write, build or change something?'],
 } as const;
 export const conversationQuestions: Record<string, JevRouteQuestion> = Object.fromEntries(Object.entries(conversationSignals).map(([key, [, question]]) => [key, { type: 'choice',
