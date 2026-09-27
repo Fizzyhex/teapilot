@@ -43,7 +43,6 @@ export function checkUrl(raw: string, allowPort?: (port: string) => boolean): UR
   try { url = new URL(raw.trim()); } catch { throw new WebRefusal('Not a valid URL.'); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new WebRefusal('Only http and https URLs can be read.');
   if (url.username || url.password) throw new WebRefusal('URLs with embedded credentials are not read.');
-  if (url.port && url.port !== (url.protocol === 'https:' ? '443' : '80') && !allowPort?.(url.port)) throw new WebRefusal('Only the standard web ports (80 and 443) can be read.');
   url.hash = '';
   if (url.href.length > 2000) throw new WebRefusal('URL is too long.');
   const host = hostOf(url);
@@ -51,6 +50,7 @@ export function checkUrl(raw: string, allowPort?: (port: string) => boolean): UR
     const name = host.replace(/\.$/, '').toLowerCase();
     if (name === 'localhost' || !name.includes('.') || localSuffixes.some(suffix => name.endsWith(suffix))) throw new WebRefusal('Local and private network addresses are never read.');
   } else if (!isPublicAddress(host)) throw new WebRefusal('Local and private network addresses are never read.');
+  if (url.port && url.port !== (url.protocol === 'https:' ? '443' : '80') && !allowPort?.(url.port)) throw new WebRefusal('Only the standard web ports (80 and 443) can be read.');
   return url;
 }
 
