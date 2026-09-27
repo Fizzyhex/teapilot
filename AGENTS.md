@@ -6,7 +6,7 @@ This file is for programming agents.
 
 ## Line endings
 
-The repository mixes CRLF and LF files, and there is no `.gitattributes` to normalise them. Keep each file's existing line endings when you edit it; new files use LF. Scripts that rewrite files (Python in text mode on Windows, `sed`, Node) can silently convert every line, so before committing check that `git diff --stat` only counts the lines you meant to change.
+All text files use LF, enforced by `.gitattributes`. Scripts that rewrite files (Python in text mode on Windows, some editors) can write CRLF; git converts it back when staging, but check that `git diff --stat` only counts the lines you meant to change.
 
 ## Editing `/docs` and `README`
 
