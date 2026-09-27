@@ -9,6 +9,8 @@ const loadMs = 1000;
 const callMs = 200;
 
 let wasm: Promise<QuickJSWASMModule> | undefined;
+/** QuickJS compiled to WebAssembly, loaded on first use, so Discord sessions that never run code never load it. */
+export const quickjs = () => wasm ??= newQuickJSWASMModuleFromVariant(import('@jitl/quickjs-wasmfile-release-sync'));
 let sdkSource: string | undefined;
 const loadSdk = () => sdkSource ??= toJavaScript(readFileSync(sdkPath(), 'utf8'), 'discord-play.ts');
 const sdkExports = () => [...loadSdk().matchAll(/^export (?:function|const) (\w+)/gm)].map(match => match[1]!);
@@ -89,9 +91,7 @@ function message(error: unknown): string {
 /** Loads an app from TypeScript or JavaScript source; syntax and export mistakes surface here. */
 export async function sandbox(source: string): Promise<PlayEngine> {
   if (source.length > maxSourceChars) throw new PlayError(`The app source is ${source.length} characters; the limit is ${maxSourceChars}.`);
-  // Loaded on first use, so Discord sessions that never start an app never load WebAssembly.
-  wasm ??= newQuickJSWASMModuleFromVariant(import('@jitl/quickjs-wasmfile-release-sync'));
-  const engine = new SandboxEngine(await wasm, toJavaScript(source));
+  const engine = new SandboxEngine(await quickjs(), toJavaScript(source));
   engine.load();
   return engine;
 }

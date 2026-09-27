@@ -40,6 +40,7 @@ node packages/teapilot/scripts/agent-terminal.mjs stop t
 ```sh
 node packages/teapilot/scripts/agent-discord.mjs start --name d                      # add --root path/to/repo for repository work
 node packages/teapilot/scripts/agent-discord.mjs say d "make a tic-tac-toe game for me and @user"
+node packages/teapilot/scripts/agent-discord.mjs say d "rotate this" --attach samples/tree.png       # attach files, as a person would
 node packages/teapilot/scripts/agent-discord.mjs wait d --for "Result: " --timeout 300  # a turn has finished
 node packages/teapilot/scripts/agent-discord.mjs click d m4 c0 --as user               # press a button on message m4
 node packages/teapilot/scripts/agent-discord.mjs click d m4 c1 --as stranger           # someone who is not playing
@@ -51,6 +52,7 @@ node packages/teapilot/scripts/agent-discord.mjs stop d
 
 - People are `op` (an operator), `user` (whitelisted) and `stranger` (neither); `--as` defaults to `op`. Channels are `dm-<person>` (the default), `channel`, and `thread-N` once teapilot opens one.
 - `select`, `submit --field id=value` and `approve [--deny]` cover menus, forms and approvals; `screen` shows a channel; `log` shows teapilot's operator log. Run it with `--help` for the rest.
+- Files teapilot sends, and the images apps show, appear as `📎 name → path` lines; open the path to check the file itself. They are deleted with the session, so look before `stop`.
 - It uses the real configuration and models, so turns can spend money; `--config-dir` picks another profile. Access lists and apps live in a scratch directory, never the profile's.
 - `start --frozen` stops the clock, so timers fire only when `advance` reaches them; use it for games that tick.
 - Only operators can answer approvals, as on Discord: read each one, and deny it unless the action is part of your task.

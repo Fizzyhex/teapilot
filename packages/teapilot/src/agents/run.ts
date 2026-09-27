@@ -17,7 +17,8 @@ import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
 import { coder } from './coder.js';
 import { fitHistory, turnSteps } from './history.js';
-import { latestCode, play, withoutCode, type Drafts, type PlayContext } from './play.js';
+import { files } from './files.js';
+import { latestBlock, latestCode, play, withoutCode, type Drafts, type PlayContext } from './play.js';
 import type { WebController } from '../web/controller.js';
 
 export interface AttemptInput {
@@ -80,9 +81,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // discord.play takes an app's code from the newest code block in this request's replies, so code never
   // has to be escaped into JSON arguments; blocks it used are left out of the answer shown to people.
   let messages = (): Message[] => [];
-  const drafts: Drafts = { latest: () => latestCode(messages()), used: new Set<string>() };
+  const drafts: Drafts = { latest: () => latestCode(messages()), block: () => latestBlock(messages()), used: new Set<string>() };
   // Models that call a play tool without writing its code tend to repeat that call; a reply without tools cannot.
   let paused: AgentTool[] | undefined, writing = false, pauses = 0;
+  // Small models sometimes answer "done" to a change request without calling a tool; the host holds them to it once.
+  let changed = false, claimChecked = false, claimNotice = false;
   // A page is at most about a third of this model's context, and pages together at most about a quarter
   // of it in tokens, so the attempt keeps room to reason and answer.
   const reader = input.webController && { controller: input.webController, maxChars: Math.min(12_000, Math.floor(profile.contextTokens * 0.35)), budget: { remaining: profile.contextTokens } };
@@ -115,6 +118,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       setup.systemPrompt += '\n' + apps.systemPrompt;
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
       setup.systemPrompt += '\n- For interactive Discord apps (games, polls, quizzes, boards, timers with buttons), request `discord.play` with request_capabilities; it is granted without a prompt.';
+    }
+    if (input.play?.files) {
+      const shared = files(input.play.files, drafts, input.play);
+      setup.tools.push(...shared.tools);
+      setup.systemPrompt += '\n' + shared.systemPrompt;
     }
     if (input.conversational) setup.systemPrompt += '\nKeep context for follow-up turns; do not treat each message as an unrelated task.';
     if (input.access) setup.systemPrompt += input.access.role === 'operator'
@@ -182,6 +190,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     toolExecution: 'sequential',
     prepareNextTurnWithContext: async ({ context }) => {
+      if (claimNotice) {
+        claimNotice = false;
+        return { messages: [{ role: 'user', content: '[host notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (play_update with edits on its current source), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
+      }
       if (lostNotice) {
         lostNotice = false;
         const messages = context.messages.filter(message => !(message.role === 'assistant' && lost(message)));
@@ -217,6 +229,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     afterToolCall: async ({ toolCall, args, isError, result }) => {
       settled.set(toolCall.id, 'ran');
+      if (!isError && ['play_start', 'play_update'].includes(toolCall.name) && result.content.some(part => part.type === 'text' && /^(Started|Updated) app /.test(part.text))) changed = true;
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
       evidence.observe(toolCall.name, args, isError, result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
@@ -241,6 +254,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
       if (lost(message) && lostCalls < 2) { lostCalls++; lostNotice = true; return { action: 'continue' }; }
       if (writing) { writing = false; if (drafts.latest()) return { action: 'continue' }; paused = undefined; }
+      if (playing && !changed && !claimChecked && message.stopReason === 'stop' && !message.content.some(part => part.type === 'toolCall')
+        && claimsChange(message.content.map(part => part.type === 'text' ? part.text : '').join('\n'))
+        && input.play!.runtime.list(input.play!.conversation, input.play!.channelId).some(app => app.status === 'running')) {
+        claimChecked = true; claimNotice = true;
+        return { action: 'continue' };
+      }
       return undefined;
     },
   });
@@ -331,6 +350,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     check: evidence.unresolvedChecks.size ? 'failed' : evidence.lastCheck,
     ending: { stopReason: last?.role === 'assistant' ? last.stopReason : undefined, error: last?.role === 'assistant' ? last.errorMessage?.slice(0, 300) : undefined, textChars: text.length },
   };
+}
+
+/** Whether an answer says something was changed, such as "done", "swapped" or "the snake now has a face". */
+export function claimsChange(text: string): boolean {
+  return /\b(done|updated|changed|swapped|replaced|added|removed|fixed|switched|renamed|now (?:is|are|has|have|shows?|uses?|looks?))\b/i.test(text);
 }
 
 /** A URL as progress displays show it: host and path, without scheme or query, within 80 characters. */

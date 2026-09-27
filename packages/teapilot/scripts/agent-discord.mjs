@@ -25,7 +25,8 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
   start [--name N] [--root DIR] [--mode ask|chat] [--config-dir DIR] [--ttl S] [--teachat] [--frozen]
                                      --root is teapilot's repository (default: an empty scratch directory)
                                      --frozen stops the clock: timers fire only when advance reaches them
-  say <name> <text> [--as P] [--in C] send a message; @op, @user, @stranger and @teapilot become mentions
+  say <name> <text> [--as P] [--in C] [--attach FILE]...
+                                     send a message; @op, @user, @stranger and @teapilot become mentions
   click <name> <message> <control> [--as P]
   select <name> <message> <control> <value...> [--as P]
   submit <name> [--field id=value ...] [--as P]      the form P has open
@@ -44,6 +45,8 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
 People (--as, default op): op is an operator, user is whitelisted, stranger is neither.
 Channels (--in): dm-<person> (the default), channel (teapilot's channel; messages mention it),
 and thread-N once teapilot opens one. Messages are m1, m2, ...; controls use their app ids.
+Attachments teapilot sends, app pictures included, show as 📎 lines with a path you can open;
+they are deleted with the session, so look at them before stop.
 wait exit codes: 0 matched, 3 teapilot stopped, 124 timed out. --for matches output since the last
 say, click, select, submit, approve, advance or restart; the regex uses the m flag.`;
 
@@ -130,12 +133,19 @@ async function client(argv) {
   const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
     as: { type: 'string', default: 'op' }, in: { type: 'string' }, for: { type: 'string' }, idle: { type: 'string' }, timeout: { type: 'string', default: '120' },
     last: { type: 'string' }, field: { type: 'string', multiple: true, default: [] }, deny: { type: 'boolean', default: false },
+    attach: { type: 'string', multiple: true, default: [] },
   } });
   const [name, ...args] = positionals;
   if (!name) throw new UsageError(`${command} needs a session name.\n\n${usage}`);
   const need = (count, shape) => { if (args.length < count) throw new UsageError(`Use ${command} <name> ${shape}.`); };
   let body;
-  if (command === 'say') { need(1, '<text>'); if (args.length > 1) throw new UsageError('say takes one text argument; quote it.'); body = { op: 'say', as: values.as, in: values.in, text: args[0] }; }
+  if (command === 'say') {
+    if (!args.length && !values.attach.length) throw new UsageError('Use say <name> <text> [--attach FILE]...');
+    if (args.length > 1) throw new UsageError('say takes one text argument; quote it.');
+    const attach = values.attach.map(path => resolve(path));
+    for (const path of attach) if (!existsSync(path)) throw new UsageError(`No file ${path} to attach.`);
+    body = { op: 'say', as: values.as, in: values.in, text: args[0] ?? '', attach };
+  }
   else if (command === 'click') { need(2, '<message> <control>'); body = { op: 'click', as: values.as, message: args[0], control: args[1] }; }
   else if (command === 'select') { need(3, '<message> <control> <value...>'); body = { op: 'select', as: values.as, message: args[0], control: args[1], values: args.slice(2) }; }
   else if (command === 'submit') {

@@ -1,4 +1,6 @@
-import { colors, type Control, type Embed, type Modal, type View } from '@teapilot/discord-play';
+import { createHash } from 'node:crypto';
+import { colors, type Control, type Embed, type Modal, type Picture, type View } from '@teapilot/discord-play';
+import type { PictureSpec } from '../images.js';
 
 /** A mistake in an app's output. The message is written for the model that wrote the app. */
 export class PlayError extends Error {}
@@ -9,6 +11,9 @@ export interface MessagePayload {
   embeds: Array<Record<string, unknown>>;
   components: Array<{ type: 1; components: Array<Record<string, unknown>> }>;
   allowedMentions: { parse: [] };
+  /** Conversation images the embeds show as attachment://name; the runtime renders them into `files` before sending. */
+  pictures?: PictureSpec[];
+  files?: Array<{ name: string; data: Buffer }>;
 }
 export interface ModalPayload { custom_id: string; title: string; components: Array<{ type: 1; components: Array<Record<string, unknown>> }> }
 
@@ -71,7 +76,52 @@ function url(value: unknown, what: string): string | undefined {
 const unwrap = (value: unknown, key: 'text' | 'url') => isRecord(value) && typeof value[key] === 'string' ? value[key] : value;
 const compact = (value: Record<string, unknown>) => Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 
-function renderEmbed(value: unknown, index: number): { json: Record<string, unknown>; size: number } {
+const filters = new Set(['blur', 'brightness', 'contrast', 'grayscale', 'hue-rotate', 'invert', 'opacity', 'saturate', 'sepia', 'drop-shadow']);
+/** CSS filter functions, with the spelling "greyscale" accepted. */
+function filterText(value: unknown): string | undefined {
+  const text = string(value, 'picture() filter', 300)?.trim().replace(/\bgreyscale\(/gi, 'grayscale(');
+  if (!text || text === 'none') return undefined;
+  const parts = [...text.matchAll(/([a-z-]+)\(([^()]*(?:\([^()]*\)[^()]*)*)\)/gi)];
+  if (text.replace(/([a-z-]+)\(([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, '').trim() || parts.some(part => !filters.has(part[1]!.toLowerCase()))) {
+    throw new PlayError(`picture() filter ${JSON.stringify(text)} must be CSS filter functions separated by spaces, from ${[...filters].join(', ')}, as in "grayscale(1) sepia(0.8)".`);
+  }
+  return text;
+}
+/** A picture() checked, with the shorthands models reach for (grayscale: true, sepia: 1) folded into its filter. */
+export function checkPicture(value: Record<string, unknown>): PictureSpec {
+  const file = string(value.file, 'picture() file', 100, true)!;
+  const rotate = value.rotate ?? 0;
+  if (typeof rotate !== 'number' || !Number.isFinite(rotate)) throw new PlayError('picture() rotate must be a number of degrees.');
+  const flip = value.flip === false || value.flip === undefined || value.flip === null ? undefined : value.flip;
+  if (flip !== undefined && flip !== 'horizontal' && flip !== 'vertical' && flip !== 'both') throw new PlayError('picture() flip must be "horizontal", "vertical" or "both".');
+  const shorthand = Object.entries(value).flatMap(([key, amount]) => {
+    const name = key === 'greyscale' ? 'grayscale' : key === 'hueRotate' ? 'hue-rotate' : key;
+    if (!filters.has(name) || name === 'drop-shadow' || amount === false || amount === undefined || amount === null) return [];
+    const level = amount === true ? 1 : amount;
+    if (typeof level !== 'number' || !Number.isFinite(level)) throw new PlayError(`picture() ${key} must be true or a number.`);
+    return [`${name}(${level}${name === 'blur' ? 'px' : name === 'hue-rotate' ? 'deg' : ''})`];
+  });
+  const filter = [filterText(value.filter), ...shorthand].filter(Boolean).join(' ') || undefined;
+  const width = value.width;
+  if (width !== undefined && (typeof width !== 'number' || !Number.isInteger(width) || width < 16 || width > 2048)) throw new PlayError('picture() width must be a whole number of pixels from 16 to 2048.');
+  const spec = { file, rotate: ((rotate % 360) + 360) % 360, ...(flip ? { flip } : {}), ...(filter ? { filter } : {}), ...(width ? { width } : {}) } as Omit<PictureSpec, 'name'>;
+  // Each look gets its own attachment name, so Discord never shows a stale copy of an earlier one.
+  const stem = file.replace(/\.[^.]*$/, '').replace(/[^\w-]+/g, '_').slice(0, 40) || 'picture';
+  const extension = /\.jpe?g$/i.test(file) ? 'jpg' : 'png';
+  return { ...spec, name: `${stem}-${createHash('sha256').update(JSON.stringify(spec)).digest('hex').slice(0, 8)}.${extension}` };
+}
+/** An embed image: an http(s) URL, or a picture() collected for the runtime to render and attach. */
+function media(value: unknown, what: string, pictures?: PictureSpec[]): string | undefined {
+  if (isRecord(value) && value.type === 'picture') {
+    if (!pictures) throw new PlayError(`picture() shows only in the app's own view, not in ${what.toLowerCase()}s of private notes.`);
+    const spec = checkPicture(value);
+    if (!pictures.some(entry => entry.name === spec.name)) pictures.push(spec);
+    return `attachment://${spec.name}`;
+  }
+  return url(unwrap(value, 'url'), what);
+}
+
+function renderEmbed(value: unknown, index: number, pictures?: PictureSpec[]): { json: Record<string, unknown>; size: number } {
   if (!isRecord(value)) throw new PlayError(`Embed ${index + 1} must be built with embed().`);
   const title = string(value.title, 'Embed title', limits.title);
   const description = string(value.description, 'Embed description', limits.description);
@@ -82,12 +132,12 @@ function renderEmbed(value: unknown, index: number): { json: Record<string, unkn
   });
   const size = (title?.length ?? 0) + (description?.length ?? 0) + (footer?.length ?? 0) + fields.reduce((sum, field) => sum + String(field.name).length + String(field.value).length, 0);
   if (!size && !value.image && !value.thumbnail) throw new PlayError(`Embed ${index + 1} is empty.`);
-  const image = url(unwrap(value.image, 'url'), 'Embed image'), thumbnail = url(unwrap(value.thumbnail, 'url'), 'Embed thumbnail');
+  const image = media(value.image, 'Embed image', pictures), thumbnail = media(value.thumbnail, 'Embed thumbnail', pictures);
   return { size, json: compact({ title, description, url: url(value.url, 'Embed url'), color: color(value.color), fields: fields.length ? fields : undefined, footer: footer ? { text: footer } : undefined, image: image ? { url: image } : undefined, thumbnail: thumbnail ? { url: thumbnail } : undefined }) };
 }
 
-export function renderEmbeds(value: unknown): Array<Record<string, unknown>> {
-  const rendered = list(value, 'embeds', limits.embeds).map(renderEmbed);
+export function renderEmbeds(value: unknown, pictures?: PictureSpec[]): Array<Record<string, unknown>> {
+  const rendered = list(value, 'embeds', limits.embeds).map((embed, index) => renderEmbed(embed, index, pictures));
   const total = rendered.reduce((sum, embed) => sum + embed.size, 0);
   if (total > limits.embedTotal) throw new PlayError(`Embeds hold ${total} characters in total; Discord allows ${limits.embedTotal}.`);
   return rendered.map(embed => embed.json);
@@ -162,7 +212,8 @@ export function normalizeView(value: unknown): unknown {
 export function renderView(playId: string, view: unknown, disabled = false): MessagePayload {
   if (!isRecord(view) || view.type !== undefined) throw new PlayError(`view() must return a message object { content?, embeds?, rows? }${isRecord(view) && typeof view.type === 'string' ? `, not a bare ${view.type}; wrap it, as in { ${view.type === 'embed' ? 'embeds' : 'rows'}: [...] }` : Array.isArray(view) ? ', not an array' : ''}.`);
   const content = string(view.content, 'Message content', limits.content) ?? '';
-  const embeds = renderEmbeds(view.embeds);
+  const pictures: PictureSpec[] = [];
+  const embeds = renderEmbeds(view.embeds, pictures);
   const seen = new Set<string>();
   // An empty row() is usually a conditional control that is hidden right now, so it is dropped.
   const rows = list(view.rows, 'rows', Infinity).filter(value => !(isRecord(value) && value.type === 'row' && Array.isArray(value.controls) && !value.controls.length));
@@ -174,7 +225,7 @@ export function renderView(playId: string, view: unknown, disabled = false): Mes
     return { type: 1 as const, components: controls.map(control => renderControl(playId, control, disabled, seen)) };
   });
   if (!content && !embeds.length && !components.length) throw new PlayError('view() returned nothing to show.');
-  return { content, embeds, components, allowedMentions: { parse: [] } };
+  return { content, embeds, components, allowedMentions: { parse: [] }, ...(pictures.length ? { pictures } : {}) };
 }
 
 export function renderModal(playId: string, value: unknown): ModalPayload {
@@ -220,6 +271,13 @@ export function describe(view: View): string {
     if (embed.description) lines.push(embed.description);
     for (const field of embed.fields ?? []) lines.push(`${field.name}: ${field.value}`);
     if (embed.footer) lines.push(`-- ${String(unwrap(embed.footer, 'text'))}`);
+    for (const key of ['image', 'thumbnail'] as const) {
+      const value = embed[key] as unknown;
+      if (isRecord(value) && value.type === 'picture') {
+        const { file, type: _, ...options } = value as unknown as Picture;
+        lines.push(`${key}: ${String(file)}${Object.keys(options).length ? ` ${JSON.stringify(options)}` : ''}`);
+      } else if (value) lines.push(`${key}: ${String(unwrap(value, 'url'))}`);
+    }
   }
   for (const row of view.rows ?? []) lines.push(row.controls.map(control => control.type === 'select'
     ? `<select ${control.id}: ${control.options.map(option => option.value).join('|')}>`

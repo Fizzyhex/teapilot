@@ -21,6 +21,8 @@ const recordSchema = z.object({
   /** When each recent consult started, for the hourly cap. */
   consults: z.array(z.number()),
   status: z.enum(['running', 'finished', 'paused']),
+  /** The attached file the app was started from, so its source goes back under that name. */
+  file: z.string().optional(),
   note: z.string().optional(),
   log: z.array(z.object({ at: z.number(), action: z.string(), error: z.string().optional() })),
   createdAt: z.number(), updatedAt: z.number(),
