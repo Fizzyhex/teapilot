@@ -29,6 +29,10 @@ Don't judge a case by teapilot's reply alone. Check the app itself:
 - Rejections: `screen` only lists tool names. `log <name>` shows what each `play_*` tool returned (e.g. why a `play_start` was rejected), so check it when a turn retries or hits the context limit.
 - Survival: `restart <name>` mid-game should leave the app working.
 
+## Ultra Challenge Cases
+
+If you're asked to attempt challenge cases, you should do the cases in `./ultra-challenges.md`. DO NOT do the cases listed below.
+
 ## Case 1: Snake Game
 
 "i'm granting you discord.play. make a game of snake. 5x5 board. use :white_large_square: for the background, :blue_square: for the snake. the food can be an 🍎"
