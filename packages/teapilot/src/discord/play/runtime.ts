@@ -110,6 +110,8 @@ function checkEffects(effects: unknown[]): Effect[] {
   });
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
 function checkState(state: unknown): void {
   const size = JSON.stringify(state)?.length ?? 0;
   if (size > playLimits.stateChars) throw new PlayError(`State is ${size} characters as JSON; the limit is ${playLimits.stateChars}. Keep only what the app needs.`);
@@ -182,16 +184,20 @@ export class PlayRuntime {
    * committed. A control that would break when someone uses it stops the app before anyone sees it;
    * finishing while controls are still on show is only returned as a note, since it may be intended.
    */
-  private async probe(engine: PlayEngine, record: PlayRecord, from: Advance): Promise<string[]> {
+  private async probe(engine: PlayEngine, record: PlayRecord, from: Advance, running = false): Promise<string[]> {
     if (this.options.probe === false) return [];
     const problems: string[] = [];
     const notes = new Set<string>();
     let budget = 60;
     let timed = from.timers.length > 0;
+    const scheduled = new Set(from.timers.map(timer => timer.id));
     const base: PlayRecord = { ...record, state: from.state, seed: from.seed, timers: from.timers };
     const before = JSON.stringify(from.state) + describe(from.view);
     const tried: string[] = [], inert: string[] = [];
     const shortcodes = new Set(shortcodesIn(describe(from.view)));
+    // With nothing to press and nothing on its way, an app is stuck before anyone can start it.
+    const usable = (from.view.rows ?? []).flatMap(row => row.controls).some(control => !control.disabled && !(control.type === 'button' && control.url));
+    if (!usable && !from.timers.length && !from.effects.some(effect => effect.type === 'consult')) throw new PlayError('People could not do anything with this app: its view has no controls, and no timer or consult is on its way. Show the controls people need in every state, such as a start or join button.');
     for (const control of (from.view.rows ?? []).flatMap(row => row.controls)) {
       if (control.disabled || (control.type === 'button' && control.url)) continue;
       const name = control.type === 'button' ? `[${control.label || control.emoji || control.id}]` : `select ${control.id}`;
@@ -211,6 +217,7 @@ export class PlayRuntime {
         try { step = await this.advance(engine, current, next); }
         catch (error) { problems.push(`${label}: ${errorText(error)}`); break; }
         if (step.timers.length) timed = true;
+        for (const timer of step.timers) scheduled.add(timer.id);
         if (!round && !step.effects.length && JSON.stringify(step.state) + describe(step.view) === before) inert.push(name);
         for (const code of shortcodesIn(describe(step.view))) shortcodes.add(code);
         if (next.kind !== 'button' && next.kind !== 'select' && next.kind !== 'modal' && step.effects.some(effect => effect.type === 'ephemeral')) notes.add(`${label} returns ephemeral(), but no one pressed anything, so no one sees it. Show that message in the view instead.`);
@@ -229,8 +236,12 @@ export class PlayRuntime {
     if (problems.length) throw new PlayError(`People using the app would hit these errors:\n${problems.map(problem => `- ${clip(problem, 400)}`).join('\n')}`);
     // Timer code that nothing reaches is also never checked, so its mistakes would only show once live.
     if (shortcodes.size) notes.add(`The view shows ${[...shortcodes].slice(0, 5).join(' ')} as plain text: Discord turns :shortcodes: into emoji only when a person types them. Use the Unicode emoji instead.`);
-    if (tried.length && inert.length === tried.length) notes.add(`Using ${inert.join(', ')} changed nothing, so the app looks broken to whoever presses first. If people join by acting, add them the first time their id acts.`);
-    if (!timed && record.source.kind === 'sandbox' && /\bafter\b|["']timer["']/.test(record.source.code)) notes.add('The code handles timers, but no timer is pending and using each control did not schedule one, so nothing will move on its own and the timer code is untested. Schedule the first tick from init or from the control that starts things: return step(state, after(2000, "tick")).');
+    if (tried.length && inert.length === tried.length) notes.add(`Using ${inert.join(', ')} changed nothing, so the app looks broken to whoever presses first. ${running ? 'If the kept state is what is stuck (a player now inside a wall, say), fix it in code or pass reset: true to start over from init().' : 'If people join by acting, add them the first time their id acts.'}`);
+    // A timer only an earlier step schedules (a start button long gone, say) never fires in an app already past it.
+    const unreached = timed && record.source.kind === 'sandbox' ? [...new Set([...record.source.code.matchAll(/\bafter\(\s*[^,()]+,\s*(["'`])([\w.-]+)\1\s*\)/g)].map(match => match[2]!))].filter(id => !scheduled.has(id)) : [];
+    const kick = (id: string) => running ? `This app is already running, so init() and any start button will not run again: to start it now, call play_update with timers: [{ id: "${id}", ms: 2000 }].` : '';
+    if (unreached.length) notes.add(`Nothing tried from the current state schedules ${unreached.slice(0, 3).map(id => `after(…, "${id}")`).join(', ')}, so it will not fire yet. ${kick(unreached[0]!) || 'If it should already be running, also schedule it from something that still happens, such as a running tick or the next move.'}`);
+    if (!timed && record.source.kind === 'sandbox' && /\bafter\b|["']timer["']/.test(record.source.code)) notes.add(`The code handles timers, but no timer is pending and using each control did not schedule one, so nothing will move on its own and the timer code is untested. ${kick('tick') || 'Schedule the first tick from the control that starts things: return step(state, after(2000, "tick")).'}`);
     return [...notes].slice(0, 3);
   }
 
@@ -389,18 +400,31 @@ export class PlayRuntime {
   }
 
   /** Swaps in new code. Keeping state lets a fix land mid-game; the view re-renders in place. */
-  async update(id: string, conversation: string, source: Source | undefined, reset: boolean): Promise<{ record: PlayRecord; preview: string }> {
+  /** `start` schedules timers now, for a loop new code adds to an app whose init and start button already ran. */
+  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = []): Promise<{ record: PlayRecord; preview: string }> {
     const live = this.owned(id, conversation);
     return this.serial(live, async () => {
       const engine = source ? await this.build(source) : await this.engine(live);
       const record: PlayRecord = { ...live.record, source: source ?? live.record.source, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
+      const added: string[] = [];
       try {
+        // Kept state lacks what the new version's init() adds (a leaderboard, a weather field); fill those in.
+        if (source && !reset && isObject(record.state)) {
+          const fresh = normalize((await engine.call('init', { ctx: this.context(record) })).value).state;
+          if (isObject(fresh)) {
+            for (const key of Object.keys(fresh)) if (!(key in record.state)) added.push(key);
+            if (added.length) record.state = { ...Object.fromEntries(added.map(key => [key, fresh[key]])), ...record.state };
+          }
+        }
         const step = reset ? await this.advance(engine, record) : await (async () => {
           const shown = await engine.call('view', { state: record.state, ctx: this.context(record) });
           const view = normalizeView(shown.value);
           return { state: record.state, seed: shown.seed, view: view as View, payload: renderView(record.id, view), effects: [], timers: record.timers } satisfies Advance;
         })();
-        const notes = await this.probe(engine, record, step);
+        const started = checkEffects(start.map(timer => ({ type: 'after', ...timer }))) as Array<Extract<Effect, { type: 'after' }>>;
+        step.timers = [...step.timers.filter(timer => !started.some(entry => entry.id === timer.id)), ...started.map(timer => ({ id: timer.id, dueAt: this.now() + timer.ms }))];
+        if (step.timers.length > playLimits.timers) throw new PlayError(`An app may have ${playLimits.timers} timers pending.`);
+        const notes = await this.probe(engine, record, step, !reset);
         if (live.engine !== engine) live.engine?.dispose();
         live.engine = engine;
         live.record = record;
@@ -408,32 +432,45 @@ export class PlayRuntime {
         // The change lands even where the message cannot show it yet; the next click does.
         if (this.reachable(live)) await this.show(live, step.payload);
         else notes.push('No one has used the app for 15 minutes, so Discord shows this change at the next click.');
+        if (added.length) notes.unshift(`The kept state gained ${added.slice(0, 8).join(', ')} from the new init(); fields new inside nested data still need a default where they are read.`);
         return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
       } catch (error) { if (live.engine !== engine) engine.dispose(); throw error; }
     });
   }
 
   /** A dry run with no message, persistence or timers, so the model can check an app before posting it. */
-  async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean } = {}): Promise<string> {
+  async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean; state?: unknown } = {}): Promise<string> {
     const engine = await this.build(source);
     const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], createdAt: 0, updatedAt: 0 };
     const lines: string[] = [];
     let last: string[] = [];
+    // Actions that change nothing (a move into a wall, a turn out of order) are easy to miss in the final state alone.
+    let before = '', idle = 0;
     const show = (label: string, step: Advance) => {
+      const now = JSON.stringify(step.state) + describe(step.view);
+      if (before && now === before && !step.effects.length) idle++;
+      before = now;
       record.state = step.state; record.seed = step.seed;
       last = [`## ${label}`, `state: ${clip(JSON.stringify(step.state), 1500)}`, describe(step.view)];
       if (step.effects.length) last.push(`effects: ${clip(JSON.stringify(step.effects), 800)}`);
       if (options.steps) lines.push(...last);
     };
     try {
-      show('start', await this.advance(engine, record));
+      if (options.state === undefined) show('start', await this.advance(engine, record));
+      else {
+        // A running app's own state, so a dry run of new code shows what people will actually get.
+        record.state = options.state;
+        const shown = await engine.call('view', { state: record.state, ctx: this.context(record) });
+        show('current state', { state: record.state, seed: shown.seed, view: normalizeView(shown.value) as View, payload: renderView(record.id, normalizeView(shown.value)), effects: [], timers: [] });
+      }
       for (const [index, action] of actions.entries()) {
         const label = `${index + 1}. ${action.kind} ${action.id}`;
         try { show(label, await this.advance(engine, record, toAction(action, owner))); }
         catch (error) { last = [`## ${label}`, `error: ${errorText(error)}`]; lines.push(...last); break; }
       }
     } finally { engine.dispose(); }
-    return clip((options.steps ? lines : [`(final of ${actions.length} actions; set steps for each)`, ...last]).join('\n'), maxOutputChars / 8);
+    const unchanged = idle ? `${idle} of ${actions.length} actions changed nothing` : '';
+    return clip((options.steps ? [...lines, ...unchanged ? [`(${unchanged})`] : []] : [`(final of ${actions.length} actions${unchanged ? `; ${unchanged}` : ''}; set steps for each)`, ...last]).join('\n'), maxOutputChars / 8);
   }
 
   inspect(id: string, conversation: string): string {
@@ -443,6 +480,9 @@ export class PlayRuntime {
 
   /** The code an app runs now, so a change can be made as small edits to it. */
   source(id: string, conversation: string): Source { return this.owned(id, conversation).record.source; }
+
+  /** The state an app runs with now. */
+  state(id: string, conversation: string): unknown { return this.owned(id, conversation).record.state; }
 
   /** Apps this conversation started, and with `channelId` also the others shown in that channel. */
   list(conversation: string, channelId?: string): Array<{ id: string; title: string; status: string }> {

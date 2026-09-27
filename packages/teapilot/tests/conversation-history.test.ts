@@ -79,3 +79,14 @@ it('reports each turn with its steps, and clears the history on /new', async () 
   chat.push('/new');
   await vi.waitFor(() => expect(histories.at(-1)).toEqual([]));
 });
+
+it('never cuts an earlier turn through the middle of an emoji', () => {
+  // A long result made of emoji is compacted to its first 400 characters, which here falls inside one.
+  const result = { role: 'toolResult', toolCallId: 'c1', toolName: 'play_inspect', content: [{ type: 'text', text: 'x' + '🌽'.repeat(300) }], isError: false, timestamp: 0 } as unknown as Message;
+  const call = { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'play_inspect', arguments: {} }], api: 'openai-completions', provider: 'x', model: 'y', usage: emptyUsage(), stopReason: 'toolUse', timestamp: 0 } as unknown as Message;
+  const turns: ConversationTurn[] = [{ user: 'a', assistant: 'b', steps: [call, result] }, { user: 'c', assistant: 'd' }];
+  const fitted = [500, 1000, 1500, 2000, 3000].map(budget => fitHistory(turns, budget, { provider: 'x', id: 'y' } as never)
+    .flatMap(message => typeof message.content === 'string' ? [message.content] : message.content.map(part => part.type === 'text' ? part.text : '')).join(''));
+  expect(fitted.some(text => text.includes('…[clipped]'))).toBe(true);
+  expect(fitted.join('')).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+});

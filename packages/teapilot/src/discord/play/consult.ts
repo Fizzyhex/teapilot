@@ -34,8 +34,17 @@ export function consultant(options: {
     const result = await options.queue.run(() => options.run(request, { approve: async () => false }));
     if (!result.success) throw new Error(result.text || `The model could not answer (${result.status}).`);
     const text = unfence(result.text);
-    return /\bjson\b/i.test(prompt) ? firstJson(text) ?? text : text;
+    return /\bjson\b/i.test(prompt) ? firstJson(text) ?? text : plain(text);
   };
+}
+
+/** Plain text a small model sent as one JSON field anyway, such as {"text": "..."}, as that text. */
+export function plain(text: string): string {
+  try {
+    const value: unknown = JSON.parse(text);
+    const fields = value && typeof value === 'object' && !Array.isArray(value) ? Object.values(value) : [];
+    return fields.length === 1 && typeof fields[0] === 'string' ? fields[0] : text;
+  } catch { return text; }
 }
 
 /**

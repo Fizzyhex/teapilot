@@ -51,6 +51,9 @@ export interface AttemptResult {
   ending?: { stopReason?: string; error?: string; textChars: number };
 }
 
+/** Reply length a discord.play attempt reserves: a whole app plus a sentence, on any tier. */
+export const playOutputTokens = 8192;
+
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const { config, tier, telemetry } = input;
   const evidence = new Evidence(config.policy.escalation, input.unresolvedChecks);
@@ -60,7 +63,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     get permissions() { return active.filter(permission => config.policy.permissions.includes(permission) && (!input.authorization || input.authorization.allows(permission))); },
   } };
   const policy = new ExecutionPolicy(input.cwd, effectiveConfig, input.approve, input.beforeMutation);
-  const model = modelFor(config, tier); const profile = effectiveProfile(config, tier);
+  const model = modelFor(config, tier); const tierProfile = effectiveProfile(config, tier);
+  // A discord.play reply carries a whole app as text, so it gets room for one even on tiers set for short answers.
+  const playing = Boolean(input.play) && effectiveConfig.policy.permissions.includes('discord.play');
+  const profile = playing ? { ...tierProfile, maxOutputTokens: Math.max(tierProfile.maxOutputTokens, Math.min(playOutputTokens, model.maxOutputTokens)) } : tierProfile;
   const inference: InferenceState = { turns: 0 };
   let toolLimit = false, timeout = false, searchFailed = false, capabilityDenied = false;
   /** A reply that ended to call a tool but carried no call the server could parse. */
@@ -156,7 +162,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // calls and results still fit. The admission check at the provider remains the exact limit.
   const fixed = 2048 + estimateValueTokens([setup.systemPrompt, input.prompt]) + estimateValueTokens(setup.tools.map(({ name, description, parameters }) => ({ name, description, parameters })));
   const history = fitHistory(input.history ?? [], Math.floor((profile.contextTokens - profile.maxOutputTokens - fixed) / 2), model);
-  const stream = guardedStream(config, tier, input.budget, telemetry, inference);
+  const stream = guardedStream(config, tier, input.budget, telemetry, inference, playing ? { outputTokens: profile.maxOutputTokens } : undefined);
   // Populated in afterToolCall (which has args) and consumed once by the matching
   // tool_execution_end event below (which only carries the result).
   const toolDetails = new Map<string, { path?: string; size?: number; command?: string }>();
@@ -183,8 +189,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         const tools = paused; paused = undefined;
         return { context: { ...context, tools }, messages: [{ role: 'user', content: '[host notice] Tools are back. Call play_start (or play_update) now; it reads the code block you just wrote.', timestamp: Date.now() }] };
       }
+      // The last turn of a discord.play attempt answers about what is live rather than ending mid-call at the limit.
+      if (playing && !evidence.answerNow && inference.turns >= config.policy.limits.maxTurns - 1) { evidence.answerNow = true; evidence.answerWhy = 'This is the last turn'; }
       if (evidence.answerNow && context.tools?.length) {
-        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: '[host notice] Those calls could not run, so tools are withdrawn for this attempt. Answer now from what you already have, clearly stating any gaps.', timestamp: Date.now() }] };
+        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: `[host notice] ${evidence.answerWhy}, so tools are withdrawn for this attempt. Answer now from what you already have, clearly stating any gaps.`, timestamp: Date.now() }] };
       }
       // Once search is exhausted or down, take the tool away: a refusal message alone does not stop a model retrying it.
       const withoutSearch = <T extends { name: string }>(tools: T[]) => evidence.searchExhausted ? tools.filter(tool => tool.name !== 'web_search') : tools;

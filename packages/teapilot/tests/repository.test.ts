@@ -67,6 +67,17 @@ it('gives repeated equivalent inspection one recovery opportunity and invalidate
   expect(evidence.warning).toContain('Change approach');
   evidence.observe('repo_list', { limit: 200 }, false, 'empty');
   expect(evidence.reason).toBe('ineffective_calls');
+  // discord.play calls carry their code in the reply, so the same arguments with new results are progress.
+  const play = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
+  play.observe('play_start', { title: 'Game' }, false, 'App problem: syntax');
+  play.observe('play_start', { title: 'Game' }, false, 'App problem: duplicate id');
+  expect(play.reason).toBeUndefined();
+  play.observe('play_start', { title: 'Game' }, false, 'App problem: duplicate id');
+  // A live app is worth answering about: tools are withdrawn first, and only a further repeat ends the attempt.
+  expect(play.reason).toBeUndefined();
+  expect(play.answerNow).toBe(true);
+  play.observe('play_start', { title: 'Game' }, false, 'App problem: duplicate id');
+  expect(play.reason).toBe('ineffective_calls');
   const check = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
   check.observe('bash', { command: 'npm test' }, false);
   expect(check.lastCheck).toBe('passed');

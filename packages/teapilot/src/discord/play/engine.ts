@@ -53,7 +53,11 @@ export function toJavaScript(source: string, name = 'app.ts'): string {
     (emit as (...args: unknown[]) => void).call(process, warning, ...rest);
   }) as typeof process.emitWarning;
   try { return stripTypeScriptTypes(source, { mode: 'transform', sourceUrl: name }); }
-  catch (error) { throw new PlayError(`Could not read the app's TypeScript: ${error instanceof Error ? error.message : String(error)}`); }
+  catch (error) {
+    // Node puts the line and a caret under the mistake at the top of the stack; without it a model rewrites blind.
+    const where = error instanceof Error ? /^(\S+:\d+\n[\s\S]*?)\n\n\w*Error/.exec(error.stack ?? '')?.[1] : undefined;
+    throw new PlayError(`Could not read the app's TypeScript: ${error instanceof Error ? error.message : String(error)}${where ? `\n${where.length > 600 ? `${where.slice(0, 599)}…` : where}` : ''}`);
+  }
   finally { process.emitWarning = emit; }
 }
 

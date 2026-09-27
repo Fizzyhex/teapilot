@@ -314,6 +314,18 @@ it('swaps code in place and keeps state unless told to reset', async () => {
   expect(edits.at(-1)!.content).toBe('x0');
 });
 
+it('fills in top-level state a new version adds in init, keeping the rest', async () => {
+  const { runtime, edits } = await setup();
+  const { record } = await start(runtime);
+  await runtime.interact(act(record.id, 'add').interaction);
+  // The new version keeps a list of scores that the running state never had.
+  const scored = counter.replace("init: () => ({ count: 0, said: '' })", "init: () => ({ count: 0, said: '', scores: [] })")
+    .replace("content: state.count + ' ' + state.said", "content: state.count + ' scores ' + state.scores.length");
+  const { preview } = await runtime.update(record.id, 'dm:1', { kind: 'sandbox', code: scored }, false);
+  expect(edits.at(-1)!.content).toBe('1 scores 0');
+  expect(preview).toContain('Note: The kept state gained scores from the new init()');
+});
+
 it('refuses a broken app before posting anything', async () => {
   const { runtime, posts } = await setup();
   await expect(start(runtime, { code: counter.replace("content: state.count + ' ' + state.said", "content: 5") })).rejects.toThrow(/Message content must be a string/);
@@ -364,6 +376,40 @@ it('notes controls that change nothing and :shortcodes: that Discord would show 
   expect(shown).toMatch(/Note: The view shows :man_fairy: as plain text: /);
 });
 
+it('turns away an app no one can do anything with', async () => {
+  const { runtime, posts } = await setup({ probe: true });
+  // A turn-based game waiting for a current player that only a button could have chosen.
+  const stuck = `import { app } from '@teapilot/discord-play';
+export default app({ init: () => ({ current: null }), update: state => state, view: () => ({ content: 'Waiting for a player to act...' }) });`;
+  await expect(start(runtime, { code: stuck })).rejects.toThrow(/its view has no controls, and no timer or consult is on its way/);
+  expect(posts).toEqual([]);
+});
+
+it('notes timers that nothing tried from the current state schedules', async () => {
+  const { runtime } = await setup({ probe: true });
+  // A morning timer only the start button schedules, in an app that is already past its start.
+  const code = `import { app, button, row, step, after } from '@teapilot/discord-play';
+export default app({
+  init: () => ({ n: 0, started: true }),
+  update(state, action) {
+    if (action.kind === 'button' && action.id === 'start') return step(state, after(2000, 'tick'), after(60000, 'morning'));
+    if (action.kind === 'button') return step({ ...state, n: state.n + 1 }, after(2000, 'tick'));
+    if (action.kind === 'timer' && action.id === 'tick') return step(state, after(2000, 'tick'));
+    return state;
+  },
+  view: state => ({ content: String(state.n), rows: [row(state.started ? button('go', 'Go') : button('start', 'Start'))] }),
+});`;
+  const { record, preview } = await start(runtime, { code });
+  expect(preview).toContain('Nothing tried from the current state schedules after(…, "morning")');
+  expect(preview).not.toContain('"tick"');
+  // Once an app runs, init() never runs again, so an update can start the timer itself.
+  expect((await runtime.update(record.id, 'dm:1', undefined, false)).preview).toContain('call play_update with timers: [{ id: "morning", ms: 2000 }]');
+  const { preview: kicked } = await runtime.update(record.id, 'dm:1', undefined, false, [{ id: 'morning', ms: 60_000 }]);
+  expect(kicked).not.toContain('Nothing tried');
+  expect(runtime.inspect(record.id, 'dm:1')).toContain('"id":"morning"');
+  await expect(runtime.update(record.id, 'dm:1', undefined, false, [{ id: 'fast', ms: 10 }])).rejects.toThrow(/after\(\) takes 2000 ms/);
+});
+
 it('dry-runs an app with scripted actions', async () => {
   const { runtime, posts } = await setup();
   const transcript = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }, { kind: 'button', id: 'soon' }, { kind: 'button', id: 'boom' }, { kind: 'button', id: 'add' }], owner, { steps: true });
@@ -372,6 +418,13 @@ it('dry-runs an app with scripted actions', async () => {
   expect(transcript).toMatch(/## 3\. button boom\nerror: .*kaboom/);
   expect(transcript).not.toContain('## 4.');
   expect(posts).toEqual([]);
+  // Actions that change nothing are counted, since the final state alone hides them.
+  const idle = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }, { kind: 'button', id: 'none' }, { kind: 'button', id: 'none' }], owner);
+  expect(idle).toContain('(final of 3 actions; 2 of 3 actions changed nothing;');
+  // A running app's state, so a dry run of an update shows what its players will get.
+  const resumed = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }], owner, { state: { count: 5, said: '' }, steps: true });
+  expect(resumed).toContain('## current state\nstate: {"count":5,"said":""}');
+  expect(resumed).toContain('## 1. button add\nstate: {"count":6,"said":""}');
 });
 
 it('runs a trusted app as Node with Discord calls through the host, and pauses it when the file changes', async () => {

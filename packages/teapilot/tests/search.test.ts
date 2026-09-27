@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest';
-import { checkSearch } from '../src/search.js';
+import { checkSearch, fallbackEngines, searchQuery } from '../src/search.js';
 import { runHost } from '../src/host.js';
 import { SessionGrants } from '../src/execution/grants.js';
 import { completion, fixture, jev, mockServer } from './helpers.js';
@@ -24,6 +24,21 @@ it('distinguishes missing configuration, denied permission, invalid service, and
   await expect(checkSearch(f.config)).rejects.toThrow('Configuration:');
 });
 
+it('asks fallback engines when every default engine is blocked', async () => {
+  const urls: string[] = [];
+  const server = await mockServer((_body, req, res) => {
+    urls.push(req.url!);
+    res.end(req.url!.includes('engines=') ? '{"results":[{"title":"Rules","url":"https://example.com","content":"two decks"}]}' : '{"results":[],"unresponsive_engines":[["brave","Suspended"]]}');
+  }); cleanup.push(server.close);
+  const results = await searchQuery(server.url, 'sabacc');
+  expect([...results]).toMatchObject([{ title: 'Rules', snippet: 'two decks' }]);
+  expect(urls).toHaveLength(2);
+  expect(new URL(urls[1]!, server.url).searchParams.get('engines')).toBe(fallbackEngines);
+  // Fallback engines that answer with nothing make an empty result, not an outage, even if others are blocked.
+  const empty = await mockServer((_body, req, res) => { res.end(req.url!.includes('engines=') ? '{"results":[],"unresponsive_engines":[["google","CAPTCHA"]]}' : '{"results":[],"unresponsive_engines":[["brave","Suspended"]]}'); }); cleanup.push(empty.close);
+  expect((await searchQuery(empty.url, 'sabacc')).unresponsive).toEqual([]);
+});
+
 it('a search outage during execution cannot produce a successful unverified answer', async () => {
   const f = await fixture(); cleanup.push(f.cleanup);
   let searches = 0, inference = 0;
@@ -45,7 +60,7 @@ const downSearch = async (model: (body: any) => Parameters<typeof completion>[1]
   const f = await fixture(); cleanup.push(f.cleanup);
   const bodies: any[] = []; let searches = 0;
   const server = await mockServer((body, req, res) => {
-    if (req.url?.startsWith('/search?')) { if (req.url.includes('otto')) searches++; res.end('{"results":[],"unresponsive_engines":[["brave","Suspended"]]}'); }
+    if (req.url?.startsWith('/search?')) { if (req.url.includes('otto') && !req.url.includes('engines=')) searches++; res.end(JSON.stringify({ results: [], unresponsive_engines: req.url.includes('engines=') ? fallbackEngines.split(',').map(name => [name, 'CAPTCHA']) : [['brave', 'Suspended']] })); }
     else if (!body.messages) res.end('{}');
     else { bodies.push(body); completion(res, model(body)); }
   }); cleanup.push(server.close);

@@ -6,7 +6,7 @@ description: run simulated user-scenarios against teapilot for improving product
 ```agent_instructions
 You are a professional AI Data Scientist / SWE.
 
-Your goal is recursive improvement and alignment of teapilot's output, by testing its ability against realistic use-cases and evaluating the results.
+Your goal is recursive improvement and alignment of teapilot's output (response time, accuracy, successful completions), by testing its ability against realistic use-cases and evaluating the results.
 
 Use the `agent-discord.mjs` to interact with teapilot. Discover frustrations, bugs, and opportunities for improvement. You may fine tune by:
 

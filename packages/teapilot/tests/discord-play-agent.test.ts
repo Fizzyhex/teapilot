@@ -51,6 +51,22 @@ it('gives the play tools to a Discord conversation holding discord.play, and sta
   expect(f.runtime.list('dm:1')).toHaveLength(1);
 });
 
+it('reads "invoker" and mentions inside a participants list, and turns away bad ones before trying the code', async () => {
+  const bodies: any[] = [];
+  const block = '```js\n' + source + '\n```';
+  const steps = [
+    { text: block, tool: { name: 'play_start', arguments: { title: 'Counter', participants: ['invoker', 'the other one'] } } },
+    { tool: { name: 'play_start', arguments: { title: 'Counter', participants: ['<@222222222222222222>'] } } },
+    { text: 'Up for you both.' },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make a counter for me and <@222222222222222222>', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[1].messages)).toContain('Nothing was started: participants must be');
+  expect(JSON.stringify(bodies[2].messages)).toContain('participants: [\\"111111111111111111\\",\\"222222222222222222\\"]');
+});
+
 it('updates the newest app with small edits to its current source', async () => {
   const bodies: any[] = [];
   const steps = [
@@ -102,6 +118,35 @@ it('takes app code from the code block in the reply, pausing tools until it is w
   expect(result.steps!.filter(step => step.role === 'toolResult')).toHaveLength(2);
 });
 
+it('dry-runs the code edits made rather than an older block, and leaves out a source the reply already shows', async () => {
+  const bodies: any[] = [];
+  const steps = [
+    { text: '```js\n' + source + '\n```', tool: { name: 'play_start', arguments: { title: 'Counter' } } },
+    { tool: { name: 'play_inspect', arguments: {} } },
+    { tool: { name: 'play_update', arguments: { edits: [{ find: "'Count '", replace: "'Total '" }] } } },
+    { tool: { name: 'play_test', arguments: { actions: [{ kind: 'button', id: 'add' }] } } },
+    { text: 'Done.' },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[2].messages)).toContain('Current source: the same as your newest');
+  expect(JSON.stringify(bodies[4].messages)).toContain('Total 1');
+});
+
+it('answers on the last turn of a play attempt instead of running into the turn limit', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, body.tools?.length ? { tool: { name: 'play_list', arguments: {} } } : { text: 'Nothing is running yet.' }); });
+  f.config.policy.limits.maxTurns = 3;
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'what apps are there?', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(bodies).toHaveLength(3);
+  expect(bodies[2].tools ?? []).toEqual([]);
+  expect(JSON.stringify(bodies[2].messages)).toContain('This is the last turn, so tools are withdrawn');
+});
+
 it('takes app code from thinking only when the reply has none', () => {
   const said = (...content: unknown[]) => ({ role: 'assistant', content }) as never;
   const block = (code: string) => '```js\n' + code + '\n```';
@@ -130,16 +175,36 @@ it('returns app mistakes as results to fix, not tool failures', async () => {
   const bodies: any[] = [];
   const f = await setup((body, _req, res) => {
     bodies.push(body);
-    completion(res, bodies.length <= 2 ? { tool: { name: 'play_start', arguments: { title: 'Broken', source: 'export default {' } } } : { text: 'Fixed it later.' });
+    completion(res, bodies.length <= 3 ? { tool: { name: 'play_start', arguments: { title: 'Broken', source: 'export default {' } } } : { text: 'Fixed it later.' });
   });
   const result = await runAttempt({ ...f, ...f.base, prompt: 'make me a game', activePermissions: ['inference', 'discord.play'],
     play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1' } });
   expect(result.success, JSON.stringify(result)).toBe(true);
   expect(JSON.stringify(bodies[1].messages)).toContain('App problem, nothing was changed');
-  // The same code again is turned away without a run, and tools pause until new code is written.
+  // The same code again is turned away without a run, with edits offered; a second time, tools pause until new code is written.
   expect(JSON.stringify(bodies[2].messages)).toContain('the code that was just rejected, unchanged');
-  expect(bodies[2].tools ?? []).toEqual([]);
+  expect(bodies[2].tools.length).toBeGreaterThan(0);
+  expect(bodies[3].tools ?? []).toEqual([]);
   expect(f.posts).toEqual([]);
+});
+
+it('fixes a rejected app with edits instead of a rewrite, and only after code was tried', async () => {
+  const bodies: any[] = [];
+  const broken = source.replace("button('add', 'Add')", "button('add', 'Add'), button('again', '')");
+  const steps = [
+    { tool: { name: 'play_start', arguments: { title: 'Counter', edits: [{ find: 'x', replace: 'y' }] } } },
+    { text: '```js\n' + broken + '\n```', tool: { name: 'play_start', arguments: { title: 'Counter' } } },
+    { tool: { name: 'play_start', arguments: { edits: [{ find: ", button('again', '')", replace: '' }] } } },
+    { text: 'Your counter is up.' },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[1].messages)).toContain('No earlier app code to edit yet');
+  expect(JSON.stringify(bodies[2].messages)).toContain('A button needs a label or an emoji');
+  expect(JSON.stringify(bodies[3].messages)).toMatch(/Started app [a-z0-9]+/);
+  expect(f.posts).toEqual(['Count 0']);
 });
 
 it('resends the newest app shown in the channel, even one another conversation started', async () => {

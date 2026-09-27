@@ -2,7 +2,7 @@ import { button, embed, field, modal, row, select } from '@teapilot/discord-play
 import { expect, it } from 'vitest';
 import { describe as preview, findControl, parseCustomId, renderModal, renderView } from '../src/discord/play/render.js';
 import { checkMessage, checkModal } from '../scripts/discord-sim/validate.js';
-import { firstJson, unfence } from '../src/discord/play/consult.js';
+import { firstJson, plain, unfence } from '../src/discord/play/consult.js';
 
 it('renders a view as Discord API JSON with namespaced custom ids', () => {
   const payload = renderView('abc123', {
@@ -54,7 +54,7 @@ it.each([
   ['too many rows', { rows: Array.from({ length: 6 }, (_, i) => row(button(`b${i}`, 'B'))) }, /rows has 6 entries/],
   ['too many buttons', { rows: [row(...Array.from({ length: 6 }, (_, i) => button(`b${i}`, 'B')))] }, /Row 1 has 6 entries/],
   ['a select sharing a row', { rows: [row(select('s', ['a']), button('b', 'B'))] }, /must be alone/],
-  ['a duplicate id', { rows: [row(button('b', 'B'), button('b', 'C'))] }, /used twice/],
+  ['a duplicate select id', { rows: [row(select('b', ['x'])), row(button('b', 'C'))] }, /used twice/],
   ['a bad id', { rows: [row(button('has space', 'B'))] }, /letters, digits/],
   ['long content', { content: 'x'.repeat(2001) }, /Discord allows 2000/],
   ['a long label', { rows: [row(button('b', 'x'.repeat(81)))] }, /Discord allows 80/],
@@ -102,4 +102,21 @@ it('finds the first whole JSON value in a consult reply that repeats or wraps it
   expect(firstJson(' {"a":1} ')).toBe(' {"a":1} ');
   expect(firstJson('no json here')).toBeUndefined();
   expect(firstJson('{"a": 1')).toBeUndefined();
+});
+
+it('gives a button repeated under one id its own custom_id, which still reads back as that id', () => {
+  const payload = renderView('abc123', { rows: [row(button('pick', 'Mine')), row(button('pick', 'Yours'))] });
+  const ids = payload.components.flatMap(entry => entry.components.map(control => String(control.custom_id)));
+  expect(ids).toEqual(['play:abc123:pick', 'play:abc123:pick~2']);
+  expect(ids.map(value => parseCustomId(value)?.id)).toEqual(['pick', 'pick']);
+  // Colons are a common way to name controls, such as draw:sand.
+  expect(parseCustomId(String(renderView('abc123', { rows: [row(button('draw:sand', 'Draw'))] }).components[0]!.components[0]!.custom_id))?.id).toBe('draw:sand');
+  expect(() => checkMessage(payload)).not.toThrow();
+});
+
+it('unwraps plain text a model sent as a single JSON field', () => {
+  expect(plain('{"text": "Frost this morning."}')).toBe('Frost this morning.');
+  expect(plain('Frost this morning.')).toBe('Frost this morning.');
+  expect(plain('{"a": "x", "b": "y"}')).toBe('{"a": "x", "b": "y"}');
+  expect(plain('{"n": 3}')).toBe('{"n": 3}');
 });

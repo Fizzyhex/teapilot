@@ -28,7 +28,8 @@ export function turnSteps(messages: Message[]): Message[] {
   });
 }
 
-const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…[clipped]` : text;
+/** Cut to `limit`, never through the middle of an emoji. */
+const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, /[\uD800-\uDBFF]/.test(text[limit - 1] ?? '') ? limit - 1 : limit)}…[clipped]` : text;
 const clipValue = (value: unknown): unknown => typeof value === 'string' ? clip(value, 300)
   : Array.isArray(value) ? value.map(clipValue)
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clipValue(item)])) : value;

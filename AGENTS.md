@@ -4,6 +4,10 @@ This file is for programming agents.
 
 **NEVER** co-author/co-sign commits with anything but `virtual paws :3`, or teapilot. If that's not available - leave co-authoring blank.
 
+## Line endings
+
+The repository mixes CRLF and LF files, and there is no `.gitattributes` to normalise them. Keep each file's existing line endings when you edit it; new files use LF. Scripts that rewrite files (Python in text mode on Windows, `sed`, Node) can silently convert every line, so before committing check that `git diff --stat` only counts the lines you meant to change.
+
 ## Editing `/docs` and `README`
 
 These files are intended to help users understand Teapilot usage. They are not intended to be in-depth feature requests or technical breakdown, and all writing should be focused on avoiding information overload. Do not append to documentation unless something is factually out of date, or you have been asked.

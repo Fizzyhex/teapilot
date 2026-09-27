@@ -3,7 +3,7 @@ import { after, app, button, cancel, consult, embed, ephemeral, field, finish, g
 
 it('builds plain data that survives JSON', () => {
   const view = {
-    content: text('Round 1', false, 'Pick one'),
+    content: text('Round 1', false, ['Pick one', null]),
     embeds: [embed({ title: 'Board', color: 'green', description: grid([[0, 1], [1, 0]], { 0: '⬛', 1: '🟥' }) })],
     rows: [
       row(button('a', 'A', { style: 'primary' }), button('guess', 'Guess', { opens: modal('answer', 'Your answer', [field('word', 'Word', { max: 20 })]) })),

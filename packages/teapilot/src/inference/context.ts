@@ -9,6 +9,11 @@ export const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
 // lines) count once per 16 characters rather than once per character. It is
 // a heuristic, not an exact tokenizer or a guaranteed upper bound for every
 // vocabulary. Providers remain authoritative.
+/** `text` with any half of a surrogate pair (left by cutting through an emoji) replaced by U+FFFD. */
+export function wellFormedText(text: string): string {
+  return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+}
+
 export function estimateTextTokens(text: string): number {
   let tokens = 0;
   for (const part of text.match(/ ?[A-Za-z0-9]+| ?[^A-Za-z0-9 \t\r\n]|[ \t\r\n]+/gu) ?? []) {

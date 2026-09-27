@@ -14,13 +14,14 @@ export interface ModalPayload { custom_id: string; title: string; components: Ar
 
 const limits = { content: 2000, embeds: 10, embedTotal: 6000, title: 256, description: 4096, fields: 25, fieldName: 256, fieldValue: 1024, footer: 2048, rows: 5, buttons: 5, label: 80, options: 25, option: 100, placeholder: 150, modalTitle: 45, modalFields: 5, modalLabel: 45, modalValue: 4000 };
 const styles = { primary: 1, secondary: 2, success: 3, danger: 4 } as const;
-const idPattern = /^[A-Za-z0-9_.-]{1,64}$/;
+const idPattern = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 /** Every Discord custom_id teapilot gives a play control starts with this. */
 export const playPrefix = 'play:';
 export const customId = (playId: string, id: string) => `${playPrefix}${playId}:${id}`;
+/** A button repeated under one id (one per player, say) gets a "~n" suffix on Discord; it reaches the app as that id. */
 export function parseCustomId(value: string): { playId: string; id: string } | undefined {
-  const match = /^play:([a-z0-9]{1,16}):([A-Za-z0-9_.-]{1,64})$/.exec(value);
+  const match = /^play:([a-z0-9]{1,16}):([A-Za-z0-9_.:-]{1,64})(?:~\d{1,2})?$/.exec(value);
   return match ? { playId: match[1]!, id: match[2]! } : undefined;
 }
 
@@ -40,7 +41,7 @@ function list(value: unknown, what: string, max: number): unknown[] {
   return value;
 }
 function id(value: unknown, what: string): string {
-  if (typeof value !== 'string' || !idPattern.test(value)) throw new PlayError(`${what} id ${JSON.stringify(value)} must be 1–64 letters, digits, "_", "." or "-".`);
+  if (typeof value !== 'string' || !idPattern.test(value)) throw new PlayError(`${what} id ${JSON.stringify(value)} must be 1–64 letters, digits, "_", ".", ":" or "-".`);
   return value;
 }
 function color(value: unknown): number | undefined {
@@ -101,17 +102,21 @@ function renderControl(playId: string, control: unknown, disabled: boolean, seen
     if (!label && !icon) throw new PlayError('A button needs a label or an emoji.');
     if (control.url !== undefined) return compact({ type: 2, style: 5, label, emoji: icon, url: url(control.url, 'Button url') });
     const key = id(control.id, 'Button');
-    if (seen.has(key)) throw new PlayError(`Control id "${key}" is used twice in one view.`);
-    seen.add(key);
+    if (seen.has(`select:${key}`)) throw new PlayError(`Control id "${key}" is used twice in one view.`);
+    // Discord needs unique custom_ids, but apps often repeat a button per player and tell presses apart by who pressed.
+    let copy = 1;
+    while (seen.has(copy === 1 ? key : `${key}~${copy}`)) copy++;
+    const unique = copy === 1 ? key : `${key}~${copy}`;
+    seen.add(unique);
     if (control.opens !== undefined) renderModal(playId, control.opens);
     const style = control.style ?? 'secondary';
     if (typeof style !== 'string' || !(style in styles)) throw new PlayError(`Button style must be one of ${Object.keys(styles).join(', ')}.`);
-    return compact({ type: 2, style: styles[style as keyof typeof styles], label, emoji: icon, custom_id: customId(playId, key), disabled: disabled || control.disabled === true || undefined });
+    return compact({ type: 2, style: styles[style as keyof typeof styles], label, emoji: icon, custom_id: customId(playId, unique), disabled: disabled || control.disabled === true || undefined });
   }
   if (control.type === 'select') {
     const key = id(control.id, 'Select');
-    if (seen.has(key)) throw new PlayError(`Control id "${key}" is used twice in one view.`);
-    seen.add(key);
+    if (seen.has(key) || seen.has(`select:${key}`)) throw new PlayError(`Control id "${key}" is used twice in one view.`);
+    seen.add(key); seen.add(`select:${key}`);
     const options = list(control.options, 'Select options', limits.options).map(option => {
       if (!isRecord(option)) throw new PlayError('Select options must be strings or { value, label }.');
       return compact({ value: string(option.value, 'Option value', limits.option, true), label: string(option.label, 'Option label', limits.option, true), description: string(option.description, 'Option description', limits.option), emoji: emoji(option.emoji), default: option.default === true || undefined });

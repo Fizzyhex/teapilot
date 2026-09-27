@@ -7,7 +7,7 @@ import type { Config, ModelConfig, Tier, PhysicalModel } from '../config.js';
 import { effectiveProfile, modelFor, profileFor, type ExecutionProfile } from '../routing/execution.js';
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
-import { calibratedTokens, estimateInputTokens, MAX_PAYLOAD_BYTES } from './context.js';
+import { calibratedTokens, estimateInputTokens, MAX_PAYLOAD_BYTES, wellFormedText } from './context.js';
 import { reasoningFields } from './reasoning.js';
 
 export function piModel(config: ModelConfig, profile?: ExecutionProfile): Model<'openai-completions'> {
@@ -143,14 +143,26 @@ function observeBilling(response: Response, observed: { cost?: number; model?: s
   return new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+/**
+ * `value` with every string made well-formed UTF-16. Text cut to length can end in half an emoji, and some model
+ * servers fail the whole request on a lone surrogate (a tokenizer that needs valid UTF-8, say).
+ */
+export function wellFormed(value: unknown): unknown {
+  if (typeof value === 'string') return wellFormedText(value);
+  if (Array.isArray(value)) return value.map(wellFormed);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, wellFormed(item)]));
+  return value;
+}
+
 export function guardedStream(
   config: Config, tier: Tier, governor: SpendGovernor, telemetry: Telemetry, state: InferenceState,
-  controls?: { toolChoice?: 'auto' | 'required' | 'none'; maxOutputTokens?: number },
+  controls?: { toolChoice?: 'auto' | 'required' | 'none'; maxOutputTokens?: number; /** Replaces the tier's reply length, within the model's own limit. */ outputTokens?: number },
 ): StreamFn {
   const profile = effectiveProfile(config, tier);
   const spec = modelFor(config, tier);
   const model = piModel(spec, profile);
-  const reservedOutputTokens = Math.min(controls?.maxOutputTokens ?? profile.maxOutputTokens, profile.maxOutputTokens);
+  const reservedOutputTokens = controls?.outputTokens !== undefined ? Math.min(controls.outputTokens, spec.maxOutputTokens)
+    : Math.min(controls?.maxOutputTokens ?? profile.maxOutputTokens, profile.maxOutputTokens);
   const reasoning = reasoningFields(spec, profile.thinking);
   return (_model, context, options) => {
     const output = new AssistantMessageEventStream();
@@ -179,10 +191,13 @@ export function guardedStream(
           toolChoice: controls?.toolChoice,
           temperature: spec.temperature,
           timeoutMs: config.policy.limits.requestTimeoutMs,
-          onPayload: payload => spec.provider === 'openrouter' ? {
-            ...(payload as Record<string, unknown>),
-            provider: { require_parameters: true, max_price: { prompt: spec.inputUsdPerMillion, completion: spec.outputUsdPerMillion, request: 0 } },
-          } : reasoning ? { ...(payload as Record<string, unknown>), ...reasoning } : undefined,
+          onPayload: raw => {
+            const payload = wellFormed(raw) as Record<string, unknown>;
+            return spec.provider === 'openrouter' ? {
+              ...payload,
+              provider: { require_parameters: true, max_price: { prompt: spec.inputUsdPerMillion, completion: spec.outputUsdPerMillion, request: 0 } },
+            } : reasoning ? { ...payload, ...reasoning } : payload;
+          },
           fetch: async (input, init) => {
             const body = typeof init?.body === 'string' ? init.body : '';
             const payloadBytes = Buffer.byteLength(body);

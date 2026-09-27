@@ -94,9 +94,10 @@ export const colors = {
   pink: 0xeb459e, purple: 0x9b59b6, blue: 0x3498db, grey: 0x95a5a6, black: 0x23272a, white: 0xffffff,
 } as const;
 
-/** Lines of text; falsy entries are skipped so conditional lines stay short. */
-export function text(...lines: Array<string | false | null | undefined>): string {
-  return lines.filter((line): line is string => typeof line === 'string').join('\n');
+type Line = string | false | null | undefined;
+/** Lines of text, given one by one or as arrays; falsy entries are skipped so conditional lines stay short. */
+export function text(...lines: Array<Line | Line[]>): string {
+  return lines.flat().filter((line): line is string => typeof line === 'string').join('\n');
 }
 
 export function embed(options: Omit<Embed, 'type'>): Embed { return { type: 'embed', ...options }; }

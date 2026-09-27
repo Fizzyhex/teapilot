@@ -23,6 +23,8 @@ export class Evidence {
   // A streak of them first withdraws tools so the model answers, then stops the attempt.
   refused = 0;
   answerNow = false;
+  /** Why tools are withdrawn when answerNow is set, for the notice that asks for the answer. */
+  answerWhy = 'Those calls could not run';
   private repeated = new Map<string, number>();
   constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = []) {
     this.unresolvedChecks = new Set(unresolvedChecks);
@@ -61,7 +63,10 @@ export class Evidence {
     const inspection = (['repo_list', 'repo_search', 'read'].includes(name) && !failed) || search;
     // Equal bounded inspection results provide no new evidence, even if the
     // caller varies query spelling or optional arguments. Never normalize shell grammar.
-    const signature = createHash('sha256').update(JSON.stringify(inspection && result !== undefined ? [name, result] : [name, args])).digest('hex');
+    // discord.play tools read the app from the reply, so equal arguments often carry new code: only an equal result repeats.
+    const play = name.startsWith('play_');
+    const byResult = inspection || play;
+    const signature = createHash('sha256').update(JSON.stringify(byResult && result !== undefined ? [name, result] : [name, args])).digest('hex');
     const count = (this.repeated.get(signature) ?? 0) + 1;
     this.repeated.set(signature, count);
     if (count >= this.thresholds.repeatedToolCalls) {
@@ -71,6 +76,8 @@ export class Evidence {
           ? 'Repeated searches produced no new evidence. Stop searching now and answer from the results already found, clearly stating any gaps. Further searches will be refused.'
           : 'Repeated inspection produced no new evidence. Change approach now: use the information already found [*clearly* stating knowledge gaps!], narrow the search, or create the requested files if the repository is empty. Another repeated inspection will stop this attempt.';
       } else if (search) this.searchExhausted = true;
+      // An app is shown to people as it goes, so a stuck attempt answers about what is live rather than starting over.
+      else if (play && !this.answerNow) { this.answerNow = true; this.answerWhy = 'Those calls keep giving the same result'; }
       else this.reason = 'ineffective_calls';
     }
   }

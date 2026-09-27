@@ -6,6 +6,7 @@ import { runAttempt } from '../src/agents/run.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { calibratedTokens, estimateInputTokens, estimateTextTokens, MAX_PAYLOAD_BYTES } from '../src/inference/context.js';
+import { wellFormed } from '../src/inference/providers.js';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -202,4 +203,9 @@ it('calibrates from reported input within an attempt, bounded below', async () =
   const large = await scripted([write(indentedPage(120 * 1024))], () => 10);
   expect(large.result.stopped).toBe('context_limit');
   expect(large.admissions.at(-1)).toMatchObject({ method: 'calibrated-lexical', rejection: 'context_limit' });
+});
+
+it('sends well-formed text, since some model servers fail a whole request on half an emoji', () => {
+  const cut = '🟫🧑‍🌾'.slice(0, 3);
+  expect(wellFormed({ messages: [{ content: [cut, 'ok 🌽'] }] })).toEqual({ messages: [{ content: ['🟫�', 'ok 🌽'] }] });
 });
