@@ -26,6 +26,12 @@ export function automaticCommand(command: string, trusted: string[]): boolean {
   ].includes(command);
 }
 
+/** Whether `path` lies strictly inside `directory`, or is `directory` itself when `inclusive`. */
+function within(directory: string, path: string, inclusive = false): boolean {
+  const rel = relative(directory, path);
+  return rel ? rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) : inclusive;
+}
+
 export class ExecutionPolicy {
   denied = false;
   shellRan = false;
@@ -36,9 +42,12 @@ export class ExecutionPolicy {
   async path(path: string, mutation: boolean): Promise<string> {
     if (!path || path.includes('\0') || path.startsWith('~')) throw new PolicyDenied('Use repository-relative paths');
     const target = resolve(this.root, path);
-    const stateRelative = relative(this.config.stateDir, target);
-    if (!stateRelative || (stateRelative !== '..' && !stateRelative.startsWith(`..${sep}`) && !isAbsolute(stateRelative))) throw new PolicyDenied('Host state is protected');
     const rel = relative(this.root, target);
+    // A working root the operator placed inside the state directory (a Discord workspace, say) is the
+    // repository; the rest of the state directory, and any configuration inside the root, stays protected.
+    const configDir = this.config.source?.directory;
+    const workspace = configDir !== undefined && within(this.config.stateDir, this.root) && !within(this.root, configDir, true);
+    if (within(this.config.stateDir, target, true) && !(workspace && within(this.root, target))) throw new PolicyDenied('Host state is protected');
     if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new PolicyDenied('Path must be a file inside the working repository');
     const parts = rel.split(sep);
     if (parts.some(part => /[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new PolicyDenied('Ambiguous or reserved filesystem name');

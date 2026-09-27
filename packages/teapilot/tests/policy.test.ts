@@ -18,6 +18,21 @@ it('rejects traversal, protected paths and custom host state paths', async () =>
   expect(await policy.path('.env.example', false)).toBe(join(f.cwd, '.env.example'));
 });
 
+it('treats a working root inside the state directory as the repository, keeping the rest protected', async () => {
+  const f = await setup();
+  const workspace = join(f.config.stateDir, 'discord');
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, 'game.py'), 'print(1)');
+  f.config.source = { directory: join(f.cwd, 'profile'), reason: 'test', overrides: [] };
+  const policy = new ExecutionPolicy(workspace, f.config, async () => true);
+  expect(await policy.path('game.py', false)).toBe(join(workspace, 'game.py'));
+  await expect(policy.path('../spend.jsonl', false)).rejects.toThrow('Host state is protected');
+  // The state directory itself as the root, or a root holding the configuration, gets no exception.
+  await expect(new ExecutionPolicy(f.config.stateDir, f.config, async () => true).path('spend.jsonl', false)).rejects.toThrow('Host state is protected');
+  f.config.source.directory = join(workspace, 'config');
+  await expect(policy.path('game.py', false)).rejects.toThrow('Host state is protected');
+});
+
 it('blocks symlink/junction ancestors and hard-linked file access', async () => {
   const f = await setup();
   const outside = await setup();
