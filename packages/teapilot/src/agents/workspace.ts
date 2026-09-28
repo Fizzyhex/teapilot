@@ -20,8 +20,14 @@ export interface ConversationWorkspace {
 const text = (value: string) => ({ content: [{ type: 'text' as const, text: value }], details: {} });
 const size = (bytes: number) => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 const extensions: Record<string, string> = { js: 'js', javascript: 'js', ts: 'ts', typescript: 'ts', python: 'py', py: 'py', json: 'json', html: 'html', css: 'css', md: 'md', markdown: 'md', lua: 'lua', sh: 'sh', bash: 'sh', bat: 'bat', cmd: 'cmd', csv: 'csv' };
-/** Hosts one approval covers together: a package install talks to all of them. */
-const hostFamilies = [['pypi.org', 'files.pythonhosted.org'], ['registry.npmjs.org']];
+/** Hosts one approval covers together: a package install or a video download talks to all of them. */
+const hostFamilies = [
+  { name: 'pypi.org and files.pythonhosted.org', hosts: ['pypi.org', 'files.pythonhosted.org'] },
+  { name: 'registry.npmjs.org', hosts: ['registry.npmjs.org'] },
+  { name: 'YouTube (youtube.com and its video and image servers)', hosts: ['www.youtube.com', 'youtube.com', 'm.youtube.com', 'youtubei.googleapis.com', '*.googlevideo.com', '*.ytimg.com'] },
+];
+/** An approved host, or `*.name` for any host under name. */
+const covers = (pattern: string, host: string) => pattern === host || (pattern.startsWith('*.') && host.endsWith(pattern.slice(1)));
 
 function changesLine(changes: Changes): string {
   const lines = [
@@ -70,14 +76,14 @@ export async function workspace(context: ConversationWorkspace, drafts: Drafts, 
       const decisions = new Map<string, Promise<boolean>>();
       const refused: string[] = [];
       const network = (host: string): Promise<boolean> => {
-        if (store.domains(conversation).includes(host)) return Promise.resolve(true);
-        const family = hostFamilies.find(hosts => hosts.includes(host)) ?? [host];
+        if (store.domains(conversation).some(pattern => covers(pattern, host))) return Promise.resolve(true);
+        const family = hostFamilies.find(entry => entry.hosts.some(pattern => covers(pattern, host))) ?? { name: host, hosts: [host] };
         // One question per host and run, however often the command retries while it waits for the answer.
-        let decision = decisions.get(family[0]!);
+        let decision = decisions.get(family.name);
         if (!decision) {
-          decision = approve({ kind: 'network', summary: `Let a command in this conversation's workspace connect to ${family.join(' and ')}? Approving lets this conversation's commands reach ${family.length > 1 ? 'them' : 'it'} from now on.`, details: args.command, signal })
-            .then(approved => { if (approved) store.allowDomains(conversation, family); else refused.push(family.join(' and ')); return approved; });
-          decisions.set(family[0]!, decision);
+          decision = approve({ kind: 'network', summary: `Let a command in this conversation's workspace connect to ${family.name}? Approving lets this conversation's commands reach ${family.hosts.length > 1 ? 'them' : 'it'} from now on.`, details: args.command, signal })
+            .then(approved => { if (approved) store.allowDomains(conversation, family.hosts); else refused.push(family.name); return approved; });
+          decisions.set(family.name, decision);
         }
         return decision;
       };

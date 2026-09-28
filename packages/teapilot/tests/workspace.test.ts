@@ -248,6 +248,28 @@ it('asks once before a command reaches a package registry, and remembers the ans
   expect(refused.content[0]).toMatchObject({ text: expect.stringContaining('pypi.org and files.pythonhosted.org was not approved') });
 });
 
+it('asks once for a YouTube download, whichever video servers it reaches', async () => {
+  const hosts: boolean[] = [];
+  let later = false;
+  const sandbox = fakeSandbox(async (_folder, _command, options) => {
+    if (later) { hosts.push(await options.network('rr5---sn-abc.googlevideo.com'), await options.network('googlevideo.com.evil.example')); return ''; }
+    await options.network('www.youtube.com');
+    await options.network('rr3---sn-4g5e6nsz.googlevideo.com');
+    return 'Downloaded';
+  });
+  const f = await agentSetup(() => undefined, sandbox);
+  const run = (await workspace(f.workspace, { latest: () => undefined, block: () => undefined, used: new Set() }, f.base.approve)).tools.find(tool => tool.name === 'workspace_run')!;
+  await run.execute('one', { command: 'yt-dlp -x URL' });
+  expect(f.approvals).toHaveLength(1);
+  expect(f.store.domains('dm:1')).toContain('*.googlevideo.com');
+  // Another server under an approved name needs no new question; an unrelated look-alike does.
+  later = true;
+  const again = await workspace(f.workspace, { latest: () => undefined, block: () => undefined, used: new Set() }, async approval => { f.approvals.push(approval); return false; });
+  await again.tools.find(tool => tool.name === 'workspace_run')!.execute('two', { command: 'yt-dlp URL' });
+  expect(hosts).toEqual([true, false]);
+  expect(f.approvals).toHaveLength(2);
+});
+
 it('without a sandbox, keeps and sends files but says commands cannot run', async () => {
   const f = await agentSetup(() => undefined, fakeSandbox(undefined, false));
   const setup = await workspace(f.workspace, { latest: () => undefined, block: () => undefined, used: new Set() }, f.base.approve);

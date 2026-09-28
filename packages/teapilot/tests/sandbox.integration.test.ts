@@ -77,6 +77,13 @@ describe.skipIf(!status.available)('sandboxed workspace commands', () => {
     expect(changes.added.find(file => file.name === 'pillow.png')).toMatchObject({ width: 300, height: 480 });
   }, 60_000);
 
+  it.skipIf(!tool('numpy') || !tool('yt-dlp'))('computes with numpy, and has the yt-dlp command', async () => {
+    const sum = await sandbox.run(mine, `${python} -c "import numpy; print(int(numpy.arange(10).sum()))"`, offline);
+    expect(sum.output, sum.output).toMatch(/^45$/m);
+    const version = await sandbox.run(mine, 'yt-dlp --version', offline);
+    expect(version.exitCode, version.output).toBe(0);
+  }, 60_000);
+
   it.skipIf(!tool('python'))('asks before reaching the network, and connects only when approved', async () => {
     const fetch = `${tool('python')} -c "import urllib.request as u; print(u.urlopen('https://pypi.org/simple/six/', timeout=20).status)"`;
     const asked: string[] = [];

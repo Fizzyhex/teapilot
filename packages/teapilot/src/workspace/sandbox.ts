@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import { cleanChildEnvironment } from '../execution/policy.js';
-import { packagesFolder, pandocFolder, pythonAbi, toolsFolder, type PythonInfo } from './toolchain.js';
+import { packagesFolder, pandocFolder, pythonAbi, pythonPackages, toolsFolder, type PythonInfo } from './toolchain.js';
 
 /** How workspace commands are sandboxed: WORKSPACE_SANDBOX, WORKSPACE_ALLOWED_DOMAINS and WORKSPACE_DENIED_DOMAINS. */
 export interface WorkspaceSettings {
@@ -130,13 +130,20 @@ export class SrtSandbox implements WorkspaceSandbox {
         if (name === 'python') python = await this.python(command.split(' ')[0]!, probe);
         break;
       }
-      if (name === 'python' && python) {
-        const pillow = await probe(`${python.command} -c "import PIL; print(PIL.__version__)"`);
-        const version = pillow?.exitCode === 0 ? versionOf('pillow', pillow.output) : undefined;
-        if (version) tools.push({ name: 'Pillow', kind: 'pillow', version });
-      }
+      if (name === 'python' && python) tools.push(...await this.packages(python.command, probe));
     }
     return { available: true, shell, tools, ...python ? { python: { executable: python.executable, abi: python.abi } } : {} };
+  }
+
+  /** Which of the packages teapilot installs Python can already import, from teapilot's folder or the system's. */
+  private async packages(command: string, probe: (command: string) => Promise<RunResult | undefined>): Promise<Tool[]> {
+    const result = await probe(`${command} -c "import importlib.metadata as m; print(*(d.metadata['Name'] + ' ' + d.version for d in m.distributions()), sep=chr(10))"`);
+    const normal = (name: string) => name.toLowerCase().replace(/[-_.]+/g, '-');
+    const found = new Map((result?.exitCode === 0 ? result.output.split(/\r?\n/) : []).map(line => line.trim().split(' ') as [string, string?]).map(([name, version]) => [normal(name), version]));
+    return pythonPackages.flatMap(entry => {
+      const version = found.get(normal(entry.name));
+      return version ? [{ name: entry.name, kind: normal(entry.name), version }] : [];
+    });
   }
 
   /** Where the sandbox's Python lives and which ABI it has; teapilot's packages for that ABI go on PYTHONPATH. */
@@ -146,7 +153,8 @@ export class SrtSandbox implements WorkspaceSandbox {
     const abi = suffix ? pythonAbi(suffix) : undefined;
     if (!executable || !abi) return undefined;
     const packages = packagesFolder(this.stateDir, abi);
-    if (await stat(packages).catch(() => undefined)) this.pythonPath = packages;
+    // Their commands, such as yt-dlp, sit in bin.
+    if (await stat(packages).catch(() => undefined)) { this.pythonPath = packages; this.toolPath.push(join(packages, 'bin')); }
     return { command, executable, abi };
   }
 

@@ -64,7 +64,7 @@ All the [session commands](02-commands.md#interactive-use) work, except:
 
 Messages sent during a turn are queued as your next message. Long answers are split across messages.
 
-Files you attach to a message (up to 5, 10 MB each) stay in the conversation's workspace. There teapilot runs sandboxed commands (ffmpeg, ImageMagick, pandoc, Python with Pillow, Node) to convert or edit them, can run an attached app, and sends files back as attachments. Installing a package asks an operator first. `teapilot doctor` shows whether the sandbox is ready and offers to install pandoc and Pillow. Files on messages answered through the Reply menu are ignored.
+Files you attach to a message (up to 5, 10 MB each) stay in the conversation's workspace. There teapilot runs sandboxed commands (ffmpeg, ImageMagick, pandoc, yt-dlp, Python with Pillow and numpy, Node) to convert or edit them, can run an attached app, and sends files back as attachments. Installing a package asks an operator first. `teapilot doctor` shows whether the sandbox is ready and offers to install pandoc and the Python packages. Files on messages answered through the Reply menu are ignored.
 
 ## Interactive apps
 

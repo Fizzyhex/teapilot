@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 /**
- * Tools teapilot installs for workspace commands when the system lacks them: pandoc, and Pillow for Python.
+ * Tools teapilot installs for workspace commands when the system lacks them: pandoc, and Python packages.
  * They live under teapilot's state, which sandboxed commands may read but not write, so one copy serves every
  * conversation. ffmpeg, ImageMagick, Python and Node come from the system.
  */
@@ -21,7 +21,7 @@ export const pandocRelease = {
   } as Record<string, { file: string; sha256: string; binary: string }>,
 };
 /** Python packages every workspace can import, pinned; prebuilt wheels only, so nothing is compiled or run to install them. */
-export const pythonPackages = [{ name: 'Pillow', version: '12.3.0' }];
+export const pythonPackages = [{ name: 'Pillow', version: '12.3.0' }, { name: 'numpy', version: '2.5.3' }, { name: 'yt-dlp', version: '2026.8.19' }];
 
 /** The Python the sandbox runs, as it reports itself: its executable and the ABI its compiled packages must match. */
 export interface PythonInfo { executable: string; abi: string }
@@ -76,7 +76,7 @@ export async function installPythonPackages(stateDir: string, python: PythonInfo
   await rm(staging, { recursive: true, force: true });
   await mkdir(staging, { recursive: true });
   try {
-    await execFileAsync(python.executable, ['-m', 'pip', 'install', '--target', staging, '--only-binary=:all:', '--no-deps', '--no-input', '--disable-pip-version-check', '--no-warn-script-location', ...pythonPackages.map(entry => `${entry.name.toLowerCase()}==${entry.version}`)], { signal, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    await execFileAsync(python.executable, ['-m', 'pip', 'install', '--target', staging, '--only-binary=:all:', '--no-deps', '--no-input', '--disable-pip-version-check', '--no-warn-script-location', ...pythonPackages.map(entry => `${entry.name}==${entry.version}`)], { signal, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw new Error(failure(error));

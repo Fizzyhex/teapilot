@@ -270,13 +270,13 @@ async function workspaceStatus(config: Config, consent: (message: string) => Pro
   }
   await sandbox.close();
   if (!status.available) { log(`Workspace commands: OFF (${status.reason})`); return; }
-  // pandoc and Pillow are teapilot's to install: one pinned copy, read-only to every workspace.
+  // pandoc and the Python packages are teapilot's to install: one pinned copy, read-only to every workspace.
   const has = (kind: string) => status.tools.some(tool => tool.kind === kind);
   const { installPandoc, installPythonPackages, pandocAsset, pandocRelease, pythonPackages, toolsFolder } = await import('./workspace/toolchain.js');
   const python = status.python;
   const offers = [
     ...!has('pandoc') && pandocAsset() ? [{ name: 'pandoc', label: `pandoc ${pandocRelease.version} (GPL-2.0, about 40 MB from GitHub, checked against its pinned checksum)`, install: (signal: AbortSignal) => installPandoc(config.stateDir, signal) }] : [],
-    ...!has('pillow') && python ? [{ name: 'Pillow', label: `${pythonPackages.map(entry => `${entry.name} ${entry.version}`).join(', ')} (prebuilt, from PyPI for ${python.executable})`, install: (signal: AbortSignal) => installPythonPackages(config.stateDir, python, signal) }] : [],
+    ...pythonPackages.some(entry => !has(entry.name.toLowerCase())) && python ? [{ name: 'Python packages', label: `${pythonPackages.map(entry => `${entry.name} ${entry.version}`).join(', ')} (prebuilt, from PyPI for ${python.executable})`, install: (signal: AbortSignal) => installPythonPackages(config.stateDir, python, signal) }] : [],
   ];
   if (offers.length && await consent(`Install ${offers.map(offer => offer.label).join(' and ')} into ${toolsFolder(config.stateDir)} for workspace commands? Commands can read them there but not change them.`)) {
     for (const offer of offers) {
