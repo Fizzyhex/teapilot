@@ -42,10 +42,22 @@ export function estimateValueTokens(value: unknown): number {
 }
 
 export function estimateInputTokens(body: string): number {
-  const payload = JSON.parse(body) as { messages?: unknown[]; tools?: unknown[] };
+  return estimatePayloadTokens(JSON.parse(body) as { messages?: unknown[]; tools?: unknown[] });
+}
+/** estimateInputTokens over a request that is not serialized yet. */
+export function estimatePayloadTokens(payload: { messages?: unknown; tools?: unknown }): number {
   if (!Array.isArray(payload.messages)) throw new Error('Missing chat messages');
   // Count the model-bearing fields, not escaped transport JSON or sampling
   // options. Retain schema keys and structure because tools enter the prompt.
   // Template/tool rendering headroom plus per-message role/turn delimiters.
   return 2048 + payload.messages.length * 32 + estimateValueTokens(payload.messages) + estimateValueTokens(payload.tools ?? []);
+}
+
+/**
+ * The room a call must leave for its reply: a quarter of the context, at least 4096 tokens, and never more than the
+ * reply may use. A tier's reply limit is a ceiling for each call, not room held back from every call's input:
+ * holding back 16k of a 32k context left little more than 14k for the conversation.
+ */
+export function replyRoom(profile: { contextTokens: number; maxOutputTokens: number }): number {
+  return Math.min(profile.maxOutputTokens, Math.max(4096, Math.floor(profile.contextTokens / 4)));
 }

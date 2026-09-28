@@ -6,6 +6,7 @@ import type { Message } from '@earendil-works/pi-ai';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import type { AccessAdmin } from './agents/access.js';
 import type { PlayContext } from './agents/play.js';
+import type { ConversationWorkspace } from './agents/workspace.js';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type TierPreference, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
@@ -17,12 +18,14 @@ import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
 import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
-import { capabilityPlanner, playQuestion, readPlayGrant, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
+import { capabilityPlanner, conversationQuestions, playQuestion, readCasual, readPlayGrant, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
 import { markWork } from './teachat/busy.js';
-import { directTier, modelFor, profileFor } from './routing/execution.js';
+import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+  /** The session's scratchpad folder, from the surface that owns the session. */
+  scratch?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
@@ -31,6 +34,8 @@ export interface HostResult {
   check?: 'passed' | 'failed'; models?: string[];
   tier?: Tier;
   teachatIdentity?: TeachatIdentityAnswer;
+  /** Answered in conversational mode: the text is short lines, each meant to be sent as its own message. */
+  casual?: boolean;
   /** What the tools did before the final reply; kept with the turn so later turns can replay it. */
   steps?: Message[];
 }
@@ -72,6 +77,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   try { unlock = await lockState(config.stateDir); } catch (error) { await idle(); throw error; }
   const requestId = randomUUID();
   let teachatIdentity: TeachatIdentityAnswer | undefined;
+  // Conversational mode, decided once from the first routing call; see routing/intent.ts.
+  let casual = false;
   const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((value): value is string => Boolean(value)), dependencies.onEvent);
   const budget = new SpendGovernor(join(config.stateDir, 'spend.jsonl'), requestId, config.policy.budget);
   // URLs the user wrote or earlier tools returned may be read; anything the model composes may not.
@@ -149,7 +156,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     // A workload label such as ask.normal does not mean repository tools stayed
     // unused: mid-run capability requests can grant write/shell under any workload.
     const touchedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
-    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool result: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars).` : '';
+    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool call: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars, arguments and result).` : '';
     return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
       touchedRepository ? `Observed file edits: ${changedFiles.size ? [...changedFiles].map(path => fileSizes.has(path) ? `${path} (${formatSize(fileSizes.get(path)!)})` : path).join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}` : undefined,
       touchedRepository ? `Checks after latest observed edit: ${attempt.check ?? 'not run'}.` : undefined,
@@ -158,9 +165,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
   };
   let previous: AttemptResult | undefined;
+  let previousTier: Tier | undefined;
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
-    const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }) };
+    const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }), ...(casual && { casual }) };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
   };
@@ -176,7 +184,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     // Apps outlive a conversation's history (a restart starts it over), so an app still running here keeps discord.play, even one another conversation started in this channel.
     else if (playable && request.play!.runtime.list(request.play!.conversation, request.play!.channelId).some(app => app.status === 'running')) await activate(['discord.play'], 'An app is still running here.');
     const provider = config.routingMode === 'direct' ? undefined : budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
-    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, { ...(request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)), ...(playable ? playQuestion : {}) }) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
+    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, { ...conversationQuestions, ...(request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)), ...(playable ? playQuestion : {}) }) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
     const physicalOnline = dependencies.localProbe
       ? { fast: await dependencies.localProbe(), capable: await dependencies.localProbe() }
       : { fast: await localAvailable(config, 'fast'), capable: await localAvailable(config, 'capable') };
@@ -217,6 +225,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (router) webAutoBasis = request.web ? ['explicit'] : readWebAutoGrant(decision?.raw_jev);
       if (request.teachatIdentities) teachatIdentity ??= readTeachatIdentity(decision?.raw_jev);
       if (playable && !activePermissions.includes('discord.play') && readPlayGrant(decision?.raw_jev, config.policy.router.min_confidence)) await activate(['discord.play'], 'Planned for your request before starting.');
+      if (!scope && request.authorization) casual = readCasual(decision?.raw_jev, config.policy.router.min_confidence);
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
       // An unconfident route falls back to the workload the session's mode already
@@ -245,10 +254,20 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       let candidate = candidates.find(c => c.id === selected);
       let assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === selected) : undefined;
       if (!candidate || !assessCandidate(config, candidate).allowed || (decision && !usedRoutingFallback && (!assessment || assessment.router.filtered || !assessment.router.allowed))) return await finish(false, 'blocked', 'Selected capability did not pass the execution boundary.');
+      if (casual) {
+        // Conversational mode runs on the allowed ask tier that reasons least; with none, the turn is an ordinary one.
+        const routerAllows = (id: string) => usedRoutingFallback || !decision || Boolean(decision.decision.candidates.find(c => c.id === id && c.router.allowed && !c.router.filtered));
+        const chosen = [...(['ask.fast', 'ask.normal'].includes(selected) ? [selected] : []), 'ask.normal', 'ask.fast', 'ask.reasoning', 'ask.deep']
+          .map(id => candidates.find(c => c.id === id)).find(c => c && assessCandidate(config, c).allowed && routerAllows(c.id));
+        if (chosen) {
+          selected = chosen.id; candidate = chosen; assessment = !usedRoutingFallback ? decision?.decision.candidates.find(c => c.id === chosen.id) : undefined;
+          await telemetry.event('casual', { capability: selected });
+        } else casual = false;
+      }
       const selectedWorkload = selected!.split('.')[0]!;
       // Only a confident access plan earns an upfront grant prompt. An unconfident one
       // continues with current access; the agent requests more mid-run if needed.
-      const plan = request.authorization && decision && !usedRoutingFallback ? readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload) : undefined;
+      const plan = request.authorization && decision && !usedRoutingFallback && !casual ? readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload) : undefined;
       if (plan) {
         if ((!request.tier || request.tier === 'auto') && plan.tier && plan.tier !== 'auto') {
           const preferred = candidates.find(candidate => candidate.id === `${selectedWorkload}.${plan.tier}`);
@@ -263,9 +282,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       }
       // Jev can also establish a web.search basis without a confident access plan (or when the plan
       // did not ask for search), so grant it whenever it is usable rather than waiting for a mid-run request.
-      if (request.authorization && webAutoBasis.length && !activePermissions.includes('web.search') && config.searchUrl
+      // Where search needs no approval anyway (Discord), a missed basis must not leave the model answering from memory.
+      if (request.authorization && !casual && (webAutoBasis.length || request.authorization.free('web.search')) && !activePermissions.includes('web.search') && config.searchUrl
         && config.policy.permissions.includes('web.search') && modelFor(config, selected.split('.')[1] as Tier).toolCalling) {
-        await activate(['web.search'], `Web search allowed automatically (${webAutoBasis.join(', ')}).`, request.signal, true);
+        await activate(['web.search'], webAutoBasis.length ? `Web search allowed automatically (${webAutoBasis.join(', ')}).` : 'Web search needs no approval here.', request.signal, true);
       }
       if (!decision) await telemetry.event('direct_selection', { capability: selected });
       if (request.signal?.aborted) return await finish(false, 'cancelled', 'Request cancelled.');
@@ -276,13 +296,18 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         if (!approved) return await finish(false, 'approval_denied', 'Route was not approved.');
       }
       const [workload, tier] = selected.split('.') as [Workload, Tier];
-      dependencies.onProgress?.(`Executing ${selected} using ${modelFor(config, tier).id} (${profileFor(tier).thinking}).`);
+      // Surfaces decide how to show the turn from this: a conversational one gets no progress display.
+      dependencies.onEvent?.({ type: 'route', capability: selected, casual });
+      dependencies.onProgress?.(`Executing ${selected} using ${modelFor(config, tier).id} (${thinkingFor(config, tier)}).`);
       attempts++;
       models.push(modelFor(config, tier).id);
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
+      // A retry on the same model carries on from what it last saw, with this tier's settings, rather than starting
+      // over from a summary of it and reading everything again.
+      const resume = previous?.resume && previousTier && profileFor(previousTier).model === profileFor(tier).model ? previous.resume : undefined;
       previous = await runAttempt({
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
-        mode: request.mode, conversational: request.conversational, authorization: request.authorization, access: request.access, play: request.play,
+        mode: request.mode, conversational: request.conversational, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {
@@ -295,7 +320,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           }
           return activate(required, reason, signal);
         } : undefined,
-        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web,
+        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web, scratch: request.scratch, attempt: attempts - 1, requestText: currentPrompt,
         // Each attempt fits earlier turns, with their steps, to its own model's context.
         history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, onReasoning: dependencies.onReasoning, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {
@@ -303,9 +328,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           await telemetry.event('approval', { kind: approval.kind, approved });
           return approved;
         },
-        signal: request.signal,
-        prompt: basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. ${previous.changedFiles?.length || previous.shellRan ? 'Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.' : 'It changed no files; continue the task from the context below.'}\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
+        signal: request.signal, resume,
+        prompt: resume ? resumeNotice(config, previousTier!, tier, previous!.reason)
+          : basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. ${previous.changedFiles?.length || previous.shellRan ? 'Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.' : 'It changed no files; continue the task from the context below.'}\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
       });
+      previousTier = tier;
       check = previous.check;
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
       for (const [path, size] of Object.entries(previous.fileSizes ?? {})) fileSizes.set(path, size);
@@ -318,10 +345,14 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (accessFailure) return await finish(false, 'approval_denied', incomplete(previous, accessFailure));
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check, ...(previous.success ? {} : { ending: previous.ending }) });
       if (previous.success) return await finish(true, 'completed', previous.text);
-      if (!previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit', 'search_unavailable'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
+      if (casual || !previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit', 'search_unavailable'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
         return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));
       }
-      const fallback = tiers.slice(tiers.indexOf(tier) + 1).map(nextTier => {
+      // Overthinking steps down to less reasoning on the same model; everything else steps up.
+      const onward = previous.reason === 'overthinking'
+        ? tiers.slice(0, tiers.indexOf(tier)).reverse().filter(lower => profileFor(lower).model === profileFor(tier).model)
+        : tiers.slice(tiers.indexOf(tier) + 1);
+      const fallback = onward.map(nextTier => {
         const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }, { physicalOnline, relatedLock: request.relatedTier }).find(c => c.id === `${workload}.${nextTier}`)!;
         if (request.web && !modelFor(config, nextTier).toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
         return { tier: nextTier, assessment: assessCandidate(config, candidate) };
@@ -333,7 +364,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         // Without repository work, resuming the same model after repeated calls just repeats them.
         const madeProgress = previous.reason === 'ineffective_calls' ? repositoryWork : previous.turns > 0 || repositoryWork;
         if (!previous.reason || !resumableSameTier.includes(previous.reason) || !madeProgress) {
-          return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || 'no higher tier configured'}.`));
+          return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || `no ${previous.reason === 'overthinking' ? 'lower' : 'higher'} tier configured`}.`));
         }
         dependencies.onProgress?.(`No higher-tier fallback is available; continuing ${selected} with its execution handoff.`);
         await telemetry.event('continuation', { capability: selected, reason: previous.reason, fallback: 'unavailable' });
@@ -349,6 +380,14 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     await telemetry.event('request_error', { name: error instanceof Error ? error.name : 'Error' });
     throw error;
   } finally { try { await unlock(); } finally { await idle(); dependencies.onActivity?.(undefined); } }
+}
+
+/** What a retry on the same model is told: why the last attempt stopped, and what this one has that it lacked. */
+function resumeNotice(config: Config, from: Tier, to: Tier, reason?: string): string {
+  const thinking = thinkingFor(config, to), reply = effectiveProfile(config, to).maxOutputTokens;
+  const now = [thinking !== thinkingFor(config, from) ? `${thinking === 'off' ? 'no' : thinking} reasoning` : '', reply > effectiveProfile(config, from).maxOutputTokens ? `replies of up to ${reply} tokens` : ''].filter(Boolean).join(' and ');
+  const advice = reason === 'turn_limit' ? 'Carry on from where it stopped.' : 'Work out what went wrong above before calling tools again, and do not repeat calls that already gave the same result.';
+  return `[host notice] That attempt stopped (${(reason ?? 'incomplete').replaceAll('_', ' ')}).${now ? ` It carries on here with ${now}.` : ''} ${advice}`;
 }
 
 /** Steps outlive the request (Discord keeps them on disk), so secrets are masked like the answer text; if masking breaks them they are dropped. */

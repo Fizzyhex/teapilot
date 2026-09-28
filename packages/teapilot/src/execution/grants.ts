@@ -71,6 +71,10 @@ export class SessionGrants {
     return caller ? this.ceiling.filter(permission => caller.permissions.includes(permission)) : [...this.ceiling];
   }
   allows(permission: Permission): boolean { return this.granted.has(permission) && this.available().includes(permission); }
+  /** Whether the current caller holds `permission` already or would be granted it without an approval click. */
+  free(permission: Permission): boolean {
+    return this.allows(permission) || Boolean(this.available().includes(permission) && this.caller?.().preapproved?.includes(permission));
+  }
   async request(requested: Permission[], reason: string, approve: Approve, signal?: AbortSignal,
     emit?: (type: string, fields: Record<string, unknown>) => Promise<void>): Promise<boolean> {
     signal?.throwIfAborted();

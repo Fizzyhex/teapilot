@@ -108,5 +108,5 @@ it('doctor reports runtime state and runtime hints from drivers, without generat
   f.config.models.capable.reasoningEfforts = ['off'];
   log.mockClear();
   await doctor(f.config, f.cwd, { log, consent: async () => false, runtimes });
-  expect(log.mock.calls.map(call => call[0]).join('\n')).toContain('deep: unavailable (Native xhigh reasoning is not verified)');
+  expect(log.mock.calls.map(call => call[0]).join('\n')).toContain('deep: unavailable (Native medium reasoning is not verified)');
 });

@@ -399,9 +399,9 @@ export class TabbyDriver implements RuntimeDriver {
       model: {
         id: preset.model.folder, provider: 'tabbyapi', baseUrl: this.baseUrl, contextTokens: preset.context,
         maxOutputTokens: Math.min(16384, Math.floor(preset.context / 2)), toolCalling: true,
-        supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2,
+        supportsDeveloperRole: false, supportsUsage: true, ...preset.sampling ? { sampling: preset.sampling } : { temperature: 0.2 },
         // Qwen3.8's chat template decides thinking: it is switched off in the template, and its effort levels are template values.
-        reasoning: { type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, medium: { enable_thinking: true, reasoning_effort: 'medium' }, xhigh: { enable_thinking: true, reasoning_effort: 'xhigh' } } },
+        reasoning: { type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, ...Object.fromEntries((['low', 'medium', 'xhigh'] as const).map(level => [level, { enable_thinking: true, reasoning_effort: level }])) } },
       },
     }];
   }

@@ -4,10 +4,10 @@ import { mkdtemp, open, rm, statfs } from 'node:fs/promises';
 import { homedir, tmpdir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { exists, physicalModels, type ModelConfig, type PhysicalModel } from '../config.js';
+import { exists, physicalModels, type ModelConfig, type PhysicalModel, type ThinkingSampling } from '../config.js';
 import type { ThinkingLevel } from '../routing/execution.js';
 import { chooseMany, type SetupUI } from '../setup/terminal.js';
-import { ollamaPresets } from './presets.js';
+import { ollamaPresets, type OllamaPreset } from './presets.js';
 import { command } from './process.js';
 import { RuntimeError, type ProvisionedModel, type RuntimeDriver } from './types.js';
 
@@ -58,11 +58,18 @@ export function checkDisk(available: number, required: number): void {
 // /api/create only registers an alias; it never loads the weights, so a GGUF with
 // missing/incompatible tensors is accepted silently. An empty-prompt /api/generate
 // forces llama-server to actually load the model, surfacing load failures here
-// instead of at first inference. Large models can take a while to load.
-async function probeOllamaLoad(base: string, id: string, alias: string, signal: AbortSignal): Promise<void> {
-  const response = await fetch(`${base}/api/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: alias, prompt: '', stream: false, keep_alive: 0 }), signal: AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]), redirect: 'error' });
+// instead of at first inference. Large models can take a while to load. While it is
+// loaded, /api/ps tells how much of it (weights and context) is in GPU memory.
+async function probeOllamaLoad(base: string, id: string, alias: string, signal: AbortSignal): Promise<number | undefined> {
+  const generate = (keep_alive: number | string) => fetch(`${base}/api/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: alias, prompt: '', stream: false, keep_alive }), signal: AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]), redirect: 'error' });
+  const response = await generate('1m');
   const payload = await response.json().catch(() => undefined) as { error?: string } | undefined;
   if (!response.ok || payload?.error) throw new RuntimeError('load', `Ollama could not load ${id}: ${payload?.error ?? `HTTP ${response.status}`}. The model file may be incompatible with this Ollama version; choose a different model.`);
+  try {
+    const loaded = (await ollamaJSON<{ models?: Array<{ name: string; size?: number; size_vram?: number }> }>('/api/ps', signal, undefined, base)).models?.find(model => model.name === alias);
+    return loaded?.size && loaded.size_vram !== undefined ? loaded.size_vram / loaded.size : undefined;
+  } catch { signal.throwIfAborted(); return undefined; }
+  finally { await generate(0).then(unload => unload.body?.cancel(), () => {}); }
 }
 
 async function binary(signal: AbortSignal): Promise<string | undefined> {
@@ -117,32 +124,100 @@ export async function ensureOllama(ui: SetupUI, signal: AbortSignal): Promise<vo
     await terminalHandoff(ui, () => command('sudo', ['systemctl', 'start', 'ollama'], signal, true)).catch(() => {
       throw new RuntimeError('not-ready', 'Could not start the Ollama service. Run ollama serve in another terminal, then rerun setup.');
     });
-  } else {
-    const app = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs/Ollama/ollama app.exe') : '';
-    if (!app || !await exists(app)) throw new RuntimeError('not-ready', 'Open Ollama from the Start menu, then rerun setup.');
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(app, [], { detached: true, stdio: 'ignore', windowsHide: true });
-      child.on('error', reject); child.on('spawn', () => { child.unref(); resolve(); });
-    });
-  }
+  } else await startOllamaApp(signal);
+  await waitForOllama(ui, signal);
+}
+
+async function waitForOllama(ui: SetupUI, signal: AbortSignal): Promise<void> {
   await during(ui, 'Waiting for Ollama to become ready...', async () => {
-    for (let count = 0; count < 30; count++) { if (await online()) return; await delay(1000, undefined, { signal }); }
+    for (let count = 0; count < 30; count++) {
+      try { await ollamaJSON('/api/version', signal); return; } catch { signal.throwIfAborted(); }
+      await delay(1000, undefined, { signal });
+    }
     throw new RuntimeError('not-ready', 'Ollama did not become ready. Check its service logs, then rerun setup.');
   });
 }
 
+/** Starts the Windows app with the user's saved server settings, which a terminal opened before they were saved lacks. */
+async function startOllamaApp(signal: AbortSignal): Promise<void> {
+  const app = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs/Ollama/ollama app.exe') : '';
+  if (!app || !await exists(app)) throw new RuntimeError('not-ready', 'Open Ollama from the Start menu, then rerun setup.');
+  const saved = await savedServerSettings(signal);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(app, [], { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ...saved } });
+    child.on('error', reject); child.on('spawn', () => { child.unref(); resolve(); });
+  });
+}
+
+const serverVariables = ['OLLAMA_FLASH_ATTENTION', 'OLLAMA_KV_CACHE_TYPE'] as const;
+type ServerSettings = Partial<Record<typeof serverVariables[number], string>>;
+/** The server settings Ollama starts with: the user's environment on Windows, the service's on Linux. */
+async function savedServerSettings(signal: AbortSignal): Promise<ServerSettings> {
+  const timeout = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
+  const settings: ServerSettings = {};
+  if (process.platform === 'win32') {
+    for (const name of serverVariables) {
+      const value = await command('reg', ['query', 'HKCU\\Environment', '/v', name], timeout).catch(() => '');
+      const match = value.match(new RegExp(`${name}\\s+REG_\\w+\\s+(\\S+)`));
+      if (match) settings[name] = match[1];
+    }
+  } else if (process.platform === 'linux') {
+    const value = await command('systemctl', ['show', 'ollama', '--property=Environment', '--value'], timeout).catch(() => '');
+    for (const name of serverVariables) { const match = value.match(new RegExp(`(?:^|\\s)${name}=(\\S+)`)); if (match) settings[name] = match[1]; }
+  } else for (const name of serverVariables) if (process.env[name]) settings[name] = process.env[name];
+  return settings;
+}
+
+/**
+ * Makes sure the Ollama server keeps its KV cache quantized as the preset needs, offering to
+ * save the setting and restart Ollama on Windows. True when the server has the setting.
+ */
+export async function ensureServerSettings(ui: SetupUI, server: NonNullable<OllamaPreset['server']>, signal: AbortSignal): Promise<boolean> {
+  const wanted = { OLLAMA_FLASH_ATTENTION: '1', OLLAMA_KV_CACHE_TYPE: server.kvCacheType };
+  const saved = await savedServerSettings(signal);
+  if (saved.OLLAMA_KV_CACHE_TYPE === server.kvCacheType && ['1', 'true'].includes(saved.OLLAMA_FLASH_ATTENTION ?? '')) return true;
+  const lines = Object.entries(wanted).map(([name, value]) => `${name}=${value}`);
+  ui.log(`This model's suggested context fits in GPU memory only with a compressed (${server.kvCacheType}) context cache, set on the Ollama server: ${lines.join(', ')}.`);
+  if (process.platform !== 'win32') {
+    ui.log(process.platform === 'linux'
+      ? `To use it, run sudo systemctl edit ollama, add [Service] with ${lines.map(line => `Environment="${line}"`).join(' and ')}, then sudo systemctl restart ollama and rerun setup.`
+      : `To use it, set ${lines.join(' and ')} where Ollama starts, restart Ollama and rerun setup.`);
+    return false;
+  }
+  if (!await ui.confirm(`Save ${lines.join(' and ')} for your Windows user and restart Ollama? Models loaded in Ollama are unloaded.`)) return false;
+  for (const [name, value] of Object.entries(wanted)) await command('setx', [name, value], AbortSignal.any([signal, AbortSignal.timeout(10000)]));
+  await during(ui, 'Restarting Ollama...', async () => {
+    for (const image of ['ollama app.exe', 'ollama.exe']) await command('taskkill', ['/IM', image, '/F'], AbortSignal.any([signal, AbortSignal.timeout(10000)])).catch(() => '');
+    for (let count = 0; count < 20; count++) {
+      try { await ollamaJSON('/api/version', AbortSignal.any([signal, AbortSignal.timeout(1000)])); } catch { signal.throwIfAborted(); break; }
+      await delay(500, undefined, { signal });
+    }
+    await startOllamaApp(signal);
+  });
+  await waitForOllama(ui, signal);
+  return true;
+}
+
 /** reasoning lists candidate levels only; live checks decide which are enabled. */
-export interface PreparedModel { id: string; source: string; context: number; tools: boolean; reasoning?: ThinkingLevel[]; roles: PhysicalModel[] }
+export interface PreparedModel {
+  id: string; source: string; context: number; tools: boolean; reasoning?: ThinkingLevel[]; sampling?: ThinkingSampling; roles: PhysicalModel[];
+  /** How much of the loaded model and its context Ollama placed in GPU memory, from 0 to 1. */
+  gpuShare?: number;
+}
 export const roleChoices: PhysicalModel[][] = [['capable'], ['fast'], ['fast', 'capable']];
 export const roleLabel = (roles: PhysicalModel[]) => roles.length > 1 ? 'Both fast and capable' : roles[0] === 'fast' ? 'Fast (quick answers)' : 'Capable (coding and harder work)';
 
-/** Memory in GiB, and lines describing the hardware models will run on. */
+/** Memory in GiB that models run in (GPU memory when there is an NVIDIA GPU), and lines describing the hardware. */
 export async function hardware(signal: AbortSignal): Promise<{ memory: number; lines: string[] }> {
-  const memory = totalmem() / 2 ** 30;
-  const lines = [`System memory: ${memory.toFixed(1)} GiB. CPU inference is supported but can be slow.`];
-  try { lines.push(`GPU: ${await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]))}`); }
-  catch { signal.throwIfAborted(); lines.push('GPU memory unavailable; memory guidance is approximate.'); }
-  return { memory, lines };
+  const system = totalmem() / 2 ** 30;
+  const lines = [`System memory: ${system.toFixed(1)} GiB. CPU inference is supported but can be slow.`];
+  try {
+    const gpus = await command('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader'], AbortSignal.any([signal, AbortSignal.timeout(3000)]));
+    const mebibytes = [...gpus.matchAll(/(\d+)\s*MiB/g)].reduce((total, match) => total + Number(match[1]), 0);
+    lines.push(`GPU: ${gpus}`);
+    if (mebibytes) return { memory: mebibytes / 1024, lines };
+  } catch { signal.throwIfAborted(); lines.push('GPU memory unavailable; memory guidance is approximate.'); }
+  return { memory: system, lines };
 }
 
 export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base = ollamaURL, verbose = false): Promise<PreparedModel[]> {
@@ -150,7 +225,7 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   for (const line of lines) ui.log(line);
   const installed = (await ollamaJSON<{ models: OllamaModel[] }>('/api/tags', signal, undefined, base)).models.filter(model => !model.remote_model && !model.name.includes('cloud'));
   const visible = installed.filter(model => !isTeapilotAlias(model.name) && !presets.some(preset => preset.id === model.name));
-  const choices = [...presets.map(p => `${p.label} - ${installed.some(model => model.name === p.id) ? 'installed' : `about ${(p.bytes / 1e9).toFixed(1)} GB download`}, ${p.memoryGiB}+ GiB RAM suggested`), ...visible.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
+  const choices = [...presets.map(p => `${p.label} - ${installed.some(model => model.name === p.id) ? 'installed' : `about ${(p.bytes / 1e9).toFixed(1)} GB download`}, ${p.memoryGiB}+ GiB GPU memory suggested`), ...visible.map(p => `Installed: ${p.name}`), 'Custom local Ollama model'];
   const suggested = 0;
   ui.log(`Suggested: ${presets[suggested]!.id} is the default; system RAM, GPU memory and context affect fit. Coding is verified after preparation.`);
   const selections = await chooseMany(ui, 'Local models to install (queued in selection order)', choices, suggested);
@@ -175,7 +250,7 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   for (const item of queue) {
     signal.throwIfAborted();
     ui.log(`Configure ${item.id}`);
-    planned.push({ ...item, context: await configureOllamaModel(ui, item.id, item.preset, installed, memory, reservedBytes) });
+    planned.push({ ...item, context: await configureOllamaModel(ui, item.id, item.preset, installed, memory, reservedBytes, signal) });
     if (!installed.some(model => model.name === item.id)) reservedBytes += (item.preset?.bytes ?? 0) * 1.1;
   }
   const prepared = [];
@@ -187,11 +262,12 @@ export async function selectOllamaModel(ui: SetupUI, signal: AbortSignal, base =
   return prepared;
 }
 
-export async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof presets[number] | undefined, installed: OllamaModel[], memory: number, reservedBytes: number): Promise<number> {
+export async function configureOllamaModel(ui: SetupUI, id: string, preset: typeof presets[number] | undefined, installed: OllamaModel[], memory: number, reservedBytes: number, signal = new AbortController().signal): Promise<number> {
+  const suggested = !preset ? 16384 : !preset.server || await ensureServerSettings(ui, preset.server, signal) ? preset.context : preset.server.fallbackContext;
   ui.log('Context is how much text the model can work with at once. Larger values use more memory; Enter accepts the suggested value.');
   let context: number;
   for (;;) {
-    context = Number(await ui.input('Context tokens', String(preset?.context ?? 16384)));
+    context = Number(await ui.input('Context tokens', String(suggested)));
     if (Number.isInteger(context) && context >= 8192 && context <= 2_000_000) break;
     ui.log('Enter a whole number between 8192 and 2000000.');
   }
@@ -235,11 +311,16 @@ export async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: s
   // A separate alias leaves the user's original model untouched and fixes the
   // context actually used by the OpenAI API, which has no num_ctx parameter.
   const alias = ollamaAlias(id);
+  // Ollama's OpenAI API ignores top_k and min_p, so a preset's values are fixed in the alias.
+  const sampling = presets.find(preset => preset.id === id)?.sampling;
+  const fixed = sampling ? { top_k: sampling.off?.top_k, min_p: sampling.off?.min_p, repeat_penalty: 1 } : {};
   ui.log(`Preparing ${id} with a ${context.toLocaleString('en-US')}-token context...`);
-  await during(ui, `Preparing ${id}...`, () => streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context }, stream: true }, signal, ui.log, base, verbose));
-  await during(ui, `Loading ${id}...`, () => probeOllamaLoad(base, id, alias, signal));
-  // Ollama reports thinking support as a capability, not as a list of levels.
-  return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true, reasoning: metadata.capabilities?.includes('thinking') ? ['medium', 'xhigh'] : [] };
+  await during(ui, `Preparing ${id}...`, () => streamOperation('/api/create', { model: alias, from: id, parameters: { num_ctx: context, ...fixed }, stream: true }, signal, ui.log, base, verbose));
+  const gpuShare = await during(ui, `Loading ${id}...`, () => probeOllamaLoad(base, id, alias, signal));
+  if (gpuShare !== undefined && gpuShare > 0 && gpuShare < 0.99) ui.log(`Only ${Math.floor(gpuShare * 100)}% of ${id} fits in GPU memory at this context; the rest runs on the CPU, several times slower. A smaller context, or closing other GPU programs, helps.`);
+  // Ollama reports thinking support as a capability, not as a list of levels. It sends xhigh to
+  // chat templates as "max", which Qwen3.8's template rejects, so xhigh is not offered.
+  return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true, reasoning: metadata.capabilities?.includes('thinking') ? ['low', 'medium'] : [], sampling, gpuShare };
 }
 
 /** An ordinary OpenAI-compatible model entry for a prepared Ollama model. */
@@ -249,7 +330,7 @@ export function provisionedOllama(model: PreparedModel): ProvisionedModel {
     model: {
       id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, contextTokens: model.context,
       maxOutputTokens: Math.min(16384, Math.floor(model.context / 2)), toolCalling: model.tools,
-      supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2,
+      supportsDeveloperRole: false, supportsUsage: true, ...model.sampling ? { sampling: model.sampling } : { temperature: 0.2 },
       reasoning: { type: 'reasoning_effort', values: { off: 'none', ...Object.fromEntries((model.reasoning ?? []).map(level => [level, level])) } },
     },
   };

@@ -203,7 +203,10 @@ export class PlayRuntime {
     const base: PlayRecord = { ...record, state: from.state, seed: from.seed, timers: from.timers };
     const before = JSON.stringify(from.state) + describe(from.view);
     const tried: string[] = [], inert: string[] = [];
-    const shortcodes = new Set(shortcodesIn(describe(from.view)));
+    // Emoji that reach Discord as plain text: :shortcodes:, and server emoji inside backticks.
+    const shortcodes = new Set<string>(), coded = new Set<string>();
+    const lookAt = (view: View) => { const shown = describe(view); for (const code of shortcodesIn(shown)) shortcodes.add(code); for (const code of codedEmojiIn(shown)) coded.add(code); };
+    lookAt(from.view);
     // With nothing to press and nothing on its way, an app is stuck before anyone can start it.
     const usable = (from.view.rows ?? []).flatMap(row => row.controls).some(control => !control.disabled && !(control.type === 'button' && control.url));
     if (!usable && !from.timers.length && !from.effects.some(effect => effect.type === 'consult')) throw new PlayError('People could not do anything with this app: its view has no controls, and no timer or consult is on its way. Show the controls people need in every state, such as a start or join button.');
@@ -228,7 +231,7 @@ export class PlayRuntime {
         if (step.timers.length) timed = true;
         for (const timer of step.timers) scheduled.add(timer.id);
         if (!round && !step.effects.length && JSON.stringify(step.state) + describe(step.view) === before) inert.push(name);
-        for (const code of shortcodesIn(describe(step.view))) shortcodes.add(code);
+        lookAt(step.view);
         if (next.kind !== 'button' && next.kind !== 'select' && next.kind !== 'modal' && step.effects.some(effect => effect.type === 'ephemeral')) notes.add(`${label} returns ephemeral(), but no one pressed anything, so no one sees it. Show that message in the view instead.`);
         if (step.finished) {
           const left = (step.view.rows ?? []).flatMap(row => row.controls).filter(shown => !shown.disabled && !(shown.type === 'button' && shown.url));
@@ -244,7 +247,8 @@ export class PlayRuntime {
     }
     if (problems.length) throw new PlayError(`People using the app would hit these errors:\n${problems.map(problem => `- ${clip(problem, 400)}`).join('\n')}`);
     // Timer code that nothing reaches is also never checked, so its mistakes would only show once live.
-    if (shortcodes.size) notes.add(`The view shows ${[...shortcodes].slice(0, 5).join(' ')} as plain text: Discord turns :shortcodes: into emoji only when a person types them. Use the Unicode emoji instead.`);
+    if (shortcodes.size) notes.add(`The view shows ${[...shortcodes].slice(0, 5).join(' ')} as plain text: Discord turns :shortcodes: into emoji only when a person types them. Use the Unicode emoji instead, or for a server emoji the whole <:name:id> as it was pasted.`);
+    if (coded.size) notes.add(`The view puts ${[...coded].slice(0, 3).join(' ')} inside a code block or inline code, where Discord shows server emoji as their raw <:name:id> text. Keep boards and lines that hold server emoji outside backticks.`);
     if (tried.length && inert.length === tried.length) notes.add(`Using ${inert.join(', ')} changed nothing, so the app looks broken to whoever presses first. ${running ? 'If the kept state is what is stuck (a player now inside a wall, say), fix it in code or pass reset: true to start over from init().' : 'Check the first state: a player placed inside or boxed in by blocking tiles cannot move. If people instead join by acting, add them the first time their id acts.'}`);
     // A timer only an earlier step schedules (a start button long gone, say) never fires in an app already past it.
     const unreached = timed && record.source.kind === 'sandbox' ? [...new Set([...record.source.code.matchAll(/\bafter\(\s*[^,()]+,\s*(["'`])([\w.-]+)\1\s*\)/g)].map(match => match[2]!))].filter(id => !scheduled.has(id)) : [];
@@ -426,12 +430,12 @@ export class PlayRuntime {
   }
 
   /** Swaps in new code. Keeping state lets a fix land mid-game; the view re-renders in place. */
-  /** `start` schedules timers now, for a loop new code adds to an app whose init and start button already ran. */
-  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = []): Promise<{ record: PlayRecord; preview: string }> {
+  /** `start` schedules timers now, for a loop new code adds to an app whose init and start button already ran; `emojis` adds server emoji pasted since it started. */
+  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = [], emojis: Record<string, string> = {}): Promise<{ record: PlayRecord; preview: string }> {
     const live = this.owned(id, conversation);
     return this.serial(live, async () => {
       const engine = source ? await this.build(source) : await this.engine(live);
-      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
+      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
       const added: string[] = [];
       try {
         // Kept state lacks what the new version's init() adds (a leaderboard, a weather field); fill those in.
@@ -654,6 +658,11 @@ export class PlayRuntime {
 /** :name: shortcodes, which Discord shows as typed in anything a bot sends; <:name:id> custom emoji are left out. */
 function shortcodesIn(text: string): string[] {
   return [...text.matchAll(/(?<![<\w]):([a-z][a-z0-9_+-]{1,40}):(?!\d)/g)].map(match => match[0]);
+}
+
+/** Server emoji inside code blocks or inline code, where Discord shows them as typed. */
+function codedEmojiIn(text: string): string[] {
+  return [...text.matchAll(/```[\s\S]*?```|`[^`\n]+`/g)].flatMap(match => match[0].match(/<a?:\w{2,32}:\d{17,20}>/g) ?? []);
 }
 
 function checkParticipants(value: unknown): Participants {

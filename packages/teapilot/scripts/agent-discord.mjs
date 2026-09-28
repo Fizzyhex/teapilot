@@ -25,6 +25,14 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
   start [--name N] [--root DIR] [--mode ask|chat] [--config-dir DIR] [--ttl S] [--teachat] [--frozen]
                                      --root is teapilot's repository (default: an empty scratch directory)
                                      --frozen stops the clock: timers fire only when advance reaches them
+        [--scratchpad on|off] [--fixture FILE [--fixture-name N] [--fixture-description T]]
+        [--history-tokens N] [--compact-history] [--force-retry TOOL] [--trace]
+                                     for benchmarks: --scratchpad off is the clipping-only baseline;
+                                     --fixture adds a tool (default run_import_diagnostic) returning
+                                     FILE's text; --history-tokens caps how much of earlier turns is
+                                     replayed; --compact-history cuts down every earlier turn's tool
+                                     results, the newest too; --force-retry ends the first attempt after TOOL first
+                                     succeeds; --trace records what each model call was sent
   say <name> <text> [--as P] [--in C] [--attach FILE]...
                                      send a message; @op, @user, @stranger and @teapilot become mentions
   click <name> <message> <control> [--as P]
@@ -36,8 +44,11 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
   apps <name>                        every discord.play app
   app <name> <id>                    one app: state, view, timers, recent actions and its source
   advance <name> <duration>          move the clock ahead, e.g. 30s, 5m, 25h
-  restart <name>                     restart teapilot; apps are recovered, conversations start over
+  restart <name>                     restart teapilot; apps and conversation history are recovered
+                                     (say "/clear" to start a conversation over)
   log <name> [--last N]              teapilot's operator log
+  scratch <name> [--last N]          each conversation's scratchpad files, and the scratchpad,
+                                     fixture, history and retry events since the session started
   status <name>
   stop <name>
   list
@@ -92,9 +103,15 @@ async function client(argv) {
     const { values } = parseArgs({ args: rest, options: {
       name: { type: 'string', default: 'default' }, root: { type: 'string' }, mode: { type: 'string', default: 'ask' },
       'config-dir': { type: 'string' }, ttl: { type: 'string', default: '1800' }, teachat: { type: 'boolean', default: false }, frozen: { type: 'boolean', default: false },
+      scratchpad: { type: 'string', default: 'on' }, fixture: { type: 'string' }, 'fixture-name': { type: 'string', default: 'run_import_diagnostic' },
+      'fixture-description': { type: 'string', default: 'Run the import diagnostic and return its snapshot.' },
+      'history-tokens': { type: 'string' }, 'compact-history': { type: 'boolean', default: false }, 'force-retry': { type: 'string' }, trace: { type: 'boolean', default: false },
     } });
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(values.name)) throw new UsageError('--name may contain letters, digits, _ and - (at most 40).');
     if (!['ask', 'chat'].includes(values.mode)) throw new UsageError('--mode is ask or chat.');
+    if (!['on', 'off'].includes(values.scratchpad)) throw new UsageError('--scratchpad is on or off.');
+    if (values['history-tokens'] !== undefined && !/^\d+$/.test(values['history-tokens'])) throw new UsageError('--history-tokens must be a whole number.');
+    if (values.fixture && !existsSync(values.fixture)) throw new UsageError(`No fixture file at ${values.fixture}.`);
     const ttl = Number(values.ttl);
     if (!Number.isInteger(ttl) || ttl <= 0) throw new UsageError('--ttl must be a positive integer.');
     const previous = readMeta(values.name);
@@ -104,7 +121,9 @@ async function client(argv) {
     mkdirSync(paths.state, { recursive: true });
     if (!values.root) mkdirSync(paths.root, { recursive: true });
     const spec = { name: values.name, directory: paths.directory, socket: paths.socket, meta: paths.meta, log: paths.log, state: paths.state,
-      root: values.root ? resolve(values.root) : paths.root, mode: values.mode, configDir: values['config-dir'] && resolve(values['config-dir']), ttl, teachat: values.teachat, frozen: values.frozen };
+      root: values.root ? resolve(values.root) : paths.root, mode: values.mode, configDir: values['config-dir'] && resolve(values['config-dir']), ttl, teachat: values.teachat, frozen: values.frozen,
+      bench: { scratchpad: values.scratchpad, historyTokens: values['history-tokens'], compactHistory: values['compact-history'], forceRetry: values['force-retry'], trace: values.trace,
+        fixture: values.fixture && { file: resolve(values.fixture), name: values['fixture-name'], description: values['fixture-description'] } } };
     const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--conditions=teapilot-source', join(root, 'scripts', 'discord-sim', 'daemon.ts'), Buffer.from(JSON.stringify(spec)).toString('base64url')],
       { cwd: homedir(), detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();
@@ -171,6 +190,7 @@ async function client(argv) {
   else if (command === 'app') { need(1, '<id>'); body = { op: 'app', id: args[0] }; }
   else if (command === 'advance') { need(1, '<duration>'); body = { op: 'advance', ms: duration(args[0]) }; }
   else if (command === 'log') body = { op: 'log', last: values.last };
+  else if (command === 'scratch') body = { op: 'scratch', last: values.last };
   else if (['restart', 'status', 'stop'].includes(command)) body = { op: command };
   else throw new UsageError(`Unknown command ${command}.\n\n${usage}`);
   const reply = await session(name, body);

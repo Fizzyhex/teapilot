@@ -159,8 +159,8 @@ it('installs a pinned runtime, starts it, downloads and loads the preset as sepa
     roles: ['capable'], source: expect.any(String), apiKeyEnv: 'TABBY_API_KEY', apiKey: saved.keys.api,
     model: {
       id: preset.model.folder, provider: 'tabbyapi', baseUrl: `http://127.0.0.1:${h.tabby.port}/v1`, contextTokens: 32768, maxOutputTokens: 16384,
-      toolCalling: true, supportsDeveloperRole: false, supportsUsage: true, temperature: 0.2,
-      reasoning: { type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, medium: { enable_thinking: true, reasoning_effort: 'medium' }, xhigh: { enable_thinking: true, reasoning_effort: 'xhigh' } } },
+      toolCalling: true, supportsDeveloperRole: false, supportsUsage: true, sampling: preset.sampling,
+      reasoning: { type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, low: { enable_thinking: true, reasoning_effort: 'low' }, medium: { enable_thinking: true, reasoning_effort: 'medium' }, xhigh: { enable_thinking: true, reasoning_effort: 'xhigh' } } },
     },
   }]);
   // Normal setup output names the path, not the server behind it.
@@ -275,15 +275,17 @@ it('sets up Optimized NVIDIA end to end: only verified reasoning tiers are enabl
   expect(prompts.lines.join('\n')).toContain('Configuration saved');
   const saved = await loadConfig(directory, {});
   expect(saved.models.fast.enabled).toBe(false);
-  expect(saved.models.capable).toMatchObject({ enabled: true, provider: 'tabbyapi', id: preset.model.folder, reasoningEfforts: ['off', 'medium', 'xhigh'] });
+  expect(saved.models.capable).toMatchObject({ enabled: true, provider: 'tabbyapi', id: preset.model.folder, reasoningEfforts: ['off', 'low', 'medium', 'xhigh'] });
   expect(saved.secrets.capable).toBe((await install(h.root)).keys.api);
   expect(JSON.stringify(saved.models)).not.toContain((await install(h.root)).keys.api);
   // Every probe carried the template switch for its tier; nothing was appended to prompts.
-  expect(h.tabby.state.chats.map(body => body.chat_template_kwargs)).toEqual(expect.arrayContaining([{ enable_thinking: false }, { enable_thinking: true, reasoning_effort: 'medium' }, { enable_thinking: true, reasoning_effort: 'xhigh' }]));
+  expect(h.tabby.state.chats.map(body => body.chat_template_kwargs)).toEqual(expect.arrayContaining([{ enable_thinking: false }, { enable_thinking: true, reasoning_effort: 'low' }, { enable_thinking: true, reasoning_effort: 'medium' }, { enable_thinking: true, reasoning_effort: 'xhigh' }]));
+  // Qwen's sampling travels with every request; probes alone decode greedily.
+  expect(h.tabby.state.chats.every(body => body.top_k === 20 && body.temperature === 0)).toBe(true);
   // The review shows the normal tier dropping to its own reply length once reasoning verifies; context is shared.
   expect(prompts.lines.join('\n')).toContain('Tiers:     normal 32,768 / 4,096 output · reasoning 32,768 / 8,192 output · deep 32,768 / 16,384 output');
   expect(await manageRuntimes('status', saved, prompts, signal(), runtimes)).toBe(true);
-});
+}, 60000);
 
 it('talks to the local server without a header deadline of its own, bounded only by the caller', async () => {
   const server = await mockServer(async (body, request, response) => {

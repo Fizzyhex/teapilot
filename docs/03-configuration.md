@@ -38,7 +38,7 @@ The default deployments are configurable with:
 FAST_BASE_URL=http://127.0.0.1:11434/v1
 FAST_MODEL=hf.co/mradermacher/Qwen3.5-9B-heretic-GGUF:Q4_K_M
 CAPABLE_BASE_URL=http://127.0.0.1:11434/v1
-CAPABLE_MODEL=hf.co/DevJac/Qwen3.8-27B-heretic:Q4_K_M
+CAPABLE_MODEL=hf.co/mradermacher/Qwen3.8-27B-heretic-ara-GGUF:Q4_K_M
 ```
 
 The endpoint must provide `/models` and streaming `/chat/completions`. Coding requires function calls and a suitable chat template.
@@ -46,11 +46,13 @@ The endpoint must provide `/models` and streaming `/chat/completions`. Coding re
 | Profile | Physical model | Native effort | Context | Output |
 | --- | --- | --- | ---: | ---: |
 | Fast | Qwen3.5-9B | off | 8,192 | 2,048 |
-| Normal | Qwen3.8-27B | off | 32,768 | 4,096 |
-| Reasoning | Qwen3.8-27B | `medium` | 32,768 | 8,192 |
-| Deep | Qwen3.8-27B | `xhigh` | 32,768 | 16,384 |
+| Normal | Qwen3.8-27B | off | 65,536 | 4,096 |
+| Reasoning | Qwen3.8-27B | `low` | 65,536 | 8,192 |
+| Deep | Qwen3.8-27B | `medium` | 65,536 | 16,384 |
 
-Normal, Reasoning, and Deep share one model identity and its configured context. Related agentic work stays on that identity while effort changes. Unsupported native efforts remain unavailable; TeaPilot does not translate `xhigh` or emulate it in prompt text. Physical endpoints are checked independently, and execution models must have zero API cost.
+Normal, Reasoning, and Deep share one model identity and its configured context (65,536 with Ollama, 32,768 with Optimized NVIDIA). Related agentic work stays on that identity while effort changes. Qwen3.8's `xhigh` effort thinks many times longer for little gain, so Deep uses it only when the policy file sets `"reasoning": { "deepEffort": "xhigh" }`. A reply that runs out of room while still thinking is retried one profile lower. Unsupported native efforts remain unavailable; TeaPilot does not translate efforts or emulate them in prompt text. Physical endpoints are checked independently, and execution models must have zero API cost.
+
+A model's `sampling` sets `temperature`, `top_p`, `top_k` and `min_p` for each effort. Setup fills in Qwen's recommended values.
 
 ## Teachat
 

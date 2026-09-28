@@ -1,4 +1,4 @@
-import { describeTool } from '../presentation.js';
+import { describeCompaction, describeTool } from '../presentation.js';
 import type { HostEvent } from '../integration/events.js';
 
 /** Discord's hard limit for one message's content. */
@@ -61,17 +61,20 @@ export function quoteMessage(message: QuotedMessage, chain: ReplyChain = { messa
 }
 
 /** What a turn is doing now, as its status card's first line shows it. */
-export type CardPhase = 'queued' | 'thinking' | 'running' | 'writing' | 'approval' | 'stopping';
+export type CardPhase = 'queued' | 'thinking' | 'running' | 'writing' | 'compacting' | 'approval' | 'stopping';
 /** What a press on a status card shows the person who pressed it, and only them. */
 export interface CardReply { text: string; file?: { name: string; content: string } }
-type Step = { tool: string } | { reasoning: string };
+/** A tool call, reasoning, or something the host did between them (a compaction), which is listed but not counted as a step. */
+type Step = { tool: string } | { reasoning: string } | { note: string };
 
 const phases: Record<CardPhase, string> = {
   queued: '⏳ queued behind another task', thinking: '🫖 thinking', running: '⚙️ running', writing: '✍️ writing',
-  approval: '⏸️ waiting for approval', stopping: '⏹️ stopping',
+  compacting: '🗜️ compacting earlier context', approval: '⏸️ waiting for approval', stopping: '⏹️ stopping',
 };
 /** Reasoning kept per turn for Details, so a runaway model cannot grow it without bound. */
 const reasoningLimit = 100_000;
+/** A step other than reasoning, as one line. */
+const line = (step: { tool: string } | { note: string }) => 'tool' in step ? step.tool : step.note;
 
 /** Literal text inside Discord markdown: nothing in it formats, links or mentions. */
 export function escapeMarkdown(text: string): string {
@@ -119,6 +122,8 @@ export class StatusCard {
     if (event.type === 'tool_execution_end') { this.phase = 'thinking'; this.running = undefined; this.steps.push({ tool: this.redact(describeTool(event)) }); return true; }
     if (event.type === 'text' && typeof event.text === 'string') { this.phase = 'writing'; this.answer = (this.answer + event.text).slice(-2000); return true; }
     if (event.type === 'message_end') { if (this.phase === 'writing') this.phase = 'thinking'; this.answer = ''; return true; }
+    if (event.type === 'compaction_start') { this.phase = 'compacting'; return true; }
+    if (event.type === 'compaction' || event.type === 'compaction_failed') { this.phase = 'thinking'; this.steps.push({ note: this.redact(describeCompaction(event)) }); return true; }
     return false;
   }
   /** Reasoning as it streams. Returns whether the card changed. */
@@ -143,7 +148,7 @@ export class StatusCard {
     const last = this.steps.at(-1);
     const preview = this.phase === 'writing' && this.answer.trim() ? `-# ${escapeMarkdown(tail(this.redact(this.answer), 160))}`
       : this.phase === 'thinking' && last && 'reasoning' in last && last.reasoning.trim() ? `-# 💭 ${escapeMarkdown(tail(last.reasoning, 160))}` : undefined;
-    const tools = this.steps.flatMap(step => 'tool' in step ? [`-# ${escapeMarkdown(step.tool.length > 150 ? `${step.tool.slice(0, 147)}...` : step.tool)}`] : []);
+    const tools = this.steps.flatMap(step => 'reasoning' in step ? [] : [line(step)]).map(text => `-# ${escapeMarkdown(text.length > 150 ? `${text.slice(0, 147)}...` : text)}`);
     let shown = tools.slice(-(this.options.maxSteps ?? 8));
     const compose = () => [header, ...(tools.length > shown.length ? [`-# … ${tools.length - shown.length} earlier`] : []), ...shown, ...(preview ? [preview] : [])].join('\n');
     while (shown.length && compose().length > MESSAGE_LIMIT) shown = shown.slice(1);
@@ -164,10 +169,10 @@ export class StatusCard {
     const { steps } = this;
     const title = `**Turn details** · ${this.facts(status)}`;
     if (!steps.length) return { text: `${title}\n${this.ended === undefined ? 'No steps yet.' : 'No steps.'}` };
-    const markdown = steps.map(step => 'tool' in step ? `- ${escapeMarkdown(step.tool)}` : step.reasoning.trim().split('\n').map((line, index) => `> ${index ? '' : '💭 '}${escapeMarkdown(line)}`).join('\n')).join('\n');
+    const markdown = steps.map(step => 'reasoning' in step ? step.reasoning.trim().split('\n').map((line, index) => `> ${index ? '' : '💭 '}${escapeMarkdown(line)}`).join('\n') : `- ${escapeMarkdown(line(step))}`).join('\n');
     const text = `${title}\n${markdown}`;
     if (text.length <= MESSAGE_LIMIT) return { text };
-    const plain = steps.map(step => 'tool' in step ? `- ${step.tool}` : `\n${step.reasoning.trim()}\n`).join('\n');
+    const plain = steps.map(step => 'reasoning' in step ? `\n${step.reasoning.trim()}\n` : `- ${line(step)}`).join('\n');
     return { text: `${title}\nThe full log is attached.`, file: { name: 'turn-details.md', content: `${this.facts(status)}\n\n${plain.trim()}\n` } };
   }
 }

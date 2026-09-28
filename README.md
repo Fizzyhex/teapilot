@@ -1,6 +1,6 @@
 # teapilot
 
-hi, teapilot is a small personal agent for coding and questions.
+hi, teapilot is a small personal agent for coding and questions, for windows or linux.
 
 **capabilities:**
 
@@ -61,7 +61,7 @@ After installing the published package, use `teapilot` instead of `npm start --`
 
 ## Local execution profiles
 
-TeaPilot uses Qwen3.5-9B for cheap standalone work and one persistent Qwen3.8-27B identity for Normal, Reasoning, and Deep work. Related agentic work stays on 27B while native reasoning effort scales from off to `medium` or `xhigh`. Execution is local; optional hosted Jev routing retains its spending limits. File access and shell approvals are described in [Configuration](docs/03-configuration.md). Edits remain on disk if a run stops.
+TeaPilot uses Qwen3.5-9B for cheap standalone work and one persistent Qwen3.8-27B identity for Normal, Reasoning, and Deep work. Related agentic work stays on 27B while native reasoning effort scales from off to `low` or `medium`. Execution is local; optional hosted Jev routing retains its spending limits. File access and shell approvals are described in [Configuration](docs/03-configuration.md). Edits remain on disk if a run stops.
 
 ## Documentation
 

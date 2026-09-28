@@ -1,9 +1,12 @@
+import { casualLines, paceLines } from '../casual.js';
 import { runSession, type SessionExtension } from '../chat.js';
 import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
-import type { FileStore } from './files.js';
+import type { ConversationWorkspace } from '../agents/workspace.js';
+import type { WorkspaceSandbox } from '../workspace/sandbox.js';
+import type { WorkspaceStore } from '../workspace/store.js';
 import type { MessagePayload } from './play/render.js';
 import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
 import { chunk, StatusCard, throttle, type CardReply } from './render.js';
@@ -68,18 +71,26 @@ export interface ConversationOptions {
    * through an interaction instead. `conversation` manages them, by default this conversation's key.
    */
   play?: { runtime: PlayRuntime; channelId?: string; post?: StartOptions['post']; conversation?: string };
-  /** Attachments and files teapilot makes, kept per conversation under the same key as its apps. */
-  files?: FileStore;
+  /** Each conversation's workspace: attachments and files teapilot makes, kept under the same key as its apps. */
+  files?: WorkspaceStore;
+  /** Runs commands in those workspaces. */
+  sandbox?: WorkspaceSandbox;
+  /** How long a turn's status card waits for routing to say it is not conversational; 4 seconds by default. */
+  cardDelayMs?: number;
+  /** The pause before each line of a conversational reply after the first; 0.5–2 seconds by default. */
+  lineDelayMs?: () => number;
 }
 
 const discordHelp = 'Discord: /stop cancels the running turn; /clear ends this conversation and clears its history. The repository root is fixed; change it with teapilot discord setup.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
-  private readonly inbox: Array<{ text: string; sender?: string; senderName?: string }> = [];
+  private readonly inbox: Array<{ text: string; sender?: string; senderName?: string; yolo?: boolean }> = [];
   /** Who sent the message the current turn is answering; a thread can have several people. */
   private speaker?: string;
   private speakerName?: string;
+  /** The message being answered asked for every approval to pass without asking; honoured for operators only. */
+  private yolo = false;
   private waiting?: { resolve(text: string): void; reject(error: Error): void };
   private turn?: AbortController;
   private sink?: EventSink;
@@ -95,7 +106,7 @@ export class Conversation {
   }
 
   /** Deliver a message from an allowed person. Local commands take effect immediately. */
-  push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string } = {}): void {
+  push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string; yolo?: boolean } = {}): void {
     // Only the next turn is answer-only, and only if nothing is running to change mid-turn.
     if (options.answerOnly && !this.turn) this.answerOnly = true;
     // Discord's /clear is the session's /exit: the conversation ends and its history goes with it.
@@ -110,8 +121,8 @@ export class Conversation {
     if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.', true); return; }
     if (command === '/help') void this.say(discordHelp, true);
     if (this.turn && !['/exit', '/quit'].includes(command ?? '')) void this.say('Queued as your next message.', true);
-    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; this.speakerName = options.senderName; waiting.resolve(text); }
-    else this.inbox.push({ text, sender: options.sender, senderName: options.senderName });
+    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; this.speakerName = options.senderName; this.yolo = options.yolo === true; waiting.resolve(text); }
+    else this.inbox.push({ text, sender: options.sender, senderName: options.senderName, yolo: options.yolo });
   }
 
   get active(): boolean { return !this.ended; }
@@ -124,7 +135,7 @@ export class Conversation {
 
   private input = (): Promise<string> => {
     const next = this.inbox.shift();
-    if (next) { this.speaker = next.sender; this.speakerName = next.senderName; return Promise.resolve(next.text); }
+    if (next) { this.speaker = next.sender; this.speakerName = next.senderName; this.yolo = next.yolo === true; return Promise.resolve(next.text); }
     const signal = this.options.request.signal;
     return new Promise((resolve, reject) => {
       const closed = () => reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' }));
@@ -138,6 +149,13 @@ export class Conversation {
     const signals = [AbortSignal.timeout(this.options.approvalTimeoutMs ?? 10 * 60_000), this.options.request.signal, this.turn?.signal, approval.signal].filter((value): value is AbortSignal => Boolean(value));
     const signal = AbortSignal.any(signals);
     if (signal.aborted) return false;
+    // Only operators may answer approvals, so only an operator's message can approve everything up front.
+    if (this.yolo && this.operator(this.speaker)) {
+      const summary = this.options.redact(approval.summary).split('\n')[0];
+      this.options.log(`${this.options.key}: ${approval.kind} auto-approved (yolo): ${summary}`);
+      await this.say(`-# Auto-approved (${approval.kind}): ${summary}`);
+      return true;
+    }
     const text = this.options.redact(`**Approval needed** (${approval.kind})\n${approval.summary}${approval.details ? `\n\`\`\`\n${approval.details}\n\`\`\`` : ''}`);
     const parts = chunk(text);
     const live = this.live;
@@ -176,11 +194,12 @@ export class Conversation {
     const admin = access && this.speaker ? access.adminFor(this.speaker) : undefined;
     // With roles in force, a turn without a known sender holds nothing.
     base.authorization?.setCaller(access ? this.speaker ? access.callerFor(this.speaker) : () => ({ permissions: [] }) : undefined);
-    const { play, files, transport } = this.options;
+    const { play, files, sandbox, transport } = this.options;
     const conversation = play?.conversation ?? this.options.key;
-    const request: HostRequest = { ...base, access: admin,
-      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined,
-        files: files && { store: files, conversation, send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) } } };
+    const workspace: ConversationWorkspace | undefined = files && { store: files, conversation, sandbox, delivery: 'post',
+      send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) };
+    const request: HostRequest = { ...base, access: admin, workspace, ...(files ? { scratch: files.scratch(conversation) } : {}),
+      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined, files: workspace } };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
     const answerOnly = this.answerOnly;
@@ -207,18 +226,32 @@ export class Conversation {
       return Boolean(id);
     };
     const update = throttle(async () => { if (outcome === undefined) await show(card.render(), true); }, this.options.progressIntervalMs ?? 1500);
-    if (!answerOnly) { this.live = { card, refresh: () => update.request() }; update.request(); }
-    this.sink = event => { if (typeof event.result === 'string') this.options.log(`${this.options.key}: ${String(event.tool)} -> ${this.options.redact(event.result)}`); if (!answerOnly && card.push(event)) update.request(); };
-    this.reasoning = answerOnly ? undefined : text => { if (card.reason(text)) update.request(); };
+    // The card waits for routing: a conversational turn shows only typing, like a person would. Any other
+    // route, a slow one, or anything that needs to be seen (a tool, an approval, a wait in the queue) brings it up.
+    let cardState = 'pending' as 'pending' | 'shown' | 'hidden';
+    const refresh = (show = true) => {
+      if (show && cardState === 'pending') cardState = 'shown';
+      if (cardState === 'shown') update.request();
+    };
+    const pending = answerOnly ? undefined : setTimeout(() => refresh(), this.options.cardDelayMs ?? 4000);
+    if (!answerOnly) this.live = { card, refresh: () => refresh() };
+    this.sink = event => {
+      if (typeof event.result === 'string') this.options.log(`${this.options.key}: ${String(event.tool)} -> ${this.options.redact(event.result)}`);
+      if (event.type === 'route' && cardState === 'pending') {
+        if (event.casual === true) { cardState = 'hidden'; clearTimeout(pending); } else refresh();
+      }
+      if (!answerOnly && card.push(event)) refresh(cardState !== 'hidden');
+    };
+    this.reasoning = answerOnly ? undefined : text => { if (card.reason(text)) refresh(false); };
     const typing = answerOnly ? undefined : setInterval(() => this.options.transport.typing(), 8000);
-    const heartbeat = answerOnly ? undefined : setInterval(() => { card.tick(); update.request(); }, this.options.heartbeatMs ?? 5000);
+    const heartbeat = answerOnly ? undefined : setInterval(() => { card.tick(); refresh(false); }, this.options.heartbeatMs ?? 5000);
     let result: HostResult;
     try {
       result = await this.options.queue.run(async () => {
         signal.throwIfAborted();
-        if (!answerOnly) { this.options.transport.typing(); if (card.set('thinking') === 'queued') update.request(); }
+        if (!answerOnly) { this.options.transport.typing(); if (card.set('thinking') === 'queued') refresh(); }
         return await this.options.run({ ...request, signal }, { approve: this.approve, onEvent: this.onEvent, onReasoning: this.onReasoning });
-      }, () => { if (answerOnly) void this.say('Queued behind another task.'); else { card.set('queued'); update.request(); } });
+      }, () => { if (answerOnly) void this.say('Queued behind another task.'); else { card.set('queued'); refresh(); } });
     } catch (error) {
       const stopped = turn.signal.aborted;
       if (!stopped && this.options.request.signal?.aborted) throw error;
@@ -226,6 +259,7 @@ export class Conversation {
       this.options.log(`${this.options.key}: ${stopped ? 'stopped' : `failed: ${this.options.redact(message)}`}`);
       result = { requestId: '', success: false, status: stopped ? 'stopped' : 'error', text: stopped ? 'Stopped.' : `teapilot could not finish: ${message}`, spentUsd: 0, receipts: [], attempts: 0 };
     } finally {
+      clearTimeout(pending);
       clearInterval(typing);
       clearInterval(heartbeat);
       this.sink = undefined;
@@ -233,10 +267,16 @@ export class Conversation {
       this.live = undefined;
       if (this.turn === turn) this.turn = undefined;
     }
-    await this.say(result.text || '(no answer)', true);
+    // A conversational reply goes out a line at a time with typing between, and without a card or result line.
+    const lines = result.casual && result.success ? casualLines(this.options.redact(result.text)) : undefined;
+    if (lines) {
+      const { transport } = this.options;
+      await paceLines(lines, line => transport.send(line).catch(error => this.options.log(`${this.options.key}: send failed: ${error instanceof Error ? error.message : error}`)),
+        { typing: () => transport.typing(), delayMs: this.options.lineDelayMs, signal: this.options.request.signal });
+    } else await this.say(result.text || '(no answer)', true);
     // The terminal log below already records the result of an answer-only turn. Otherwise the card collapses to
     // its result once the answer is up, so the result stays the turn's last word and Details stays under it.
-    if (!answerOnly) {
+    if (!answerOnly && !(result.casual && result.success && cardState !== 'shown')) {
       outcome = result.status;
       await update.flush();
       const summary = card.summary(result);

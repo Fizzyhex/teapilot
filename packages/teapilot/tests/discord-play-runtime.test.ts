@@ -279,15 +279,18 @@ it('resends through a new interaction, which lets held timers show again', async
 
 it('asks the model through consult and caps it', async () => {
   const consult = vi.fn<Consultant>(async (_play, prompt) => `answer to ${prompt}`);
-  const { runtime, edits } = await setup({ consult });
+  const { runtime, edits, log } = await setup({ consult });
   const { record } = await start(runtime);
+  // A consult still running refuses the next one, so each click waits for the last answer to land first.
+  const answered = () => log.mock.calls.filter(([line]) => String(line).includes('answered')).length;
   await runtime.interact(act(record.id, 'ask').interaction);
   await vi.waitFor(() => expect(edits.at(-1)?.content).toBe('0 answer to is 0 big?'));
   expect(consult).toHaveBeenCalledWith({ title: 'Counter', owner, channelId: 'channel-1' }, 'is 0 big?');
-  for (let index = 0; index < 20; index++) {
+  for (let index = 2; index <= 20; index++) {
     await runtime.interact(act(record.id, 'ask').interaction);
-    await vi.waitFor(() => expect(edits.at(-1)?.content).toMatch(/big\?|error/));
+    await vi.waitFor(() => expect(answered()).toBe(index));
   }
+  await runtime.interact(act(record.id, 'ask').interaction);
   await vi.waitFor(() => expect(edits.at(-1)?.content).toContain('used its 20 consults'));
   expect(consult).toHaveBeenCalledTimes(20);
 });
@@ -374,6 +377,10 @@ it('notes controls that change nothing and :shortcodes: that Discord would show 
   const { preview: shown } = await start(runtime, { code: coded });
   expect(shown).toContain('Note: The view shows :man_fairy: as plain text');
   expect(shown).toMatch(/Note: The view shows :man_fairy: as plain text: /);
+  expect(shown).not.toContain('inside a code block');
+  // Server emoji inside backticks reach Discord as their raw text.
+  const boxed = counter.replace("button('boom', 'Boom'), ", '').replace("content: state.count + ' ' + state.said", "content: '```\\n⬜<:tea:123456789012345678>\\n``` `<a:wave:726396997648515153>` ' + state.count");
+  expect((await start(runtime, { code: boxed })).preview).toContain('Note: The view puts <:tea:123456789012345678> <a:wave:726396997648515153> inside a code block or inline code');
 });
 
 it('turns away an app no one can do anything with', async () => {

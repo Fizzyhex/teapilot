@@ -38,9 +38,15 @@ it('offers reply in user-installed contexts and can drop that for server-only re
 
 it('maps /prompt mode and reasoning to a starting mode and tier', () => {
   const prompt = commandDefinitions.find(command => command.name === 'prompt' && 'options' in command)! as Extract<typeof commandDefinitions[number], { options?: unknown }>;
-  expect(prompt.options).toMatchObject([{ name: 'prompt', required: true }, { name: 'mode', required: false }, { name: 'reasoning', required: false }]);
+  expect(prompt.options).toMatchObject([{ name: 'prompt', required: true }, { name: 'mode', required: false }, { name: 'reasoning', required: false },
+    { type: 5, name: 'yolo', required: false },
+    ...[1, 2, 3, 4].map(index => ({ type: 11, name: `attachment${index}`, required: false }))]);
   expect(commandText('prompt', null, 'hello')).toBeUndefined();
-  expect(promptSetup('code', 'xhigh')).toEqual({ mode: 'code', tier: 'deep' });
+  expect(promptSetup('code', 'medium')).toEqual({ mode: 'code', tier: 'deep' });
+  expect(promptSetup(null, 'low')).toEqual({ tier: 'reasoning' });
+  // xhigh is the policy's to opt into, not a per-prompt choice.
+  expect(promptSetup(null, 'xhigh')).toEqual({});
+  expect((prompt.options as Array<{ name: string; choices?: Array<{ value: string }> }>).find(option => option.name === 'reasoning')?.choices?.map(choice => choice.value)).toEqual(['off', 'low', 'medium']);
   expect(promptSetup(null, 'off')).toEqual({ tier: 'normal' });
   expect(promptSetup('nonsense', 'nonsense')).toEqual({});
   expect(setupCommands({ mode: 'code', tier: 'deep' })).toEqual(['/mode code', '/tier deep']);

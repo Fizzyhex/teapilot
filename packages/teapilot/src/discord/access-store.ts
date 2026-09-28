@@ -1,10 +1,11 @@
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import type { AccessAdmin } from '../agents/access.js';
 import { permissions, withPrerequisites, type Caller, type Permission } from '../execution/grants.js';
 import { snowflake } from './settings.js';
+import { replaceFileSync } from '../replace.js';
 
 export type Role = 'operator' | 'user';
 /** What a plain user holds without any grant. */
@@ -71,7 +72,7 @@ export class AccessStore {
     const temporary = `${this.file}.${randomUUID()}.tmp`;
     writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
     try { chmodSync(temporary, 0o600); } catch { /* not meaningful on every platform */ }
-    renameSync(temporary, this.file);
+    replaceFileSync(temporary, this.file);
     this.data = data;
   }
 

@@ -1,12 +1,12 @@
 import { validateManifest, type CapabilityManifest } from 'jevrouter';
 import type { Config, PhysicalModel, Tier, Workload } from '../config.js';
 import { callCeiling, type SpendGovernor } from '../inference/budget.js';
-import { modelFor, nextTier, profileAvailable, profileFor, tierSupportsWorkload } from './execution.js';
+import { modelFor, nextTier, profileAvailable, profileFor, thinkingFor, tierSupportsWorkload } from './execution.js';
 
 export interface CapabilityOptions { physicalOnline?: Partial<Record<PhysicalModel, boolean>>; explicitTier?: Tier; relatedLock?: Tier }
 export function capabilities(config: Config, budget: SpendGovernor, localOnline = true, scope?: { workload: Workload; tier: Tier }, options: CapabilityOptions = {}): CapabilityManifest[] {
   return (['coder', 'ask'] as const).flatMap(workload => (['fast', 'normal', 'reasoning', 'deep'] as const).map(tier => {
-    const profile = profileFor(tier); const model = modelFor(config, tier); const id = `${workload}.${tier}`; const ceiling = callCeiling(model);
+    const profile = { ...profileFor(tier), thinking: thinkingFor(config, tier) }; const model = modelFor(config, tier); const id = `${workload}.${tier}`; const ceiling = callCeiling(model);
     let reason: string | undefined;
     const online = options.physicalOnline?.[profile.model] ?? localOnline;
     const profileState = profileAvailable(config, tier);

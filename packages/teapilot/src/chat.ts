@@ -6,6 +6,7 @@ import type { ChatPromptState } from './composer.js';
 import { isMode, modes, permissions, repositoryPermissions, workloadFor, type Mode } from './execution/grants.js';
 import type { Approve } from './execution/policy.js';
 import type { EventSink } from './integration/events.js';
+import type { SessionWorkspace } from './workspace/terminal.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
 const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /exit, /quit`;
@@ -43,6 +44,8 @@ export async function runSession(options: {
   extension?: SessionExtension;
   /** The conversation's turns after each change, for surfaces that keep them across restarts; empty once cleared. */
   onHistory?: (history: ConversationTurn[]) => void;
+  /** Files the session works on outside Code mode: @mentioned files come in, and files sent back land beside the user. */
+  workspace?: SessionWorkspace;
 }): Promise<number> {
   const extension = options.extension;
   const help = sessionHelp + (extension?.help ? `, ${extension.help}` : '');
@@ -95,7 +98,7 @@ export async function runSession(options: {
       } else if (command === '/tier' && !extra && isTierPreference(value)) {
         tier = value; options.log?.(`Tier preference: ${tier}`);
       } else if (command === '/new' && !value) {
-        history = []; options.onHistory?.(history); correction = undefined; relatedTier = undefined; tier = 'auto'; await extension?.reset?.(); options.log?.('Started a new task. Session access and spending remain available.');
+        history = []; options.onHistory?.(history); correction = undefined; relatedTier = undefined; tier = 'auto'; await extension?.reset?.(); await options.workspace?.reset(); options.log?.('Started a new task. Session access and spending remain available.');
       } else if (command === '/mode' && !extra && isMode(value)) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,
@@ -107,10 +110,14 @@ export async function runSession(options: {
       if (options.once) break;
       continue;
     }
+    // Code mode works on the repository itself; the other modes keep files in the session's workspace.
+    const workspace = mode !== 'code' ? options.workspace : undefined;
+    if (workspace) prompt = await workspace.attach(prompt, cwd, options.maxPromptChars - prompt.length - (correction?.length ?? 0) - 1500);
     // With session grants the host routes by mode and activates access on demand;
     // without them the mode's workload is fixed for the turn.
     const result = await options.run({ ...options.request, ...extension?.request?.(), cwd, prompt, correction, tier, relatedTier, history,
-      mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode) });
+      mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode), ...(workspace ? { workspace: workspace.context(cwd) } : {}),
+      ...(options.workspace ? { scratch: options.workspace.scratch() } : {}) });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;

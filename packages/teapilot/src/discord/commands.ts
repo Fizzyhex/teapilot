@@ -3,7 +3,9 @@ import { modes, permissions, type Mode } from '../execution/grants.js';
 import { reasoningTier } from '../routing/execution.js';
 
 type Choice = { name: string; value: string };
-type Option = { type: 3; name: string; description: string; required: boolean; choices?: Choice[] };
+/** 3 = string, 5 = boolean, 11 = attachment. */
+type Option = { type: 3; name: string; description: string; required: boolean; choices?: Choice[] }
+  | { type: 5 | 11; name: string; description: string; required: boolean };
 /** Discord application-command JSON; kept free of discord.js so it can be tested and registered from anywhere. */
 export type CommandDefinition = Placement & (
   | { name: string; description: string; options?: Array<Option | { type: 1; name: string; description: string; options?: Option[] }> }
@@ -31,11 +33,18 @@ const optional = (name: string, description: string, values: readonly string[]):
   ({ type: 3, name, description, required: false, choices: values.map(item => ({ name: item, value: item })) });
 const choice = (name: string, description: string, values: readonly string[]): CommandDefinition =>
   ({ name, description, options: [value(description, values)] });
+/** How many files /prompt and /collab take: `attachment1` to `attachment4`. */
+export const promptAttachments = 4;
+export const attachmentOption = (index: number) => `attachment${index + 1}`;
+// Each runs its own tier; medium picks deep, which runs xhigh only when the policy opts in.
+const promptEfforts: readonly ReasoningLevel[] = reasoningLevels.filter(level => level !== 'xhigh');
 /** /prompt and /collab take the same options. */
 const promptOptions: Option[] = [
   { type: 3, name: 'prompt', description: 'What to ask teapilot', required: true },
   optional('mode', 'Session mode for this and later turns', modes),
-  optional('reasoning', 'Reasoning effort for this and later turns', reasoningLevels),
+  optional('reasoning', 'Reasoning effort for this and later turns', promptEfforts),
+  { type: 5, name: 'yolo', description: 'Approve every action this prompt asks for without asking (operators only)', required: false },
+  ...Array.from({ length: promptAttachments }, (_, index): Option => ({ type: 11, name: attachmentOption(index), description: 'A file for teapilot to read', required: false })),
 ];
 const subcommand = (name: string, description: string, options?: Option[]) => ({ type: 1 as const, name, description, ...(options ? { options } : {}) });
 
@@ -87,7 +96,7 @@ export interface PromptSetup { mode?: Mode; tier?: TierPreference }
 export function promptSetup(mode?: string | null, reasoning?: string | null): PromptSetup {
   return {
     ...(modes.includes(mode as Mode) ? { mode: mode as Mode } : {}),
-    ...(reasoningLevels.includes(reasoning as ReasoningLevel) ? { tier: reasoningTier[reasoning as ReasoningLevel] } : {}),
+    ...(promptEfforts.includes(reasoning as ReasoningLevel) ? { tier: reasoningTier[reasoning as ReasoningLevel] } : {}),
   };
 }
 

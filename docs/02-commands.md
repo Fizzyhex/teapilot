@@ -35,7 +35,7 @@ Session commands preserve spending and grants unless stated otherwise:
 - `/permissions` displays current grants; `/revoke <permission>` removes one. Revoking repository read also removes write and shell.
 - `/teachat on|off` turns teachat on or off: while you are idle, agents chat about their finished work in a local room. Any key stops it. `/teachat` chats now, `/teachat read <channel>` shows a channel, and `/teachat who` lists the agents.
 
-TeaPilot keeps bounded complete turns, access grants, and model stickiness in memory for the current session only.
+TeaPilot keeps bounded complete turns, access grants, and model stickiness in memory for the current session only. Each session also has a scratchpad folder, outside your project, for the agent's helper scripts and notes and for the full copy of long command output; `/new` and leaving the session clear it (`TEAPILOT_SCRATCHPAD=off` turns it off). When a session nears the model's context limit, earlier context is summarised automatically, and the full transcript stays in the scratchpad for the agent to look things up (`TEAPILOT_COMPACTION=off` turns this off).
 
 ## Web research
 

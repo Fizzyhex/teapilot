@@ -83,6 +83,15 @@ it('gives repeated equivalent inspection one recovery opportunity and invalidate
   expect(check.lastCheck).toBe('passed');
   check.observe('write', { path: 'index.js' }, false);
   expect(check.lastCheck).toBeUndefined();
+  // Editing a scratchpad script between runs makes the next run a new experiment, though it changes nothing in the project.
+  const scratch = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 }, [], path => path.startsWith('/s/'));
+  scratch.observe('workspace_run', { command: 'python .scratch/fit.py' }, false, 'error');
+  scratch.observe('edit', { path: '/s/fit.py' }, false);
+  scratch.observe('workspace_run', { command: 'python .scratch/fit.py' }, false, 'error');
+  expect(scratch.reason).toBeUndefined();
+  expect(scratch.changedFiles.size).toBe(0);
+  scratch.observe('workspace_run', { command: 'python .scratch/fit.py' }, false, 'error');
+  expect(scratch.reason).toBe('ineffective_calls');
 });
 
 it('repeated searches warn, then refuse further searches instead of aborting', () => {

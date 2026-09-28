@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { Message } from '@earendil-works/pi-ai';
-import { fitHistory, turnSteps } from '../src/agents/history.js';
+import { carryOver, fitHistory, supersedePlayCalls, supersedeReads, turnSteps, withoutOldThinking } from '../src/agents/history.js';
 import { Conversation, TurnQueue, type ConversationOptions } from '../src/discord/bridge.js';
 import { HistoryStore } from '../src/discord/history-store.js';
 import type { HostResult } from '../src/host.js';
@@ -47,6 +47,88 @@ it('replays the newest turn in full and cuts older ones down to fit the budget',
   expect(JSON.stringify(tight)).toContain('play_start');
   expect(JSON.stringify(tight)).not.toContain('Started app a1.');
   expect(fitHistory(turns, 0, model)).toEqual([]);
+  // Turns that drop out leave a count where the rest begin, so the gap is known rather than guessed across.
+  expect(tight[0]).toMatchObject({ role: 'user', content: expect.stringMatching(/^\[2 earlier turns of this conversation are not shown here\.\]\n/) });
+  expect(JSON.stringify(fitHistory(turns, 100_000, model))).not.toContain('not shown here');
+  // compactAll cuts the newest turn's steps down too, while every turn stays.
+  const compacted = JSON.stringify(fitHistory(turns, 100_000, model, undefined, true));
+  expect(compacted).not.toContain('const line = 1;');
+  expect(compacted).toContain('answer 1');
+});
+
+it('cuts app calls a later one superseded: unapplied ones always, applied ones under pressure, never the newest', () => {
+  const edits = [{ find: 'x'.repeat(2000), replace: 'y'.repeat(2000) }];
+  const update = (id: string) => assistant([{ type: 'text', text: '```js\n' + code + '\n```' }, { type: 'toolCall', id, name: 'play_update', arguments: { edits } }]);
+  const outcome = (id: string, text: string): Message => ({ role: 'toolResult', toolCallId: id, toolName: 'play_update', content: [{ type: 'text', text }], isError: false, timestamp: 0 });
+  const messages = [update('u1'), outcome('u1', 'Edit 1: its find text occurs 0 times. Nothing was changed.'), update('u2'), outcome('u2', 'Updated app a.'), update('u3'), outcome('u3', 'Updated app a.')];
+  const size = (message: Message) => JSON.stringify(message).length;
+  const calm = supersedePlayCalls(messages, false);
+  expect(size(calm[0]!)).toBeLessThan(size(messages[0]!) / 2);
+  expect(calm[2]).toBe(messages[2]);
+  const pressed = supersedePlayCalls(messages, true);
+  expect(size(pressed[2]!)).toBeLessThan(size(messages[2]!) / 2);
+  expect(JSON.stringify(pressed[2])).toContain('code block from an earlier turn omitted');
+  expect(pressed[4]).toBe(messages[4]);
+  const alone = messages.slice(4);
+  expect(supersedePlayCalls(alone, true)).toBe(alone);
+});
+
+const read = (id: string, path: string, window: { offset?: number; limit?: number } = {}) => assistant([{ type: 'toolCall', id, name: 'read', arguments: { path, ...window } }]);
+const lines = (id: string, text: string): Message => ({ role: 'toolResult', toolCallId: id, toolName: 'read', content: [{ type: 'text', text }], isError: false, timestamp: 0 });
+const textOf = (message: Message) => JSON.stringify(message.content);
+
+it('cuts a read that a later read of the same lines covers, and keeps reads of other lines or files', () => {
+  const resolve = (path: string) => path.replace(/^\.\//, '/w/').replace(/^(?!\/)/, '/w/');
+  const messages = [
+    read('r1', 'scene.py'), lines('r1', 'lines 1-200 (old)'),
+    read('r2', 'scene.py', { offset: 201 }), lines('r2', 'lines 201-400'),
+    read('r3', 'torus.py'), lines('r3', 'torus'),
+    read('r4', 'scene.py', { offset: 40, limit: 60 }), lines('r4', 'lines 40-99'),
+    read('r5', './scene.py'), lines('r5', 'lines 1-200 (new)'),
+  ];
+  const cut = supersedeReads(messages, resolve);
+  // r5 reads lines 1-200 of the same file again, covering r1 and r4; r2 (201-400) and the other file stay.
+  expect(textOf(cut[1]!)).toContain('[Superseded: a later read of scene.py shows these lines as they are now.]');
+  expect(textOf(cut[7]!)).toContain('Superseded');
+  expect(cut[3]).toBe(messages[3]);
+  expect(cut[5]).toBe(messages[5]);
+  expect(cut[9]).toBe(messages[9]);
+  // Calls are untouched, so every result still has its call; cutting again changes nothing.
+  expect(cut.filter((_, index) => index % 2 === 0)).toEqual(messages.filter((_, index) => index % 2 === 0));
+  expect(supersedeReads(cut, resolve)).toBe(cut);
+  expect(supersedeReads(messages.slice(0, 6), resolve)).toEqual(messages.slice(0, 6));
+});
+
+it('keeps thinking only on the newest reply', () => {
+  const messages = [
+    assistant([{ type: 'thinking', thinking: 'plan the first step' }, { type: 'toolCall', id: 'a', name: 'read', arguments: { path: 'x' } }]), lines('a', 'x'),
+    assistant([{ type: 'thinking', thinking: 'only thought' }]),
+    assistant([{ type: 'thinking', thinking: 'plan the next step' }, { type: 'toolCall', id: 'b', name: 'read', arguments: { path: 'y' } }]), lines('b', 'y'),
+  ];
+  const kept = withoutOldThinking(messages);
+  expect(textOf(kept[0]!)).not.toContain('plan the first step');
+  expect(kept[0]!.role === 'assistant' && kept[0]!.content.some(part => part.type === 'toolCall')).toBe(true);
+  // A reply of nothing but thinking would be left empty, so it stays as it was.
+  expect(kept[2]).toBe(messages[2]);
+  expect(kept[3]).toBe(messages[3]);
+  expect(withoutOldThinking(kept)).toBe(kept);
+});
+
+it('carries an attempt over without a reply that was cut off or failed, or calls that lost their results', () => {
+  const ended = (stopReason: 'length' | 'error', content: Extract<Message, { role: 'assistant' }>['content'] = []): Message => ({ ...assistant(content), stopReason } as Message);
+  const request: Message = { role: 'user', content: 'make a space scene', timestamp: 0 };
+  const carried = carryOver([
+    request, read('a', 'scene.py'), lines('a', 'scene'),
+    assistant([{ type: 'text', text: 'running it' }, { type: 'toolCall', id: 'b', name: 'workspace_run', arguments: { command: 'python scene.py' } }]),
+    ended('length', [{ type: 'text', text: '```python\nimport numpy' }]),
+  ])!;
+  // The run never got a result, so only its text is kept; the reply cut off at the output limit goes.
+  expect(carried).toHaveLength(4);
+  expect(carried.slice(0, 3)).toEqual([request, read('a', 'scene.py'), lines('a', 'scene')]);
+  expect(textOf(carried[3]!)).toContain('running it');
+  expect(textOf(carried[3]!)).not.toContain('workspace_run');
+  expect(carried[3]).toMatchObject({ stopReason: 'stop' });
+  expect(carryOver([request, ended('error')])).toBeUndefined();
 });
 
 it('keeps a Discord conversation\'s turns, steps included, and removes them when cleared', async () => {

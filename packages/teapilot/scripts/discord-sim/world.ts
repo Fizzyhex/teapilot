@@ -196,7 +196,7 @@ export class World {
         this.cards.set(message.id, controls.press);
         return message.id;
       },
-      typing: () => undefined,
+      typing: () => this.emit(`… ${bot.name} is typing in ${channel.name}`),
       askApproval: (text, signal) => {
         if (signal.aborted) return Promise.resolve(false);
         const nonce = ++this.counters.approval;

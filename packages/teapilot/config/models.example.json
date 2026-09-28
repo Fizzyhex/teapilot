@@ -11,11 +11,18 @@
     "outputUsdPerMillion": 0,
     "vision": false,
     "toolCalling": true,
+    "sampling": {
+      "off": { "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0 },
+      "low": { "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0 },
+      "medium": { "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0 },
+      "xhigh": { "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0 }
+    },
     "reasoningEfforts": ["off"],
     "reasoning": {
       "type": "reasoning_effort",
       "values": {
         "off": "none",
+        "low": "low",
         "medium": "medium",
         "xhigh": "xhigh"
       }
@@ -23,21 +30,28 @@
   },
   "capable": {
     "enabled": true,
-    "id": "hf.co/DevJac/Qwen3.8-27B-heretic:Q4_K_M",
+    "id": "hf.co/mradermacher/Qwen3.8-27B-heretic-ara-GGUF:Q4_K_M",
     "provider": "ollama",
     "baseUrl": "http://127.0.0.1:11434/v1",
     "apiKeyEnv": "LOCAL_API_KEY",
-    "contextTokens": 32768,
+    "contextTokens": 65536,
     "maxOutputTokens": 16384,
     "inputUsdPerMillion": 0,
     "outputUsdPerMillion": 0,
     "vision": false,
     "toolCalling": true,
-    "reasoningEfforts": ["off", "medium", "xhigh"],
+    "sampling": {
+      "off": { "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0 },
+      "low": { "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0 },
+      "medium": { "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0 },
+      "xhigh": { "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0 }
+    },
+    "reasoningEfforts": ["off", "low", "medium"],
     "reasoning": {
       "type": "reasoning_effort",
       "values": {
         "off": "none",
+        "low": "low",
         "medium": "medium",
         "xhigh": "xhigh"
       }

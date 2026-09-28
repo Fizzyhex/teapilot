@@ -47,6 +47,23 @@ it.each([false, true])('completes several coding tool round trips at 16k (web=%s
   expect(f.budget.spent().request).toBe(0);
 });
 
+it('treats a tier’s reply limit as a ceiling for each call, not room held back from the input', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, { text: 'ok' }); });
+  const ask = (prompt: string) => runAttempt({ ...f, tier: 'deep', workload: 'ask', web: false, approve: async () => true, prompt });
+  expect(await ask('hello')).toMatchObject({ success: true });
+  expect(bodies[0].max_tokens).toBe(16384);
+  // About 20k tokens in: holding back all 16k for the reply refused this; now the reply gets the room that is left.
+  expect(await ask('word '.repeat(8000))).toMatchObject({ success: true });
+  const [, large] = (await events(f.config)).filter(e => e.type === 'context_admission');
+  expect(large.estimatedInputTokens + 16384).toBeGreaterThan(32768);
+  expect(large).toMatchObject({ reservedOutputTokens: 8192, maxOutputTokens: 32768 - large.estimatedInputTokens });
+  expect(bodies[1].max_tokens).toBe(32768 - large.estimatedInputTokens);
+  // Less than a quarter of the context left for the reply is still refused.
+  expect(await ask('word '.repeat(12000))).toMatchObject({ stopped: 'context_limit' });
+  expect(bodies).toHaveLength(2);
+});
+
 it.each([400, 404, 422])('keeps provider HTTP %s separate from local overflow', async status => {
   let calls = 0;
   const f = await setup((_body, _req, res) => { calls++; res.writeHead(status); res.end('{}'); });
