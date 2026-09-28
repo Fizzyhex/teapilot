@@ -8,15 +8,21 @@ export interface ExecutionProfile {
 export const executionProfiles: Record<Tier, ExecutionProfile> = {
   fast: { tier: 'fast', model: 'fast', contextTokens: 8192, maxOutputTokens: 2048, thinking: 'off' },
   normal: { tier: 'normal', model: 'capable', contextTokens: 16384, maxOutputTokens: 4096, thinking: 'off' },
-  reasoning: { tier: 'reasoning', model: 'capable', contextTokens: 24576, maxOutputTokens: 8192, thinking: 'medium' },
-  deep: { tier: 'deep', model: 'capable', contextTokens: 32768, maxOutputTokens: 16384, thinking: 'xhigh' },
+  // Qwen3.8's xhigh effort thinks for tens of thousands of tokens; low and medium answer the same tasks
+  // in a fraction of that. Deep runs xhigh only when the policy opts in (reasoning.deepEffort).
+  reasoning: { tier: 'reasoning', model: 'capable', contextTokens: 24576, maxOutputTokens: 8192, thinking: 'low' },
+  deep: { tier: 'deep', model: 'capable', contextTokens: 32768, maxOutputTokens: 16384, thinking: 'medium' },
 };
 /** The tier that runs a reasoning level on the capable model. */
-export const reasoningTier: Record<ThinkingLevel, Tier> = { off: 'normal', medium: 'reasoning', xhigh: 'deep' };
+export const reasoningTier: Record<ThinkingLevel, Tier> = { off: 'normal', low: 'reasoning', medium: 'deep', xhigh: 'deep' };
 export const escalationOrder: Tier[] = ['fast', 'normal', 'reasoning', 'deep'];
 export function profileFor(tier: Tier): ExecutionProfile { return executionProfiles[tier]; }
+/** The reasoning level a tier runs with under this configuration. */
+export function thinkingFor(config: Config, tier: Tier): ThinkingLevel {
+  return tier === 'deep' ? config.policy.reasoning?.deepEffort ?? profileFor(tier).thinking : profileFor(tier).thinking;
+}
 export function effectiveProfile(config: Config, tier: Tier): ExecutionProfile {
-  const profile = profileFor(tier); const model = modelFor(config, tier);
+  const profile = { ...profileFor(tier), thinking: thinkingFor(config, tier) }; const model = modelFor(config, tier);
   // With no higher tier able to run on this model (e.g. local models without native
   // reasoning), this tier is the ceiling: use the model's configured limits in full.
   const ceiling = !escalationOrder.slice(escalationOrder.indexOf(tier) + 1)
@@ -27,10 +33,10 @@ export function effectiveProfile(config: Config, tier: Tier): ExecutionProfile {
 }
 export function modelFor(config: Config, tier: Tier): ModelConfig { return config.models[profileFor(tier).model]; }
 export function profileAvailable(config: Config, tier: Tier): { available: boolean; reason?: string } {
-  const profile = profileFor(tier); const model = modelFor(config, tier);
+  const thinking = thinkingFor(config, tier); const model = modelFor(config, tier);
   if (!model.enabled) return { available: false, reason: 'Physical model is disabled' };
   if (model.contextTokens < 4096) return { available: false, reason: 'Model context is too small' };
-  if (!model.reasoningEfforts.includes(profile.thinking)) return { available: false, reason: `Native ${profile.thinking} reasoning is not verified` };
+  if (!model.reasoningEfforts.includes(thinking)) return { available: false, reason: `Native ${thinking} reasoning is not verified` };
   return { available: true };
 }
 export function tierSupportsWorkload(tier: Tier, workload: Workload, explicit = false): boolean {

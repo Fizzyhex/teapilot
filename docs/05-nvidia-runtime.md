@@ -5,7 +5,7 @@ During setup, you're offered two ways to run the capable model locally:
 - **Locally via Ollama**: works on almost any hardware.
 - **Optimized NVIDIA**: the same model on a GPU-optimized server with speculative decoding.
 
-Both run the same Qwen3.8-27B Heretic ARA model at 4 bits with a 32K context, so answers behave the same. Only the speed differs.
+Both run the same Qwen3.8-27B Heretic ARA model at 4 bits, so answers behave the same. Ollama holds a 64K context; Optimized NVIDIA holds 32K, because its draft model shares the GPU. Otherwise only the speed differs.
 
 ## Results
 

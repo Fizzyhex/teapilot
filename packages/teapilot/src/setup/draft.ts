@@ -86,7 +86,7 @@ export function applyProvisioned(config: Config, env: Record<string, string>, dr
   for (const model of Object.values(config.models)) model.enabled = false;
   for (const item of provisioned) for (const role of item.roles) {
     const model = config.models[role];
-    Object.assign(model, { inputUsdPerMillion: 0, outputUsdPerMillion: 0, ...item.model, reasoning: item.model.reasoning, reasoningEfforts: ['off'] });
+    Object.assign(model, { inputUsdPerMillion: 0, outputUsdPerMillion: 0, ...item.model, reasoning: item.model.reasoning, sampling: item.model.sampling, reasoningEfforts: ['off'] });
     // The fast tier never produces more than its profile allows.
     if (role === 'fast') model.maxOutputTokens = Math.min(model.maxOutputTokens, profileFor('fast').maxOutputTokens);
     if (item.apiKeyEnv) model.apiKeyEnv = item.apiKeyEnv;
@@ -155,7 +155,7 @@ export async function checkModels(config: Config, roles: PhysicalModel[], ui: Se
 /** Reasoning levels the model's protocol can request, still to be verified. */
 export function candidates(config: Config, role: PhysicalModel): ThinkingLevel[] {
   const values = config.models[role].reasoning?.values ?? {};
-  return (['medium', 'xhigh'] as const).filter(level => values[level] !== undefined);
+  return (['low', 'medium', 'xhigh'] as const).filter(level => values[level] !== undefined);
 }
 
 /**
@@ -175,7 +175,7 @@ export function applyReports(config: Config, roles: PhysicalModel[], reports: Ma
 }
 
 function reasoningLine(report: LiveReport | undefined): string {
-  return (['medium', 'xhigh'] as const).map(level => `${reasoningTier[level]} ${report?.reasoning?.includes(level) ? 'Passed' : 'unavailable'}`).join(' · ');
+  return (['low', 'medium', 'xhigh'] as const).map(level => `${reasoningTier[level]} ${level} ${report?.reasoning?.includes(level) ? 'Passed' : 'unavailable'}`).join(' · ');
 }
 
 export function checksLine(report: LiveReport | undefined): string {

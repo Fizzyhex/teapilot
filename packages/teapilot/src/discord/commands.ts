@@ -36,11 +36,13 @@ const choice = (name: string, description: string, values: readonly string[]): C
 /** How many files /prompt and /collab take: `attachment1` to `attachment4`. */
 export const promptAttachments = 4;
 export const attachmentOption = (index: number) => `attachment${index + 1}`;
+// Each runs its own tier; medium picks deep, which runs xhigh only when the policy opts in.
+const promptEfforts: readonly ReasoningLevel[] = reasoningLevels.filter(level => level !== 'xhigh');
 /** /prompt and /collab take the same options. */
 const promptOptions: Option[] = [
   { type: 3, name: 'prompt', description: 'What to ask teapilot', required: true },
   optional('mode', 'Session mode for this and later turns', modes),
-  optional('reasoning', 'Reasoning effort for this and later turns', reasoningLevels),
+  optional('reasoning', 'Reasoning effort for this and later turns', promptEfforts),
   { type: 5, name: 'yolo', description: 'Approve every action this prompt asks for without asking (operators only)', required: false },
   ...Array.from({ length: promptAttachments }, (_, index): Option => ({ type: 11, name: attachmentOption(index), description: 'A file for teapilot to read', required: false })),
 ];
@@ -94,7 +96,7 @@ export interface PromptSetup { mode?: Mode; tier?: TierPreference }
 export function promptSetup(mode?: string | null, reasoning?: string | null): PromptSetup {
   return {
     ...(modes.includes(mode as Mode) ? { mode: mode as Mode } : {}),
-    ...(reasoningLevels.includes(reasoning as ReasoningLevel) ? { tier: reasoningTier[reasoning as ReasoningLevel] } : {}),
+    ...(promptEfforts.includes(reasoning as ReasoningLevel) ? { tier: reasoningTier[reasoning as ReasoningLevel] } : {}),
   };
 }
 

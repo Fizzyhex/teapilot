@@ -2,7 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, ollamaReasoning, type ModelConfig } from '../src/config.js';
+import { loadConfig, ollamaReasoning, type Config, type ModelConfig } from '../src/config.js';
 import { liveCheck } from '../src/diagnostics.js';
 import { inferenceSchema, runInference } from '../src/integration/inference.js';
 import { profileAvailable } from '../src/routing/execution.js';
@@ -23,24 +23,25 @@ async function local(handler: Handler) {
 }
 
 /** The reasoning-related fields of every chat request sent through the production adapter. */
-async function payloads(reasoning: ModelConfig['reasoning']) {
+async function payloads(reasoning: ModelConfig['reasoning'], change: (config: Config) => void = () => {}) {
   const bodies: any[] = [];
   const f = await local((body, _request, response) => { bodies.push(body); completion(response, { text: 'done' }); });
   f.config.models.fast.reasoning = reasoning;
   f.config.models.capable.reasoning = reasoning;
+  change(f.config);
   for (const tier of ['fast', 'normal', 'reasoning', 'deep'] as const) {
     await runInference(f.config, inferenceSchema.parse({ model: tier, messages: [{ role: 'user', content: [{ type: 'text', text: 'reply' }] }] }), { approve: async () => true });
   }
-  return bodies.map(body => Object.fromEntries(Object.entries(body).filter(([key]) => ['reasoning_effort', 'chat_template_kwargs', 'messages'].includes(key))));
+  return bodies.map(body => Object.fromEntries(Object.entries(body).filter(([key]) => ['reasoning_effort', 'chat_template_kwargs', 'messages', 'temperature', 'top_p', 'top_k', 'min_p'].includes(key))));
 }
 
 it('builds exact reasoning payloads from the model protocol', async () => {
   const effort = await payloads(ollamaReasoning);
-  expect(effort.map(body => body.reasoning_effort)).toEqual(['none', 'none', 'medium', 'xhigh']);
+  expect(effort.map(body => body.reasoning_effort)).toEqual(['none', 'none', 'low', 'medium']);
   expect(effort.every(body => !('chat_template_kwargs' in body))).toBe(true);
 
-  const template = await payloads({ type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, medium: { reasoning_effort: 'medium' }, xhigh: { reasoning_effort: 'xhigh' } } });
-  expect(template.map(body => body.chat_template_kwargs)).toEqual([{ enable_thinking: false }, { enable_thinking: false }, { reasoning_effort: 'medium' }, { reasoning_effort: 'xhigh' }]);
+  const template = await payloads({ type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, low: { reasoning_effort: 'low' }, medium: { reasoning_effort: 'medium' }, xhigh: { reasoning_effort: 'xhigh' } } });
+  expect(template.map(body => body.chat_template_kwargs)).toEqual([{ enable_thinking: false }, { enable_thinking: false }, { reasoning_effort: 'low' }, { reasoning_effort: 'medium' }]);
   expect(template.every(body => !('reasoning_effort' in body))).toBe(true);
 
   // No protocol: no reasoning field at all, whatever the tier.
@@ -48,6 +49,30 @@ it('builds exact reasoning payloads from the model protocol', async () => {
   expect(none.every(body => !('reasoning_effort' in body) && !('chat_template_kwargs' in body))).toBe(true);
   // Nothing is appended to the prompt to switch reasoning off.
   expect(JSON.stringify(none.concat(effort, template).map(body => body.messages))).not.toContain('/no_think');
+
+  // Deep runs xhigh only when the policy opts in, and only once xhigh is verified.
+  const opted = await payloads(ollamaReasoning, config => {
+    config.policy.reasoning = { deepEffort: 'xhigh' };
+    config.models.capable.reasoningEfforts = ['off', 'low', 'medium', 'xhigh'];
+  });
+  expect(opted.at(-1)?.reasoning_effort).toBe('xhigh');
+});
+
+it('sends each reasoning level its own sampling, falling back to the model temperature', async () => {
+  const bodies = await payloads(ollamaReasoning, config => {
+    config.models.fast.temperature = 0.2; delete config.models.fast.sampling;
+    config.models.capable.sampling = { off: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0 }, low: { temperature: 0.6, top_p: 0.95 }, medium: { top_k: 20 } };
+    config.models.capable.temperature = 0.3;
+  });
+  const sampling = bodies.map(({ temperature, top_p, top_k, min_p }) => ({ temperature, top_p, top_k, min_p }));
+  expect(sampling).toEqual([
+    { temperature: 0.2, top_p: undefined, top_k: undefined, min_p: undefined },
+    { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0 },
+    { temperature: 0.6, top_p: 0.95, top_k: undefined, min_p: undefined },
+    { temperature: 0.3, top_p: undefined, top_k: 20, min_p: undefined },
+  ]);
+  // Sampling never replaces the reasoning request.
+  expect(bodies.map(body => body.reasoning_effort)).toEqual(['none', 'none', 'low', 'medium']);
 });
 
 it('loads saved configurations without a protocol with unchanged behaviour', async () => {
@@ -58,7 +83,7 @@ it('loads saved configurations without a protocol with unchanged behaviour', asy
   const config = await loadConfig(directory, {});
   // Ollama models keep sending exactly the reasoning_effort they sent before; other endpoints send none.
   expect(config.models.capable.reasoning).toEqual(ollamaReasoning);
-  expect(config.models.capable.reasoningEfforts).toEqual(['off', 'medium', 'xhigh']);
+  expect(config.models.capable.reasoningEfforts).toEqual(['off', 'low', 'medium']);
   expect(config.models.fast.reasoning).toBeUndefined();
   // A verified level the protocol cannot express is rejected rather than silently sent as nothing.
   await writeFile(join(directory, 'models.json'), JSON.stringify({ ...config.models, capable: { ...config.models.capable, reasoning: { type: 'reasoning_effort', values: { off: 'none' } } } }));
@@ -76,16 +101,20 @@ it('enables only the reasoning tiers whose own live check passes', async () => {
   });
   const model = f.config.models.capable;
   Object.assign(model, { toolCalling: false, reasoningEfforts: ['off'] });
-  expect(candidates(f.config, 'capable')).toEqual(['medium', 'xhigh']);
+  expect(candidates(f.config, 'capable')).toEqual(['low', 'medium', 'xhigh']);
   const report = await liveCheck(f.config, 'normal', undefined, undefined, candidates(f.config, 'capable'));
-  expect(report).toMatchObject({ ask: true, reasoning: ['medium'] });
-  expect(efforts).toEqual(['none', 'medium', 'xhigh']);
+  expect(report).toMatchObject({ ask: true, reasoning: ['low', 'medium'] });
+  expect(efforts).toEqual(['none', 'low', 'medium', 'xhigh']);
   // The probe leaves the caller's configuration alone.
   expect(model.reasoningEfforts).toEqual(['off']);
+  expect(f.config.policy.reasoning).toEqual({ deepEffort: 'medium' });
   applyReports(f.config, ['capable'], new Map([['capable', report]]));
-  expect(model.reasoningEfforts).toEqual(['off', 'medium']);
+  expect(model.reasoningEfforts).toEqual(['off', 'low', 'medium']);
   expect(profileAvailable(f.config, 'reasoning').available).toBe(true);
-  expect(profileAvailable(f.config, 'deep')).toMatchObject({ available: false });
+  expect(profileAvailable(f.config, 'deep').available).toBe(true);
+  // Opting deep into xhigh needs xhigh to have passed its own check.
+  f.config.policy.reasoning = { deepEffort: 'xhigh' };
+  expect(profileAvailable(f.config, 'deep')).toMatchObject({ available: false, reason: 'Native xhigh reasoning is not verified' });
   // Coding was never verified, so no capable tier may code.
   expect(f.config.policy.disabledCapabilities).toEqual(expect.arrayContaining(['coder.normal', 'coder.reasoning', 'coder.deep']));
 

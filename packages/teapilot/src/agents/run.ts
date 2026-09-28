@@ -392,7 +392,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const stopped = capabilityDenied || policy.denied ? 'approval_denied' : input.signal?.aborted ? 'cancelled' : searchFailed ? 'search_unavailable' : timeout ? 'timeout' : toolLimit ? 'tool_limit' : inference.stop;
   // A server that says the model called a tool but sends no call it could parse leaves nothing to run or show.
   const lostCall = last?.role === 'assistant' && lost(last);
-  const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? 'unsupported' : undefined) ?? (lostCall ? 'provider_error' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
+  // Running out of tokens with only thinking to show is overthinking; with an answer or a call under way, the reply was too long.
+  const overthought = last?.role === 'assistant' && last.content.some(part => part.type === 'thinking' && part.thinking.trim()) && !text.trim() && !last.content.some(part => part.type === 'toolCall');
+  const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? overthought ? 'overthinking' : 'unsupported' : undefined) ?? (lostCall ? 'provider_error' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
     ?? (evidence.unresolvedChecks.size || evidence.lastCheck === 'failed' ? 'test_failures' : evidence.failures ? 'tool_failures' : undefined);
   const success = !stopped && !reason && evidence.failures === 0 && evidence.lastCheck !== 'failed' && last?.role === 'assistant' && last.stopReason === 'stop' && Boolean(text.trim());
   const relPath = (path: string) => relative(input.cwd, path) || path;

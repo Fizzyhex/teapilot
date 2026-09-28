@@ -8,7 +8,7 @@ import { effectiveProfile, modelFor, profileFor, type ExecutionProfile } from '.
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 import { calibratedTokens, estimateInputTokens, MAX_PAYLOAD_BYTES, wellFormedText } from './context.js';
-import { reasoningFields } from './reasoning.js';
+import { reasoningFields, samplingFor } from './reasoning.js';
 
 export function piModel(config: ModelConfig, profile?: ExecutionProfile): Model<'openai-completions'> {
   return {
@@ -163,7 +163,9 @@ export function guardedStream(
   const model = piModel(spec, profile);
   const reservedOutputTokens = controls?.outputTokens !== undefined ? Math.min(controls.outputTokens, spec.maxOutputTokens)
     : Math.min(controls?.maxOutputTokens ?? profile.maxOutputTokens, profile.maxOutputTokens);
-  const reasoning = reasoningFields(spec, profile.thinking);
+  // Temperature travels as its own option; the other settings join the reasoning fields.
+  const { temperature, ...sampling } = samplingFor(spec, profile.thinking);
+  const fields = { ...sampling, ...reasoningFields(spec, profile.thinking) };
   return (_model, context, options) => {
     const output = new AssistantMessageEventStream();
     const run = async (): Promise<void> => {
@@ -189,14 +191,14 @@ export function guardedStream(
           apiKey: config.secrets[profile.model] || 'local-no-key',
           signal, maxTokens: reservedOutputTokens, maxRetries: 0,
           toolChoice: controls?.toolChoice,
-          temperature: spec.temperature,
+          temperature,
           timeoutMs: config.policy.limits.requestTimeoutMs,
           onPayload: raw => {
             const payload = wellFormed(raw) as Record<string, unknown>;
             return spec.provider === 'openrouter' ? {
               ...payload,
               provider: { require_parameters: true, max_price: { prompt: spec.inputUsdPerMillion, completion: spec.outputUsdPerMillion, request: 0 } },
-            } : reasoning ? { ...payload, ...reasoning } : payload;
+            } : { ...payload, ...fields };
           },
           fetch: async (input, init) => {
             const body = typeof init?.body === 'string' ? init.body : '';

@@ -20,7 +20,7 @@ import { checkSearch, searchRepair } from './search.js';
 import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
 import { capabilityPlanner, conversationQuestions, playQuestion, readCasual, readPlayGrant, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
 import { markWork } from './teachat/busy.js';
-import { directTier, modelFor, profileFor } from './routing/execution.js';
+import { directTier, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
@@ -297,7 +297,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const [workload, tier] = selected.split('.') as [Workload, Tier];
       // Surfaces decide how to show the turn from this: a conversational one gets no progress display.
       dependencies.onEvent?.({ type: 'route', capability: selected, casual });
-      dependencies.onProgress?.(`Executing ${selected} using ${modelFor(config, tier).id} (${profileFor(tier).thinking}).`);
+      dependencies.onProgress?.(`Executing ${selected} using ${modelFor(config, tier).id} (${thinkingFor(config, tier)}).`);
       attempts++;
       models.push(modelFor(config, tier).id);
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
@@ -342,7 +342,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (casual || !previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit', 'search_unavailable'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
         return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));
       }
-      const fallback = tiers.slice(tiers.indexOf(tier) + 1).map(nextTier => {
+      // Overthinking steps down to less reasoning on the same model; everything else steps up.
+      const onward = previous.reason === 'overthinking'
+        ? tiers.slice(0, tiers.indexOf(tier)).reverse().filter(lower => profileFor(lower).model === profileFor(tier).model)
+        : tiers.slice(tiers.indexOf(tier) + 1);
+      const fallback = onward.map(nextTier => {
         const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }, { physicalOnline, relatedLock: request.relatedTier }).find(c => c.id === `${workload}.${nextTier}`)!;
         if (request.web && !modelFor(config, nextTier).toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
         return { tier: nextTier, assessment: assessCandidate(config, candidate) };
@@ -354,7 +358,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         // Without repository work, resuming the same model after repeated calls just repeats them.
         const madeProgress = previous.reason === 'ineffective_calls' ? repositoryWork : previous.turns > 0 || repositoryWork;
         if (!previous.reason || !resumableSameTier.includes(previous.reason) || !madeProgress) {
-          return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || 'no higher tier configured'}.`));
+          return await finish(false, 'escalation_unavailable', incomplete(previous, `Fallback unavailable: ${fallback.map(item => `${item.tier}: ${item.assessment.reason}`).join('; ') || `no ${previous.reason === 'overthinking' ? 'lower' : 'higher'} tier configured`}.`));
         }
         dependencies.onProgress?.(`No higher-tier fallback is available; continuing ${selected} with its execution handoff.`);
         await telemetry.event('continuation', { capability: selected, reason: previous.reason, fallback: 'unavailable' });

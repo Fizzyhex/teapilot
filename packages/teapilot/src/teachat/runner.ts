@@ -2,7 +2,7 @@ import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config, Tier } from '../config.js';
 import type { SpendGovernor } from '../inference/budget.js';
 import { guardedStream, piModel, type InferenceState } from '../inference/providers.js';
-import { effectiveProfile, modelFor, profileAvailable, profileFor } from '../routing/execution.js';
+import { effectiveProfile, modelFor, profileAvailable, thinkingFor } from '../routing/execution.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 
 /** The first tier that can run here, in order of preference. */
@@ -22,7 +22,7 @@ export async function gossipCall(config: Config, tier: Tier, budget: SpendGovern
   scoped.policy.limits.maxTurns = Math.min(options.maxTurns ?? 1, config.policy.limits.maxTurns);
   const state: InferenceState = { turns: 0 };
   const agent = new Agent({
-    initialState: { model: piModel(modelFor(scoped, tier), effectiveProfile(scoped, tier)), systemPrompt: system, tools: options.tools ?? [], thinkingLevel: profileFor(tier).thinking },
+    initialState: { model: piModel(modelFor(scoped, tier), effectiveProfile(scoped, tier)), systemPrompt: system, tools: options.tools ?? [], thinkingLevel: thinkingFor(scoped, tier) },
     streamFn: guardedStream(scoped, tier, budget, telemetry, state), toolExecution: 'sequential',
   });
   const abort = () => agent.abort();
@@ -30,7 +30,7 @@ export async function gossipCall(config: Config, tier: Tier, budget: SpendGovern
   options.signal?.addEventListener('abort', abort, { once: true });
   try {
     options.signal?.throwIfAborted();
-    await agent.prompt(profileFor(tier).thinking === 'off' ? `${prompt}\n/no_think` : prompt);
+    await agent.prompt(thinkingFor(scoped, tier) === 'off' ? `${prompt}\n/no_think` : prompt);
   } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); }
   options.signal?.throwIfAborted();
   const last = agent.state.messages.findLast(message => message.role === 'assistant');

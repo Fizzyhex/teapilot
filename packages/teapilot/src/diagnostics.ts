@@ -13,7 +13,7 @@ import { budgetedJev, guardedStream, piModel, type InferenceState } from './infe
 import { Telemetry } from './telemetry/outcome.js';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import { capabilities } from './routing/capabilities.js';
-import { effectiveProfile, modelFor, profileAvailable, profileFor, reasoningTier, type ThinkingLevel } from './routing/execution.js';
+import { effectiveProfile, modelFor, profileAvailable, profileFor, reasoningTier, thinkingFor, type ThinkingLevel } from './routing/execution.js';
 import { managedRuntimes, runtimeHints, type Runtimes } from './runtime/index.js';
 import { configureWorkspace } from './workspace/configure.js';
 
@@ -120,14 +120,17 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     await budget.load();
     const telemetry = new Telemetry(config.stateDir, requestId, [config.router.apiKey, ...Object.values(config.secrets)].filter((v): v is string => Boolean(v)));
     const probeConfig = structuredClone(config);
-    modelFor(probeConfig, tier).temperature = 0;
+    // Probes decode greedily at every level, so a pass does not depend on sampling luck.
+    const probed = modelFor(probeConfig, tier);
+    probed.temperature = 0;
+    for (const sampling of Object.values(probed.sampling ?? {})) sampling.temperature = 0;
     probeConfig.policy.limits.maxTurns = Math.min(6, config.policy.limits.maxTurns);
     // Probes send exactly what production sends for the tier: any reasoning
     // request comes from the model's protocol, never from a prompt suffix.
     async function run(prompt: string, tools: AgentTool[] = [], probeTier = tier): Promise<{ text: string; ok: boolean; failure?: string; layer?: LiveFailure }> {
       const state: InferenceState = { turns: 0 };
       const agent = new Agent({
-        initialState: { model: piModel(modelFor(probeConfig, probeTier), effectiveProfile(probeConfig, probeTier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s typing style and tone - leaning towards informal lowercase responses', tools, thinkingLevel: profileFor(probeTier).thinking },
+        initialState: { model: piModel(modelFor(probeConfig, probeTier), effectiveProfile(probeConfig, probeTier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s typing style and tone - leaning towards informal lowercase responses', tools, thinkingLevel: thinkingFor(probeConfig, probeTier) },
         streamFn: guardedStream(probeConfig, probeTier, budget, telemetry, state), toolExecution: 'sequential',
       });
       const abort = () => agent.abort();
@@ -155,17 +158,19 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     if (report.ask && candidates.length) {
       report.reasoning = [];
       const model = modelFor(probeConfig, tier);
-      const verified = model.reasoningEfforts;
+      const verified = model.reasoningEfforts; const deepEffort = probeConfig.policy.reasoning;
       for (const level of candidates) {
         const levelTier = reasoningTier[level];
         // The candidate counts as enabled during its own probe, so its tier gets its own limits.
         model.reasoningEfforts = [...new Set([...verified, level])];
-        progress(`Checking ${levelTier} answers...`);
+        // Deep runs medium or xhigh; its probe asks for the level being checked.
+        if (level === 'medium' || level === 'xhigh') probeConfig.policy.reasoning = { deepEffort: level };
+        progress(`Checking ${levelTier} (${level}) answers...`);
         const result = await run('Reply with exactly TEAPILOT_OK.', [], levelTier);
         if (result.ok && result.text.includes('TEAPILOT_OK')) report.reasoning.push(level);
-        else progress(`${levelTier[0]!.toUpperCase()}${levelTier.slice(1)} check failed: ${result.failure ?? 'reply did not contain TEAPILOT_OK'}. ${levelTier} stays unavailable.`);
+        else progress(`${levelTier[0]!.toUpperCase()}${levelTier.slice(1)} check failed: ${result.failure ?? 'reply did not contain TEAPILOT_OK'}. ${level} reasoning stays unavailable.`);
       }
-      model.reasoningEfforts = verified;
+      model.reasoningEfforts = verified; probeConfig.policy.reasoning = deepEffort;
     }
     if (report.ask && modelFor(config, tier).toolCalling) {
       progress('Checking tool calls and continuation...');

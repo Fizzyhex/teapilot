@@ -8,7 +8,7 @@ import { budgetedJev, guardedStream, piModel, type InferenceState } from '../inf
 import { callCeiling, lockState, SpendGovernor } from '../inference/budget.js';
 import { markWork } from '../teachat/busy.js';
 import { assessCandidate } from '../routing/selection.js';
-import { directTier, effectiveProfile, modelFor, profileAvailable, profileFor } from '../routing/execution.js';
+import { directTier, effectiveProfile, modelFor, profileAvailable, thinkingFor } from '../routing/execution.js';
 import { Telemetry } from '../telemetry/outcome.js';
 import type { HostDependencies } from '../host.js';
 import { StreamRedactor } from './events.js';
@@ -31,7 +31,7 @@ export function modelInformation(config: Config) {
   const fixed = available.map(tier => ({ id: tier, name: `TeaPilot ${tier[0]!.toUpperCase()}${tier.slice(1)} · ${modelFor(config, tier).id}`, family: 'teapilot', version: '1',
     maxInputTokens: effectiveProfile(config, tier).contextTokens - effectiveProfile(config, tier).maxOutputTokens - 2048, maxOutputTokens: effectiveProfile(config, tier).maxOutputTokens,
     capabilities: { toolCalling: modelFor(config, tier).toolCalling, imageInput: false },
-    detail: `Local · ${profileFor(tier).thinking} reasoning · $${config.policy.budget.requestUsd}/call · $${config.policy.budget.dailyUsd}/UTC day`,
+    detail: `Local · ${thinkingFor(config, tier)} reasoning · $${config.policy.budget.requestUsd}/call · $${config.policy.budget.dailyUsd}/UTC day`,
   }));
   return fixed.length ? [{ ...fixed[0]!, id: 'auto', name: 'TeaPilot Auto', maxInputTokens: Math.max(...fixed.map(m => m.maxInputTokens)), maxOutputTokens: Math.min(...fixed.map(m => m.maxOutputTokens)), capabilities: { toolCalling: fixed.some(m => m.capabilities.toolCalling), imageInput: false } }, ...fixed] : [];
 }
@@ -117,7 +117,7 @@ export async function runInference(config: Config, request: InferenceRequest, de
       if (assessCandidate(config, chosen).confirmation || routeConfirmation) {
         if (!await dependencies.approve({ kind: 'route', summary: `Use ${modelFor(config, tier).id}?`, details: `Maximum inference charge: $${callCeiling(modelFor(config, tier)).toFixed(6)}. Budget: $${config.policy.budget.requestUsd}/call; $${config.policy.budget.dailyUsd}/UTC day.`, signal })) throw new Error('Inference approval denied');
       }
-      await telemetry.event('model_selection', { model: modelFor(config, tier).id, tier, effort: profileFor(tier).thinking, attempt: attempt + 1 });
+      await telemetry.event('model_selection', { model: modelFor(config, tier).id, tier, effort: thinkingFor(config, tier), attempt: attempt + 1 });
       const state: InferenceState = { turns: 0 };
       const stream = await guardedStream(config, tier, budget, telemetry, state, { toolChoice: request.toolMode, maxOutputTokens: advertised.maxOutputTokens })(piModel(modelFor(config, tier), effectiveProfile(config, tier)), inferenceContext(request, config, tier), { signal });
       const redactor = new StreamRedactor(secrets);
