@@ -157,6 +157,31 @@ it('asks for tool approval with buttons and returns the clicked answer', async (
   await vi.waitFor(() => expect(answers).toEqual([true]));
 });
 
+it('approves everything without asking for an operator\'s yolo message, and only for that message', async () => {
+  const { sent, approvals, cards, transport } = discord();
+  const answers: boolean[] = [];
+  const run = vi.fn<ConversationOptions['run']>(async (_request, dependencies) => { answers.push(await dependencies.approve({ kind: 'shell', summary: 'Run a command' })); return result; });
+  const { chat } = conversation({ transport, run, access });
+  chat.push('run it', { sender: 'op', yolo: true });
+  await vi.waitFor(() => expect(answers).toEqual([true]));
+  expect(approvals).toHaveLength(0);
+  expect(sent).toContain('-# Auto-approved (shell): Run a command');
+  await finished(cards);
+  chat.push('again', { sender: 'op' });
+  await vi.waitFor(() => expect(approvals).toHaveLength(1));
+  approvals[0]!.resolve(false);
+  await vi.waitFor(() => expect(answers).toEqual([true, false]));
+});
+
+it('still asks when someone who cannot approve sends a yolo message', async () => {
+  const { approvals, transport } = discord();
+  const run = vi.fn<ConversationOptions['run']>(async (_request, dependencies) => { await dependencies.approve({ kind: 'shell', summary: 'Run a command' }); return result; });
+  const { chat } = conversation({ transport, run, access });
+  chat.push('run it', { sender: 'bob', yolo: true });
+  await vi.waitFor(() => expect(approvals).toHaveLength(1));
+  approvals[0]!.resolve(false);
+});
+
 it('denies an approval nobody answers before the timeout', async () => {
   const { transport } = discord();
   const answers: boolean[] = [];

@@ -85,10 +85,12 @@ const discordHelp = 'Discord: /stop cancels the running turn; /clear ends this c
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
-  private readonly inbox: Array<{ text: string; sender?: string; senderName?: string }> = [];
+  private readonly inbox: Array<{ text: string; sender?: string; senderName?: string; yolo?: boolean }> = [];
   /** Who sent the message the current turn is answering; a thread can have several people. */
   private speaker?: string;
   private speakerName?: string;
+  /** The message being answered asked for every approval to pass without asking; honoured for operators only. */
+  private yolo = false;
   private waiting?: { resolve(text: string): void; reject(error: Error): void };
   private turn?: AbortController;
   private sink?: EventSink;
@@ -104,7 +106,7 @@ export class Conversation {
   }
 
   /** Deliver a message from an allowed person. Local commands take effect immediately. */
-  push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string } = {}): void {
+  push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string; yolo?: boolean } = {}): void {
     // Only the next turn is answer-only, and only if nothing is running to change mid-turn.
     if (options.answerOnly && !this.turn) this.answerOnly = true;
     // Discord's /clear is the session's /exit: the conversation ends and its history goes with it.
@@ -119,8 +121,8 @@ export class Conversation {
     if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.', true); return; }
     if (command === '/help') void this.say(discordHelp, true);
     if (this.turn && !['/exit', '/quit'].includes(command ?? '')) void this.say('Queued as your next message.', true);
-    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; this.speakerName = options.senderName; waiting.resolve(text); }
-    else this.inbox.push({ text, sender: options.sender, senderName: options.senderName });
+    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; this.speakerName = options.senderName; this.yolo = options.yolo === true; waiting.resolve(text); }
+    else this.inbox.push({ text, sender: options.sender, senderName: options.senderName, yolo: options.yolo });
   }
 
   get active(): boolean { return !this.ended; }
@@ -133,7 +135,7 @@ export class Conversation {
 
   private input = (): Promise<string> => {
     const next = this.inbox.shift();
-    if (next) { this.speaker = next.sender; this.speakerName = next.senderName; return Promise.resolve(next.text); }
+    if (next) { this.speaker = next.sender; this.speakerName = next.senderName; this.yolo = next.yolo === true; return Promise.resolve(next.text); }
     const signal = this.options.request.signal;
     return new Promise((resolve, reject) => {
       const closed = () => reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' }));
@@ -147,6 +149,13 @@ export class Conversation {
     const signals = [AbortSignal.timeout(this.options.approvalTimeoutMs ?? 10 * 60_000), this.options.request.signal, this.turn?.signal, approval.signal].filter((value): value is AbortSignal => Boolean(value));
     const signal = AbortSignal.any(signals);
     if (signal.aborted) return false;
+    // Only operators may answer approvals, so only an operator's message can approve everything up front.
+    if (this.yolo && this.operator(this.speaker)) {
+      const summary = this.options.redact(approval.summary).split('\n')[0];
+      this.options.log(`${this.options.key}: ${approval.kind} auto-approved (yolo): ${summary}`);
+      await this.say(`-# Auto-approved (${approval.kind}): ${summary}`);
+      return true;
+    }
     const text = this.options.redact(`**Approval needed** (${approval.kind})\n${approval.summary}${approval.details ? `\n\`\`\`\n${approval.details}\n\`\`\`` : ''}`);
     const parts = chunk(text);
     const live = this.live;

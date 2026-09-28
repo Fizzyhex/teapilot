@@ -38,9 +38,9 @@ async function oneShots() {
   /** Switch notes shown so far; `pick` is the button pressed on the next one. */
   const notes: string[] = [];
   let pick = 0;
-  const reply = (authorId: string, text: string, collab = false) => handlers!.reply({
+  const reply = (authorId: string, text: string, collab = false, attachments: GatewayReply['attachments'] = []) => handlers!.reply({
     authorId, authorIsBot: false, authorName: authorId, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false,
-    content: text, title: text, id: `interaction-${++invocations}`, oneShot: true, answerOnly: false, setup: {}, collab,
+    content: text, title: text, id: `interaction-${++invocations}`, oneShot: true, answerOnly: false, setup: {}, yolo: false, attachments, collab,
     transport: () => transport, startThread: () => Promise.reject(new Error('no threads')), respond: async () => undefined,
     choose: async note => { notes.push(note); return { choice: pick, settle: async settled => { notes.push(settled); }, transport: () => transport }; },
   } satisfies GatewayReply);
@@ -96,3 +96,11 @@ it('shares a collab between everyone in the channel, and moves people between it
   await results(4);
   expect(prompts[3]).not.toContain('matcha');
 }, 60_000);
+
+it('keeps files attached to /prompt and tells teapilot about them', async () => {
+  const { prompts, reply, results } = await oneShots();
+  const data = Buffer.from('oolong is a partly oxidised tea\n');
+  reply('op', 'what does notes.txt say?', false, [{ name: 'notes.txt', size: data.length, contentType: 'text/plain', download: async () => data }]);
+  await results(1);
+  expect(prompts[0]).toContain('notes.txt');
+}, 30_000);

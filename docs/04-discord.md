@@ -76,7 +76,7 @@ Operators and users can reach teapilot from any channel:
 
 | Use | For |
 | --- | --- |
-| `/prompt` | Ask something, optionally choosing the `mode` and `reasoning` |
+| `/prompt` | Ask something, optionally choosing the `mode` and `reasoning`, attaching up to four files, or setting `yolo` to approve every action it asks for (operators only) |
 | `/reply` | Ask something |
 | `/collab` | A conversation everyone in the channel shares |
 | Right-click a message → **Apps → Reply** | Have teapilot respond to that message |

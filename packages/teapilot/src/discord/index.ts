@@ -153,7 +153,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   };
 
   /** Keeps a message's attachments in the conversation's workspace and says what arrived, for the prompt. */
-  const receive = async (conversation: string, message: GatewayMessage, room: number): Promise<string> => {
+  const receive = async (conversation: string, message: Pick<GatewayMessage, 'attachments' | 'authorName'>, room: number): Promise<string> => {
     const incoming = message.attachments.map(attachment => ({ name: attachment.name, size: attachment.size, type: attachment.contentType, data: () => attachment.download() }));
     const notes = await receiveFiles(files, conversation, incoming, message.authorName, room);
     if (notes) log(`${conversation}: kept ${message.attachments.length} attachment(s) from @${message.authorName}`);
@@ -221,6 +221,11 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     const target = routeReply(reply, settings, allowed);
     if (!target) { await reply.respond('You are not allowed to use teapilot here.'); return; }
     if (!reply.content) { await reply.respond('teapilot reads text messages only.'); return; }
+    /** The prompt with notes on the files that came with it, which are kept in the conversation's workspace. */
+    const prompt = async (workspace: string) => reply.attachments.length
+      ? [reply.content, await receive(workspace, reply, config.policy.limits.maxPromptChars - reply.content.length - 1500)].filter(Boolean).join('\n\n')
+      : reply.content;
+    const from = { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName, yolo: reply.yolo };
     if (reply.oneShot) {
       const seat: Seat = reply.collab ? 'collab' : 'solo';
       const current = seats.seat(reply.channelId, reply.authorId);
@@ -242,11 +247,13 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       const setup = seats.remember(historyKey, reply.setup);
       const key = `reply:${reply.id}`;
       log(`${historyKey} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
+      // A one-shot's apps and files live under its history, so later one-shots there still have them.
+      const content = await prompt(historyKey);
       await enqueue(historyKey, async () => {
         // A one-shot stops after one input, so the chosen mode and tier go in when it opens rather than as commands.
         const conversation = await open(key, transport, { channelId: reply.channelId, oneShot: true, setup, historyKey });
         runningOneShots.set(historyKey, conversation);
-        conversation.push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
+        conversation.push(content, from);
         try { await conversation.done; }
         finally { conversations.delete(key); if (runningOneShots.get(historyKey) === conversation) runningOneShots.delete(historyKey); }
       });
@@ -268,9 +275,11 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     log(`${key} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
     // A new conversation starts with the chosen mode and tier; one already running switches to them first.
     const running = conversations.get(key)?.active;
+    const content = await prompt(key);
     const conversation = await open(key, transport, { channelId, setup: reply.setup });
-    if (running) for (const command of setupCommands(reply.setup)) conversation.push(command, { sender: reply.authorId, senderName: reply.authorName });
-    conversation.push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
+    // Switching to Code mode asks for access, which yolo approves as well.
+    if (running) for (const command of setupCommands(reply.setup)) conversation.push(command, { sender: reply.authorId, senderName: reply.authorName, yolo: reply.yolo });
+    conversation.push(content, from);
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   const gateway = await connect(settings, {

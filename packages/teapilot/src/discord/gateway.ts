@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, ClientOptions, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
+import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, Attachment, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, ClientOptions, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
 import type { IncomingMessage } from './access.js';
 import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
-import { collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
+import { attachmentOption, collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
 import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
@@ -35,7 +35,7 @@ export interface GatewayCommand extends IncomingMessage {
   respond(text?: string): Promise<void>;
 }
 /** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
-export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'attachments'> {
+export interface GatewayReply extends Omit<GatewayMessage, 'replyChain'> {
   title: string;
   /** Interaction id, unique per invocation. */
   id: string;
@@ -49,6 +49,8 @@ export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'attac
   answerOnly: boolean;
   /** The mode and tier chosen with /prompt or /collab, applied before `content`. */
   setup: PromptSetup;
+  /** From /prompt or /collab: every approval this prompt asks for passes without asking, if an operator sent it. */
+  yolo: boolean;
   /** From /collab: where the answer comes through the interaction, everyone in the channel shares the conversation. */
   collab: boolean;
   respond(text?: string): Promise<void>;
@@ -99,6 +101,13 @@ const raw = (payload: MessagePayload, edit = false) => {
   const { files, pictures: _, ...rest } = payload;
   return { ...rest, files: (files ?? []).map(file => ({ attachment: file.data, name: file.name })), ...(edit ? { attachments: [] } : {}) } as unknown as BaseMessageOptions & { content: string };
 };
+/** A Discord attachment, downloaded only when teapilot keeps it. */
+const incoming = (file: Attachment): IncomingFile => ({ name: file.name, size: file.size, contentType: file.contentType ?? undefined,
+  async download() {
+    const response = await fetch(file.url, { signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`Discord returned ${response.status} for ${file.name}.`);
+    return Buffer.from(await response.arrayBuffer());
+  } });
 const attachments = (files: Array<{ name: string; data: Buffer }>) => files.map(file => ({ attachment: file.data, name: file.name }));
 
 /**
@@ -304,6 +313,10 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     const isPrompt = interaction.isChatInputCommand() && (interaction.commandName === promptCommand || collab);
     const text = interaction.isChatInputCommand() ? interaction.options.getString(isPrompt ? 'prompt' : 'message', true).trim() : strip(target?.content ?? '', self.id);
     const setup = interaction.isChatInputCommand() && isPrompt ? promptSetup(interaction.options.getString('mode'), interaction.options.getString('reasoning')) : {};
+    const yolo = interaction.isChatInputCommand() && isPrompt && interaction.options.getBoolean('yolo') === true;
+    const files = interaction.isChatInputCommand() && isPrompt
+      ? Array.from({ length: promptAttachments }, (_, index) => interaction.options.getAttachment(attachmentOption(index))).filter((file): file is Attachment => !!file).map(incoming)
+      : [];
     const repliedTo = interactionReplies.get(interaction.id);
     interactionReplies.delete(interaction.id);
     const chain = target && text ? await replyChain(target, self.id, repliedTo) : undefined;
@@ -322,6 +335,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       oneShot,
       answerOnly: !!target,
       setup,
+      yolo,
+      attachments: files,
       collab,
       transport: () => channel && !oneShot ? transport(channel) : interactionTransport(interaction),
       startThread: name => spawn(async () => {
@@ -447,12 +462,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       ownThread: thread?.ownerId === self.id,
       mentionsBot: message.mentions.users.has(self.id),
       content: strip(message.content, self.id),
-      attachments: [...message.attachments.values()].map(file => ({ name: file.name, size: file.size, contentType: file.contentType ?? undefined,
-        async download() {
-          const response = await fetch(file.url, { signal: AbortSignal.timeout(30_000) });
-          if (!response.ok) throw new Error(`Discord returned ${response.status} for ${file.name}.`);
-          return Buffer.from(await response.arrayBuffer());
-        } })),
+      attachments: [...message.attachments.values()].map(incoming),
       replyChain: () => replyChain(message, self.id),
       transport: () => transport(channel),
       async startThread(name) {
