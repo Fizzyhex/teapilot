@@ -43,6 +43,7 @@ If you're specifically asked to attempt challenge cases, do the cases at one of 
 - `ultra challenges` -> `./ultra-challenges.md`
 - `file challenges` -> `./file-challenges.md`
 - `conversation challenges` -> `./conversation-challenges.md`
+- `scratchpad benchmark` -> `./teapilot-scratchpad-benchmark.md`
 
 ## Case 1: Snake Game
 
