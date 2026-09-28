@@ -18,8 +18,8 @@ import { ask } from './ask.js';
 import { casualPrompt } from './casual.js';
 import { coder } from './coder.js';
 import { fitHistory, turnSteps } from './history.js';
-import { files } from './files.js';
 import { latestBlock, latestCode, play, withoutCode, type Drafts, type PlayContext } from './play.js';
+import { workspace, type ConversationWorkspace } from './workspace.js';
 import type { WebController } from '../web/controller.js';
 
 export interface AttemptInput {
@@ -37,6 +37,8 @@ export interface AttemptInput {
   access?: AccessAdmin;
   /** Set only for Discord conversations; drives the discord.play tools. */
   play?: PlayContext;
+  /** The conversation's workspace, where Discord and terminal chat sessions keep files and run commands. */
+  workspace?: ConversationWorkspace;
   requestCapabilities?: (required: Permission[], reason: string, signal?: AbortSignal) => Promise<boolean>;
   onAgenticWork?: () => void;
   unresolvedChecks?: string[];
@@ -124,8 +126,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
       setup.systemPrompt += '\n- For interactive Discord apps (games, polls, quizzes, boards, timers with buttons), request `discord.play` with request_capabilities; it is granted without a prompt.';
     }
-    if (input.play?.files) {
-      const shared = files(input.play.files, drafts, input.play);
+    if (input.workspace) {
+      const shared = await workspace(input.workspace, drafts, input.approve, input.play);
       setup.tools.push(...shared.tools);
       setup.systemPrompt += '\n' + shared.systemPrompt;
     }
@@ -208,12 +210,14 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         pausedFor = drafts.missing; drafts.missing = undefined; pauses++; paused = context.tools; writing = true;
         const write = pausedFor === 'file'
           ? 'That call had nothing to send: file_send never writes content itself. Tools are paused for this reply: write the whole content to send now as one code block, with at most a sentence around it.'
+          : pausedFor === 'script'
+          ? 'That call had no script to save: workspace_run saves the newest code block in your reply. Tools are paused for this reply: write the whole script now as one code block, with at most a sentence around it.'
           : 'That call had no new app code to use. Tools are paused for this reply: write the whole app now as one ```js code block, with at most a sentence around it.';
         return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: `[host notice] ${write} The tools return on your next turn.`, timestamp: Date.now() }] };
       }
       if (paused) {
         const tools = paused; paused = undefined;
-        const call = pausedFor === 'file' ? 'Call file_send now with the file name; it sends' : 'Call play_start (or play_update) now; it reads';
+        const call = pausedFor === 'file' ? 'Call file_send now with the file name; it sends' : pausedFor === 'script' ? 'Call workspace_run again now with script and command; it saves' : 'Call play_start (or play_update) now; it reads';
         return { context: { ...context, tools }, messages: [{ role: 'user', content: `[host notice] Tools are back. ${call} the code block you just wrote.`, timestamp: Date.now() }] };
       }
       // The last turn of a discord.play attempt answers about what is live rather than ending mid-call at the limit.
@@ -262,7 +266,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
       // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
       if (lost(message) && lostCalls < 2) { lostCalls++; lostNotice = true; return { action: 'continue' }; }
-      if (writing) { writing = false; if (pausedFor === 'file' ? drafts.block?.() : drafts.latest()) return { action: 'continue' }; paused = undefined; }
+      if (writing) { writing = false; if (pausedFor === 'app' ? drafts.latest() : drafts.block?.()) return { action: 'continue' }; paused = undefined; }
       if (playing && !changed && !claimChecked && message.stopReason === 'stop' && !message.content.some(part => part.type === 'toolCall')
         && claimsChange(message.content.map(part => part.type === 'text' ? part.text : '').join('\n'))
         && input.play!.runtime.list(input.play!.conversation, input.play!.channelId).some(app => app.status === 'running')) {

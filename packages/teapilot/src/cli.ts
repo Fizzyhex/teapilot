@@ -185,9 +185,14 @@ async function main(): Promise<void> {
       if (interactive && !values.json && !values.once) presentation.log(`${mode[0]!.toUpperCase()}${mode.slice(1)} session started. Type /exit or /quit to leave.`);
       // Teachat only runs where someone can see it and press a key to stop it.
       const teachat = ui && !once ? await openTeachat(config, ui, presentation) : undefined;
-      process.exitCode = await runSession({ request: { ...request, authorization, mode }, maxPromptChars: config.policy.limits.maxPromptChars,
-        input: state => ui ? ui.prompt('>', state.cwd ?? resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted', idle: teachat?.composerIdle() }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
-        run: execute, once, approve, log: message => presentation.log(message), onEvent: dependencies.onEvent, extension: teachat });
+      const [{ SrtSandbox }, { WorkspaceStore }, { TerminalWorkspace }] = await Promise.all([import('./workspace/sandbox.js'), import('./workspace/store.js'), import('./workspace/terminal.js')]);
+      const sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
+      const workspace = new TerminalWorkspace(WorkspaceStore.at(config.stateDir), sandbox, approve);
+      try {
+        process.exitCode = await runSession({ request: { ...request, authorization, mode }, maxPromptChars: config.policy.limits.maxPromptChars,
+          input: state => ui ? ui.prompt('>', state.cwd ?? resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted', idle: teachat?.composerIdle() }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
+          run: execute, once, approve, log: message => presentation.log(message), onEvent: dependencies.onEvent, extension: teachat, workspace });
+      } finally { await workspace.close().catch(() => undefined); await sandbox.close().catch(() => undefined); }
       await teachat?.close(controller.signal);
     } else {
       const result = await execute(request);

@@ -4,7 +4,9 @@ import type { HostDependencies, HostRequest, HostResult } from '../host.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
-import type { FileStore } from './files.js';
+import type { ConversationWorkspace } from '../agents/workspace.js';
+import type { WorkspaceSandbox } from '../workspace/sandbox.js';
+import type { WorkspaceStore } from '../workspace/store.js';
 import type { MessagePayload } from './play/render.js';
 import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
 import { chunk, StatusCard, throttle, type CardReply } from './render.js';
@@ -69,8 +71,10 @@ export interface ConversationOptions {
    * through an interaction instead. `conversation` manages them, by default this conversation's key.
    */
   play?: { runtime: PlayRuntime; channelId?: string; post?: StartOptions['post']; conversation?: string };
-  /** Attachments and files teapilot makes, kept per conversation under the same key as its apps. */
-  files?: FileStore;
+  /** Each conversation's workspace: attachments and files teapilot makes, kept under the same key as its apps. */
+  files?: WorkspaceStore;
+  /** Runs commands in those workspaces. */
+  sandbox?: WorkspaceSandbox;
   /** How long a turn's status card waits for routing to say it is not conversational; 4 seconds by default. */
   cardDelayMs?: number;
   /** The pause before each line of a conversational reply after the first; 0.5–2 seconds by default. */
@@ -181,11 +185,12 @@ export class Conversation {
     const admin = access && this.speaker ? access.adminFor(this.speaker) : undefined;
     // With roles in force, a turn without a known sender holds nothing.
     base.authorization?.setCaller(access ? this.speaker ? access.callerFor(this.speaker) : () => ({ permissions: [] }) : undefined);
-    const { play, files, transport } = this.options;
+    const { play, files, sandbox, transport } = this.options;
     const conversation = play?.conversation ?? this.options.key;
-    const request: HostRequest = { ...base, access: admin,
-      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined,
-        files: files && { store: files, conversation, send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) } } };
+    const workspace: ConversationWorkspace | undefined = files && { store: files, conversation, sandbox, delivery: 'post',
+      send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) };
+    const request: HostRequest = { ...base, access: admin, workspace,
+      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined, files: workspace } };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
     const answerOnly = this.answerOnly;

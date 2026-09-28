@@ -77,15 +77,3 @@ export async function renderPicture(data: Buffer, spec: PictureSpec): Promise<Bu
 export async function encode(canvas: import('@napi-rs/canvas').Canvas, format: ImageFormat, quality?: number): Promise<Buffer> {
   return format === 'png' ? canvas.encode('png') : canvas.encode(format, percent(quality, 90));
 }
-
-/** An image in another format or quality, such as a PNG as an 85% WebP. */
-export async function convertImage(data: Buffer, format: ImageFormat, quality?: number): Promise<Buffer> {
-  const { createCanvas, loadImage } = await canvasLibrary();
-  const image = await loadImage(data);
-  const canvas = createCanvas(image.width, image.height);
-  const context = canvas.getContext('2d');
-  // JPEG has no transparency; white reads better than black behind it.
-  if (format === 'jpeg') { context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height); }
-  context.drawImage(image, 0, 0);
-  return encode(canvas, format, quality);
-}

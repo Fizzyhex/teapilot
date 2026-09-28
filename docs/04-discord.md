@@ -64,7 +64,7 @@ All the [session commands](02-commands.md#interactive-use) work, except:
 
 Messages sent during a turn are queued as your next message. Long answers are split across messages.
 
-Files you attach to a message (up to 5, 10 MB each) stay with the conversation: teapilot can edit images, run an attached app, and send files back as attachments. Files on messages answered through the Reply menu are ignored.
+Files you attach to a message (up to 5, 10 MB each) stay in the conversation's workspace. There teapilot runs sandboxed commands (ffmpeg, ImageMagick, Python, Node) to convert or edit them, can run an attached app, and sends files back as attachments. Installing a package asks an operator first. `teapilot doctor` shows whether the sandbox is ready. Files on messages answered through the Reply menu are ignored.
 
 ## Interactive apps
 

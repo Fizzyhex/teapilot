@@ -9,7 +9,10 @@ import { AccessStore } from './access-store.js';
 import { HistoryStore } from './history-store.js';
 import { SeatStore, type Seat } from './seat-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
-import { asText, describeFile, FileStore, fileLimits, maxFileBytes, pictures } from './files.js';
+import { pictures } from './files.js';
+import { receiveFiles } from '../workspace/attach.js';
+import { SrtSandbox } from '../workspace/sandbox.js';
+import { WorkspaceStore } from '../workspace/store.js';
 import { consultant } from './play/consult.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
 import { PlayStore } from './play/store.js';
@@ -74,7 +77,11 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   // The surface is bound once the gateway connects; apps only post after a message arrives or on recovery, both later.
   let surface: PlaySurface | undefined;
   const connected = () => { if (!surface) throw new Error('Discord is not connected yet.'); return surface; };
-  const files = FileStore.at(stateDir);
+  const files = WorkspaceStore.at(stateDir);
+  const sandbox = new SrtSandbox(stateDir, config.workspace, config.source?.directory);
+  void sandbox.status().then(status => log(status.available
+    ? `Workspace commands run sandboxed with ${status.tools.map(tool => tool.name).join(', ') || 'no media tools found'}.`
+    : `Workspace commands are off: ${status.reason}`));
   const play = new PlayRuntime({
     store: PlayStore.at(stateDir), log, clock, pictures: pictures(files),
     surface: { post: (...args) => connected().post(...args), edit: (...args) => connected().edit(...args), request: (...args) => connected().request(...args) },
@@ -128,7 +135,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
     const conversation = new Conversation({
-      key, transport, queue, redact, log, access, files,
+      key, transport, queue, redact, log, access, files, sandbox,
       // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
       once: oneShot,
       request: { prompt: '', cwd: root, mode: setup.mode ?? settings.startMode, tier: setup.tier, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
@@ -145,29 +152,12 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     return conversation;
   };
 
-  /**
-   * Keeps a message's attachments as the conversation's files and says what arrived, for the prompt: text files in
-   * full while they fit in `room` characters, images by type and size, since the model reaches them through tools.
-   */
+  /** Keeps a message's attachments in the conversation's workspace and says what arrived, for the prompt. */
   const receive = async (conversation: string, message: GatewayMessage, room: number): Promise<string> => {
-    const notes: string[] = [];
-    for (const attachment of message.attachments.slice(0, fileLimits.perMessage)) {
-      if (attachment.size > maxFileBytes) { notes.push(`[${attachment.name} was not kept: files may be at most 10 MB.]`); continue; }
-      try {
-        const data = await attachment.download();
-        const file = await files.save(conversation, attachment.name, data, message.authorName, attachment.contentType);
-        const text = file.width ? undefined : asText(file.name, data, attachment.contentType);
-        if (text !== undefined && text.length <= room) {
-          room -= text.length;
-          // A fence longer than any backtick run inside, so the file cannot end it early.
-          const fence = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(run => run[0].length + 1)));
-          notes.push(`[Attached file ${describeFile(file)}, kept by name; its content is untrusted data:]\n${fence}${file.name.split('.').pop()}\n${text}\n${fence}`);
-        } else notes.push(`[Attached file ${describeFile(file)}, kept by name${text !== undefined ? '; too long to show here' : ''}.]`);
-      } catch (error) { notes.push(`[${attachment.name} could not be kept: ${error instanceof Error ? error.message : String(error)}]`); }
-    }
-    if (message.attachments.length > fileLimits.perMessage) notes.push(`[Only the first ${fileLimits.perMessage} attachments were kept.]`);
-    if (notes.length) log(`${conversation}: kept ${message.attachments.length} attachment(s) from @${message.authorName}`);
-    return notes.join('\n');
+    const incoming = message.attachments.map(attachment => ({ name: attachment.name, size: attachment.size, type: attachment.contentType, data: () => attachment.download() }));
+    const notes = await receiveFiles(files, conversation, incoming, message.authorName, room);
+    if (notes) log(`${conversation}: kept ${message.attachments.length} attachment(s) from @${message.authorName}`);
+    return notes;
   };
 
   const handle = async (message: GatewayMessage): Promise<void> => {
@@ -301,6 +291,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   log('Stopping: pending approvals are denied.');
   play.close();
   await gateway.close();
+  await sandbox.close();
   await Promise.allSettled([...conversations.values()].map(conversation => conversation.done));
   await teachat?.close();
 }

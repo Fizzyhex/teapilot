@@ -15,6 +15,8 @@ export async function fixture(): Promise<{ config: Config; cwd: string; cleanup:
   Object.assign(config.models.capable, { id: 'capable-test', enabled: true, reasoningEfforts: ['off', 'medium', 'xhigh'] });
   config.policy.limits.requestTimeoutMs = 5000;
   config.policy.limits.attemptTimeoutMs = 10000;
+  // Unit tests never start the real sandbox; tests/sandbox.integration.test.ts does.
+  config.workspace = { sandbox: 'off', allowedDomains: [], deniedDomains: [] };
   return { config, cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 }
 export type Handler = (body: any, request: IncomingMessage, response: ServerResponse) => void | Promise<void>;

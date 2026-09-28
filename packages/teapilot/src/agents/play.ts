@@ -3,7 +3,8 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { Type, type Message } from '@earendil-works/pi-ai';
 import type { User } from '@teapilot/discord-play';
 import type { Config } from '../config.js';
-import { asText, type ConversationFiles } from '../discord/files.js';
+import { asText } from '../workspace/store.js';
+import type { ConversationWorkspace } from './workspace.js';
 import type { Approve, ExecutionPolicy } from '../execution/policy.js';
 import { PlayError } from '../discord/play/render.js';
 import { hashFile, type PlayRuntime, type Source, type StartOptions, type TestAction } from '../discord/play/runtime.js';
@@ -17,8 +18,8 @@ export interface PlayContext {
   post?: StartOptions['post'];
   conversation: string;
   owner?: User;
-  /** The conversation's files: attachments and what teapilot made, for file tools, play_start({ file }) and picture(). */
-  files?: ConversationFiles;
+  /** The conversation's workspace: attachments and what teapilot made, for play_start({ file }) and picture(). */
+  files?: ConversationWorkspace;
 }
 
 /** Where the play tools find code the model wrote in its reply; the runner builds it from the current request. */
@@ -28,8 +29,8 @@ export interface Drafts {
   block?(): { tag: string; body: string } | undefined;
   /** Code the tools took, so it can be left out of the answer people see. */
   used: Set<string>;
-  /** Set when a tool found no code, so the runner can ask for it with tools paused: an app's, or a file's content. */
-  missing?: 'app' | 'file';
+  /** Set when a tool found no code, so the runner can ask for it with tools paused: an app's, a file's content, or a script to run. */
+  missing?: 'app' | 'file' | 'script';
 }
 
 const fence = /```([\w-]*)[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;

@@ -249,7 +249,30 @@ export async function doctor(config: Config, cwd: string, options: ActivityUI & 
       healthy &&= result.ask && (!model.toolCalling || result.coding);
     }
   }
+  await during(options, 'Checking workspace sandbox...', () => workspaceStatus(config, options.consent, log));
   log(`Budgets: $${config.policy.budget.requestUsd}/request; $${config.policy.budget.dailyUsd}/UTC day`);
   if (!options.live) log('Run teapilot doctor --live to verify streamed inference and coding.');
   return healthy && available;
+}
+
+/** Workspace commands are optional: this reports them, and on Windows offers the sandbox's one-time install. */
+async function workspaceStatus(config: Config, consent: (message: string) => Promise<boolean>, log: (text: string) => void): Promise<void> {
+  const { SrtSandbox, installWindowsSandbox } = await import('./workspace/sandbox.js');
+  let sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
+  let status = await sandbox.status();
+  if (!status.available && process.platform === 'win32' && /not set up/.test(status.reason ?? '')
+    && await consent('Set up the Windows sandbox for workspace commands? It adds a local srt-sandbox account and firewall rules for it, after one administrator prompt.')) {
+    const installed = await installWindowsSandbox();
+    log(installed ? 'Workspace sandbox: installed.' : 'Workspace sandbox: install cancelled; nothing changed.');
+    await sandbox.close();
+    sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
+    status = await sandbox.status();
+  }
+  await sandbox.close();
+  if (!status.available) { log(`Workspace commands: OFF (${status.reason})`); return; }
+  log(`Workspace commands: sandboxed ${status.shell}; ${status.tools.length ? status.tools.map(tool => `${tool.name} ${tool.version}`).join(', ') : 'no media tools found'}`);
+  const missing = ['ffmpeg', 'imagemagick', 'python', 'node'].filter(name => !status.tools.some(tool => tool.kind === name));
+  if (missing.length) log(`Workspace tools not found inside the sandbox: ${missing.join(', ')}. ${process.platform === 'win32'
+    ? 'Install them for all users (for example under Program Files); per-user installs are invisible to the sandbox account.'
+    : `Install them with your package manager, for example: sudo apt install ${missing.map(name => ({ imagemagick: 'imagemagick', python: 'python3', node: 'nodejs', ffmpeg: 'ffmpeg' })[name]).join(' ')}.`}`);
 }

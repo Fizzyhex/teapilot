@@ -6,6 +6,7 @@ import type { Message } from '@earendil-works/pi-ai';
 import { defaultPolicy, JevRouter } from 'jevrouter';
 import type { AccessAdmin } from './agents/access.js';
 import type { PlayContext } from './agents/play.js';
+import type { ConversationWorkspace } from './agents/workspace.js';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type TierPreference, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
@@ -22,7 +23,7 @@ import { markWork } from './teachat/busy.js';
 import { directTier, modelFor, profileFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 
-export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
@@ -300,7 +301,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
       previous = await runAttempt({
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
-        mode: request.mode, conversational: request.conversational, casual, authorization: request.authorization, access: request.access, play: request.play,
+        mode: request.mode, conversational: request.conversational, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {
