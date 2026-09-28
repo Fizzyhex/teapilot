@@ -3,7 +3,7 @@ import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
 import { Type, type Message } from '@earendil-works/pi-ai';
-import { estimateValueTokens } from '../inference/context.js';
+import { calibratedTokens, estimateValueTokens } from '../inference/context.js';
 import type { Config, Tier, Workload } from '../config.js';
 import { modelFor, effectiveProfile } from '../routing/execution.js';
 import { modeFor, withPrerequisites, type Mode, type Permission } from '../execution/grants.js';
@@ -17,7 +17,8 @@ import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
 import { casualPrompt } from './casual.js';
 import { coder } from './coder.js';
-import { fitHistory, supersedePlayCalls, turnSteps, type HistoryFit } from './history.js';
+import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, shouldCompact, summarise, summaryMessage, turnMark, type Compaction } from './compaction.js';
+import { fitHistory, supersedePlayCalls, turnForms, turnSteps, type HistoryFit } from './history.js';
 import { latestBlock, latestCode, pastedEmoji, play, withoutCode, type Drafts, type PlayContext } from './play.js';
 import { workspace, type ConversationWorkspace } from './workspace.js';
 import { captureResult, fixtureTool, scratchPrompt, scratchTools, scratchTouched } from './scratchpad.js';
@@ -52,6 +53,8 @@ export interface AttemptInput {
   scratch?: string;
   /** This attempt's place in its request, from 0, for traces. */
   attempt?: number;
+  /** The request as the conversation will record its turn (without attachments or handoff), for finding that turn again after a compaction. */
+  requestText?: string;
 }
 export interface AttemptResult {
   success: boolean; text: string; reason?: EscalationReason;
@@ -77,6 +80,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   try { await scratch?.ready(); }
   catch (error) { scratch = undefined; await telemetry.event('scratch_unavailable', { error: error instanceof Error ? error.message : String(error) }); }
   const scratchFolder = scratch?.folder;
+  // The session's transcript, kept in the scratchpad; compaction summaries point at it (agents/compaction.ts).
+  let log: SessionLog | undefined;
+  const logFailed = (error: unknown) => void telemetry.event('session_log_unavailable', { error: error instanceof Error ? error.message : String(error) });
+  if (scratch) try { log = await SessionLog.open(scratch, input.cwd, text => telemetry.redact(text), logFailed); } catch (error) { logFailed(error); }
   const evidence = new Evidence(config.policy.escalation, input.unresolvedChecks, scratchFolder ? path => within(scratchFolder, resolve(input.cwd, path), true) : undefined);
   const active: Permission[] = input.activePermissions ?? (input.authorization ? ['inference'] :
     config.policy.permissions.filter(permission => permission === 'inference' || (permission.startsWith('repository.') && input.workload === 'coder') || (permission === 'web.search' && input.web)));
@@ -207,11 +214,72 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // calls and results still fit. The admission check at the provider remains the exact limit.
   const fixed = 2048 + estimateValueTokens([setup.systemPrompt, input.prompt]) + estimateValueTokens(setup.tools.map(({ name, description, parameters }) => ({ name, description, parameters })));
   // A benchmark can squeeze or compact earlier turns to force the compaction it measures (TEAPILOT_TEST_HISTORY_*).
-  const historyBudget = Math.floor((profile.contextTokens - profile.maxOutputTokens - fixed) / 2);
+  const historyBudget = Math.min(Math.floor((profile.contextTokens - profile.maxOutputTokens - fixed) / 2), config.test?.historyTokens ?? Infinity);
+  const settings = compactionSettings(profile, config.compaction?.enabled !== false && !input.casual);
+  // Summaries are their own model calls: charged and admitted like any other, but not counted as this attempt's turns.
+  const summarising = (tokensBefore: number, messages: { summarise: Message[]; turnPrefix?: Message[] }) => summarise({
+    ...messages, previous: summary, settings, tokensBefore, signal: input.signal, model: piModel(model, profile),
+    streamFn: guardedStream(config, tier, input.budget, telemetry, { turns: 0 }, { outputTokens: Math.floor(0.8 * settings.reserveTokens) }),
+  });
+  const compacted = async (trigger: 'history' | 'context', run: () => Promise<Compaction>, fields: Record<string, unknown>) => {
+    try {
+      const result = await run();
+      await telemetry.event('compaction', { trigger, attempt: input.attempt ?? 0, tokensBefore: result.tokensBefore, summaryChars: result.summary.length, transcript: Boolean(log), ...fields });
+      return result;
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      await telemetry.event('compaction_failed', { trigger, attempt: input.attempt ?? 0, error: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    }
+  };
+  // Earlier turns a compaction already covers are replayed as its summary. Turns that still do not fit are
+  // summarised into it rather than dropped, where the transcript keeps them; without one they drop as before.
+  let summary = log?.latest();
+  let turns = (input.history ?? []).slice(coveredTurns(input.history ?? [], summary?.details?.teapilot, telemetry.requestId));
   let fit = undefined as HistoryFit | undefined;
-  const history = fitHistory(input.history ?? [], Math.min(historyBudget, config.test?.historyTokens ?? Infinity), model, result => { fit = result; }, config.test?.compactHistory);
-  if (fit?.turns) await telemetry.event('history_fit', { attempt: input.attempt ?? 0, ...fit, ...(config.test?.historyTokens !== undefined || config.test?.compactHistory ? { forced: true } : {}) });
+  const fitted = () => {
+    const lead = summary ? [summaryMessage(summary, log?.path)] : [];
+    return [...lead, ...fitHistory(turns, historyBudget - (lead.length ? estimateValueTokens(lead) + 32 : 0), model, result => { fit = result; }, config.test?.compactHistory, log?.path)];
+  };
+  let history = fitted();
+  const dropped = fit ? fit.turns - fit.kept : 0;
+  if (dropped && log && settings.enabled) {
+    const covered = turns.slice(0, dropped);
+    const messages = covered.flatMap(turn => turnForms(turn, model)[1]);
+    const result = await compacted('history', async () => log!.compaction(
+      await summarising(estimateValueTokens(messages), { summarise: messages }),
+      { through: 'turns', turn: markTurn(covered.at(-1)!), request: telemetry.requestId }), { turns: dropped });
+    if (result) { summary = result; turns = turns.slice(dropped); history = fitted(); }
+  }
+  if (fit?.turns) await telemetry.event('history_fit', { attempt: input.attempt ?? 0, ...fit, ...(summary ? { summarised: true } : {}), ...(config.test?.historyTokens !== undefined || config.test?.compactHistory ? { forced: true } : {}) });
   const stream = guardedStream(config, tier, input.budget, telemetry, inference, playing ? { outputTokens: profile.maxOutputTokens } : undefined);
+  // The summary at the head of the context, and where in the agent's messages the newest compaction kept from.
+  let lead = summary ? history[0] : undefined, keptFrom = 0, compactionFailed = false;
+  /** What the next call would send, by the same estimate its admission check makes: only what reaches the model. */
+  const estimate = (context: { systemPrompt?: string; messages: unknown[]; tools?: Array<{ name: string; description?: string; parameters?: unknown }> }) =>
+    calibratedTokens(2048 + context.messages.length * 32 + estimateValueTokens([context.systemPrompt ?? '', context.messages.map(sent)])
+      + estimateValueTokens((context.tools ?? []).map(({ name, description, parameters }) => ({ name, description, parameters }))), inference.calibration);
+  /** Near the context limit, everything but the newest messages becomes pi's summary of them. */
+  const compactContext = async <T extends { systemPrompt?: string; messages: unknown[]; tools?: Array<{ name: string; description?: string; parameters?: unknown }> }>(context: T): Promise<T | undefined> => {
+    if (!settings.enabled || compactionFailed) return undefined;
+    const before = estimate(context);
+    if (!shouldCompact(before, profile.contextTokens, settings)) return undefined;
+    // System messages are prompt state (such as tool declarations), not conversation: they stay, as in pi.
+    const all = context.messages as Array<Message | { role: 'system' }>;
+    const system = all.filter(message => message.role === 'system');
+    const body = all.filter((message): message is Message => message.role !== 'system' && message !== lead);
+    const cut = cutMessages(body, settings.keepRecentTokens);
+    if (!cut) return undefined;
+    const marker = { through: 'request' as const, turn: turnMark(input.requestText ?? input.prompt), request: telemetry.requestId };
+    const result = await compacted('context', async () => {
+      const made = await summarising(before, { summarise: cut.summarise, turnPrefix: cut.turnPrefix });
+      return log ? log.compaction(made, marker, cut.kept[0]) : { summary: made.summary, tokensBefore: made.tokensBefore, details: { ...made.details!, teapilot: marker } };
+    }, { messages: cut.summarise.length + cut.turnPrefix.length, kept: cut.kept.length, split: cut.turnPrefix.length > 0 });
+    if (!result) { compactionFailed = true; return undefined; }
+    summary = result; lead = summaryMessage(result, log?.path);
+    keptFrom = Math.max(0, agent.state.messages.indexOf(cut.kept[0]! as (typeof agent.state.messages)[number]));
+    return { ...context, messages: [...system, lead, ...cut.kept] };
+  };
   // What each model call is sent, for checking afterwards what the model could and could not see (TEAPILOT_TRACE_DIR).
   let traced = 0;
   const trace = async (directory: string, context: unknown) => {
@@ -241,7 +309,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       // otherwise fills the window with versions already replaced.
       const room = profile.contextTokens - profile.maxOutputTokens;
       const messages = playing ? supersedePlayCalls(given.messages as Message[], estimateValueTokens(given.messages) > room / 2) : given.messages;
-      const context = messages === given.messages ? given : { ...given, messages: messages as typeof given.messages };
+      const superseded = messages === given.messages ? given : { ...given, messages: messages as typeof given.messages };
+      // Still near the limit after that, earlier context is compacted into a summary (agents/compaction.ts).
+      const context = await compactContext(superseded) ?? superseded;
       const pruned = context === given ? undefined : { context };
       if (claimNotice) {
         claimNotice = false;
@@ -340,7 +410,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const secrets = [input.config.router.apiKey ?? '', ...Object.values(input.config.secrets).map(value => value ?? '')];
   const redactor = new StreamRedactor(secrets);
   const reasoning = new StreamRedactor(secrets);
+  log?.mark({ request: telemetry.requestId, attempt: input.attempt ?? 0, tier, model: model.id });
   agent.subscribe(event => {
+    if (event.type === 'message_end' && ['user', 'assistant', 'toolResult'].includes(event.message.role)) log?.record(event.message as Message);
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_start') {
       input.onActivity?.({ kind: 'reasoning', label: 'Thinking...' });
     } else if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_delta') {
@@ -382,10 +454,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   } finally {
     clearTimeout(timer);
     input.signal?.removeEventListener('abort', cancel);
+    await log?.flush();
   }
   const last = messages().findLast(message => message.role === 'assistant');
   const text = last?.role === 'assistant' ? last.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '';
-  const turn = messages();
+  // After a compaction, later turns replay only what it kept, as pi does; the summary covers the rest.
+  const turn = messages().slice(Math.max(0, keptFrom - start));
   // A final reply without calls is the answer itself; everything before it is what the tools did.
   const steps = turnSteps(last?.role === 'assistant' && last === turn.at(-1) && !last.content.some(part => part.type === 'toolCall') ? turn.slice(0, -1) : turn);
   const shown = drafts.used.size ? withoutCode(text, drafts.used) : text;
@@ -428,6 +502,14 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
 }
 
 /** Whether an answer says something was changed, such as "done", "swapped" or "the snake now has a face". */
+/** A message as the model receives it, without the usage, timestamps and provider details pi keeps alongside. */
+function sent(message: unknown): unknown {
+  const { role, content } = message as { role?: string; content?: unknown };
+  if (!Array.isArray(content)) return { role, content };
+  return { role, content: content.map((part: { type?: string; text?: string; thinking?: string; name?: string; arguments?: unknown }) =>
+    part.type === 'text' ? part.text : part.type === 'thinking' ? part.thinking : part.type === 'toolCall' ? { name: part.name, arguments: part.arguments } : part.type) };
+}
+
 export function claimsChange(text: string): boolean {
   return /\b(done|updated|changed|swapped|replaced|added|removed|fixed|switched|renamed|now (?:is|are|has|have|shows?|uses?|looks?))\b/i.test(text);
 }

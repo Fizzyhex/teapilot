@@ -96,6 +96,15 @@ export class Scratch {
     return { path, lines, bytes, complete };
   }
 
+  /** Where the session's transcript is kept (agents/compaction.ts); like the other kinds, never a link in its place. */
+  async sessions(): Promise<string> {
+    await this.ready();
+    const directory = join(this.folder, 'sessions');
+    await mkdir(directory, { recursive: true });
+    if ((await lstat(directory)).isSymbolicLink()) throw new Error("The scratchpad's sessions folder is a link, not a folder");
+    return directory;
+  }
+
   /** A file's content streamed from disk, for keeping a copy another tool already wrote. */
   static stream(path: string): AsyncIterable<Buffer> { return createReadStream(path); }
 

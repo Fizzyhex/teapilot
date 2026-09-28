@@ -316,7 +316,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           }
           return activate(required, reason, signal);
         } : undefined,
-        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web, scratch: request.scratch, attempt: attempts - 1,
+        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web, scratch: request.scratch, attempt: attempts - 1, requestText: currentPrompt,
         // Each attempt fits earlier turns, with their steps, to its own model's context.
         history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, onReasoning: dependencies.onReasoning, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {

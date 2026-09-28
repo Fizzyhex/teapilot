@@ -89,20 +89,23 @@ export function supersedePlayCalls(messages: Message[], pressure: boolean): Mess
   return changed ? result as Message[] : messages;
 }
 
+/** A turn as messages: in full, with its steps compacted, and as its text alone. */
+export function turnForms(turn: ConversationTurn, model: Model): [Message[], Message[], Message[]] {
+  const user: Message = { role: 'user', content: turn.user, timestamp: 0 };
+  const assistant: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: turn.assistant }], api: 'openai-completions', provider: model.provider, model: model.id, timestamp: 0, usage: emptyUsage(), stopReason: 'stop' };
+  const steps = turn.steps ?? [];
+  return [[user, ...steps, assistant], [user, ...compact(steps), assistant], [user, assistant]];
+}
+
 /**
  * Replays earlier turns within `budget` tokens. The newest turn keeps its steps in full (compacted too with
  * `compactAll`); older ones keep them compacted. When that is too much, the oldest turns fall back to their
  * text, then drop out, and the newest is cut down last. Turns that drop out are counted where the rest begin,
- * so the model knows its memory of the conversation has a gap.
+ * so the model knows its memory of the conversation has a gap, and where its `transcript` is when there is one.
  */
 export interface HistoryFit { turns: number; kept: number; compacted: number; textOnly: number; budget: number; fullTokens: number; tokens: number }
-export function fitHistory(turns: ConversationTurn[], budget: number, model: Model, report?: (fit: HistoryFit) => void, compactAll = false): Message[] {
-  const forms = turns.map(turn => {
-    const user: Message = { role: 'user', content: turn.user, timestamp: 0 };
-    const assistant: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: turn.assistant }], api: 'openai-completions', provider: model.provider, model: model.id, timestamp: 0, usage: emptyUsage(), stopReason: 'stop' };
-    const steps = turn.steps ?? [];
-    return [[user, ...steps, assistant], [user, ...compact(steps), assistant], [user, assistant]].map(messages => ({ messages, tokens: estimateValueTokens(messages) + messages.length * 32 }));
-  });
+export function fitHistory(turns: ConversationTurn[], budget: number, model: Model, report?: (fit: HistoryFit) => void, compactAll = false, transcript?: string): Message[] {
+  const forms = turns.map(turn => turnForms(turn, model).map(messages => ({ messages, tokens: estimateValueTokens(messages) + messages.length * 32 })));
   const levels: number[] = forms.map((_, index) => index === forms.length - 1 && !compactAll ? 0 : 1);
   let first = 0;
   const total = () => forms.slice(first).reduce((sum, form, index) => sum + form[levels[first + index]!]!.tokens, 0);
@@ -118,7 +121,7 @@ export function fitHistory(turns: ConversationTurn[], budget: number, model: Mod
   const messages = forms.slice(first).flatMap((form, index) => form[levels[first + index]!]!.messages);
   const opening = messages[0];
   if (!first || opening?.role !== 'user') return messages;
-  const gap = `[${first} earlier turn${first === 1 ? ' of this conversation is' : 's of this conversation are'} not shown here.]`;
+  const gap = `[${first} earlier turn${first === 1 ? ' of this conversation is' : 's of this conversation are'} not shown here${transcript ? `; the full transcript is ${transcript}` : ''}.]`;
   return [{ ...opening, content: typeof opening.content === 'string' ? `${gap}
 ${opening.content}` : [{ type: 'text', text: gap }, ...opening.content] }, ...messages.slice(1)];
 }
