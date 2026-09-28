@@ -1,4 +1,5 @@
 # ScratchBench - Import audit board
+{tags: "audit", "context-window" }
 
 Version: 1.0 — 28 September 2026  
 Status: executable test specification; the fixture, hooks and instrumentation exist (see [Running in this repository](#running-in-this-repository)). No benchmark has been run and no results are claimed here.  

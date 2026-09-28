@@ -46,6 +46,7 @@ If you're specifically asked to attempt challenge cases, do the cases at one of 
 - `scratchpad benchmark` (ScratchBench) -> `./scratchpad-challenge.md`
 
 ## Case 1: Snake Game
+{tags: "discord.play", "logic" }
 
 "i'm granting you discord.play. make a game of snake. 5x5 board. use :white_large_square: for the background, :blue_square: for the snake. the food can be an 🍎"
 
@@ -60,6 +61,7 @@ If you're specifically asked to attempt challenge cases, do the cases at one of 
 ---
 
 ## Case 2: Multiplayer Scroller
+{tags: "discord.play", "multi-user" }
 
 "
 hey, use discord.play. create a basic vertically scrolling platformer for us
@@ -78,6 +80,7 @@ allow players to walk left/right on a flat grass plane. if a player walks into a
 ---
 
 ## Case 3: Recipe Book
+{tags: "discord.play", "consult" }
 
 "
 hey, i want a minimalistic recipe book with discord.play.

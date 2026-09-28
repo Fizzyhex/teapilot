@@ -1,6 +1,7 @@
 these are challenges for the `discord-play-fine-tuner` `./SKILL.md` - only test these challenges if asked.
 
 ## Case 1U: Kessel Sebacc
+{tags: "discord.play", "hard-thinking" }
 
 Research `Kessel Sebacc`'s rules before attempting this task. 
 
@@ -12,6 +13,7 @@ Ask teapilot to create a full implementation of `kessel sebacc`.
    1. you may ask teapilot to do light corrections. deduct points for clear logical failures
 
 ## Case 2U: library abyss
+{tags: "discord.play", "hard-thinking", "creativity" }
 
 1. start with initial prompt:
 
@@ -29,6 +31,7 @@ the player 🟡 can walk around forever.
 expectations - game is as described. controls move the player around.
 
 ## Case 3U: freestyle
+{tags: "freestyle" }
 
 This case has no set design.
 
