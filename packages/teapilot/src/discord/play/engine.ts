@@ -33,7 +33,12 @@ globalThis.__play = ${awaitResult ? 'async ' : ''}(method, input, discord) => {
   let seed = data.seed >>> 0;
   const ctx = { now: data.now, invoker: data.invoker, participants: data.participants, emojis: data.emojis,
     random() { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; },
-    emoji(name) { return Object.prototype.hasOwnProperty.call(data.emojis, name) ? data.emojis[name] : ':' + name + ':'; } };
+    emoji(name) {
+      const text = String(name);
+      if (/^<a?:\\w{2,32}:\\d{17,20}>$/.test(text)) return text;
+      const key = text.replace(/^:|:$/g, '');
+      return Object.prototype.hasOwnProperty.call(data.emojis, key) ? data.emojis[key] : ':' + key + ':';
+    } };
   Math.random = ctx.random;
   if (discord) ctx.discord = discord;
   let value;

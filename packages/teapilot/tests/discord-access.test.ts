@@ -120,11 +120,15 @@ it('narrows a shared session to whoever is speaking and refuses repository acces
   expect(grants.allows('inference')).toBe(true);
 });
 
-it('lets a user activate web search without a click but asks for temporarily granted repository access', async () => {
+it('lets users and operators activate web search without a click but asks for temporarily granted repository access', async () => {
   const { f, access } = await store();
   access.addUser(bob, op);
-  const grants = await SessionGrants.create(f.cwd, f.config, 'ask');
   const approve = vi.fn<Approve>(async () => true);
+  const operator = await SessionGrants.create(f.cwd, f.config, 'ask');
+  operator.setCaller(access.callerFor(op));
+  expect(await operator.request(['web.search'], 'test', approve)).toBe(true);
+  expect(await operator.request(['repository.read'], 'test', vi.fn<Approve>(async () => true))).toBe(true);
+  const grants = await SessionGrants.create(f.cwd, f.config, 'ask');
   grants.setCaller(access.callerFor(bob));
   expect(await grants.request(['web.search'], 'test', approve)).toBe(true);
   expect(approve).not.toHaveBeenCalled();

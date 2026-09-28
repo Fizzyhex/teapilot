@@ -10,7 +10,7 @@ export default app<State>({
   participants: 'invoker',
   init: (): State => ({ count: 0 }),
   update: (state: State, action) => action.kind === 'button' ? step({ count: state.count + 1 }, after(1000, 'tick')) : state,
-  view: (state: State, ctx) => ({ content: ctx.emoji('tea') + ' ' + state.count + ' ' + ctx.emoji('missing'), rows: [row(button('add', 'Add'))] }),
+  view: (state: State, ctx) => ({ content: ctx.emoji('tea') + ' ' + state.count + ' ' + ctx.emoji('missing') + ' ' + ctx.emoji(':tea:'), rows: [row(button('add', 'Add'))] }),
 });`;
 
 it('runs a TypeScript app against the SDK with JSON in and out', async () => {
@@ -22,7 +22,7 @@ it('runs a TypeScript app against the SDK with JSON in and out', async () => {
     const next = await engine.call('update', { state: { count: 2 }, action: { kind: 'button', id: 'add', user: { id: '1' } }, ctx });
     expect(next.value).toEqual({ type: 'step', state: { count: 3 }, effects: [{ type: 'after', id: 'tick', ms: 1000 }] });
     const view = await engine.call('view', { state: { count: 3 }, ctx });
-    expect(view.value).toMatchObject({ content: '<:tea:123456789012345678> 3 :missing:' });
+    expect(view.value).toMatchObject({ content: '<:tea:123456789012345678> 3 :missing: <:tea:123456789012345678>' });
   } finally { engine.dispose(); }
 });
 

@@ -1,14 +1,15 @@
 // The long-lived half of scripts/agent-discord.mjs: runs teapilot's Discord service against the
 // simulated Discord in world.ts and answers the client's commands over a local socket.
-import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, extname, join } from 'node:path';
 import { configDirectory, loadConfig } from '../../src/config.js';
 import { AccessStore } from '../../src/discord/access-store.js';
 import { serveDiscord } from '../../src/discord/index.js';
 import { describe } from '../../src/discord/play/render.js';
 import { PlayStore } from '../../src/discord/play/store.js';
+import { toolsFolder } from '../../src/workspace/toolchain.js';
 import type { DiscordSettings } from '../../src/discord/settings.js';
 import { SkippableClock } from './clock.js';
 import { channelId, people, SimError, World } from './world.js';
@@ -28,7 +29,13 @@ const fail = (error: unknown) => { appendFileSync(spec.log, `${error instanceof 
 process.on('uncaughtException', fail);
 process.on('unhandledRejection', fail);
 
-const world = new World();
+const world = new World(join(spec.directory, 'files'));
+const types: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.js': 'text/javascript', '.ts': 'text/plain', '.json': 'application/json', '.txt': 'text/plain', '.md': 'text/markdown' };
+/** Files a person attaches, read from disk now as Discord's client would upload them. */
+const uploads = (paths: string[]) => paths.map(path => {
+  try { return { name: basename(path), data: readFileSync(path), contentType: types[extname(path).toLowerCase()] }; }
+  catch { throw new SimError(`Cannot read ${path} to attach it.`); }
+});
 const clock = new SkippableClock(spec.frozen);
 const notes: string[] = [];
 const config = await loadConfig(await configDirectory(spec.configDir, homedir()), { ...process.env });
@@ -39,6 +46,8 @@ if (!config.policy.permissions.includes('discord.play')) {
 const settings: DiscordSettings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelIds: [channelId], root: spec.root, startMode: spec.mode };
 AccessStore.at(spec.state, settings.allowedUserIds, config.policy.permissions).addUser(people.user.id, people.op.id, { name: people.user.name });
 const store = new PlayStore(join(spec.state, 'discord-play'));
+// Workspace commands use the tools `teapilot doctor` installed for the profile (pandoc, Pillow); a copy, since they are read-only.
+if (existsSync(toolsFolder(config.stateDir))) cpSync(toolsFolder(config.stateDir), toolsFolder(spec.state), { recursive: true });
 
 let fresh = '';
 const waiters = new Set<() => void>();
@@ -115,7 +124,12 @@ async function handle(body: Body): Promise<Record<string, unknown>> {
   const input = () => { fresh = ''; };
   switch (body.op) {
     case 'hello': return { text: [`Simulated Discord ${running() ? 'is running' : 'did not start'}.`, ...notes].join('\n') };
-    case 'say': { input(); const message = world.say(as, String(body.text), body.in as string | undefined); return { text: `${message.id} sent by ${as} in #${message.channel.name}.` }; }
+    case 'say': {
+      const files = uploads((body.attach as string[] | undefined) ?? []);
+      input();
+      const message = world.say(as, String(body.text ?? ''), body.in as string | undefined, files);
+      return { text: `${message.id} sent by ${as} in #${message.channel.name}${files.length ? ` with ${files.map(file => file.name).join(', ')}` : ''}.` };
+    }
     case 'click': input(); return { text: await world.click(as, String(body.message), String(body.control)) };
     case 'select': input(); return { text: await world.select(as, String(body.message), String(body.control), body.values as string[]) };
     case 'submit': input(); return { text: await world.submit(as, body.fields as Record<string, string>) };

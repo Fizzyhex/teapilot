@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as dotenv } from 'dotenv';
 import { readTeachatSettings, type TeachatSettings } from './teachat/settings.js';
+import { readerModes, type ReaderSettings } from './web/settings.js';
+import type { WorkspaceSettings } from './workspace/sandbox.js';
 import { z } from 'zod';
 
 const money = z.number().finite().nonnegative();
@@ -66,7 +68,11 @@ export interface Config {
   routingMode?: 'hosted' | 'direct'; models: ModelSet; policy: Policy; stateDir: string;
   router: { provider: 'typesafe' | 'openrouter'; model?: string; apiKey?: string; endpoint?: string; maxCallUsd: number; usdPerMillionTokens?: number };
   searchUrl?: string;
+  /** How web.search sessions read pages: WEB_READER and AGENT_BROWSER_BIN. */
+  webReader?: ReaderSettings;
   teachat?: TeachatSettings;
+  /** Sandboxed workspace commands: WORKSPACE_SANDBOX, WORKSPACE_ALLOWED_DOMAINS and WORKSPACE_DENIED_DOMAINS. */
+  workspace?: WorkspaceSettings;
   secrets: Record<PhysicalModel, string | undefined>;
 }
 
@@ -114,7 +120,7 @@ function applyOverride(model: ModelConfig, env: NodeJS.ProcessEnv, prefix: strin
 
 export async function loadConfig(root?: string, env = process.env): Promise<Config> {
   const explicit = Boolean(root); root = await configDirectory(root); dotenv({ path: resolve(root, '.env'), processEnv: env, quiet: true });
-  const overrides = Object.keys(env).filter(key => /^(TEAPILOT_|JEV_|LOCAL_|ECONOMY_|STRONG_|FAST_|CAPABLE_|TEACHAT_|SEARCH_BASE_URL$|REQUEST_BUDGET_USD$|DAILY_BUDGET_USD$|TYPESAFE_API_KEY$|OPENROUTER_API_KEY$)/.test(key) && env[key] !== undefined).sort();
+  const overrides = Object.keys(env).filter(key => /^(TEAPILOT_|JEV_|LOCAL_|ECONOMY_|STRONG_|FAST_|CAPABLE_|TEACHAT_|SEARCH_BASE_URL$|WEB_READER$|AGENT_BROWSER_BIN$|WORKSPACE_|REQUEST_BUDGET_USD$|DAILY_BUDGET_USD$|TYPESAFE_API_KEY$|OPENROUTER_API_KEY$)/.test(key) && env[key] !== undefined).sort();
   const select = async (override: string | undefined, name: string): Promise<string> => {
     if (override) return resolve(root!, override);
     for (const path of [`${name}.json`, `config/${name}.json`, `config/${name}.example.json`]) if (await exists(resolve(root!, path))) return resolve(root!, path);
@@ -138,6 +144,10 @@ export async function loadConfig(root?: string, env = process.env): Promise<Conf
   if (env.DAILY_BUDGET_USD) policy.budget.dailyUsd = money.parse(Number(env.DAILY_BUDGET_USD));
   const provider = z.enum(['typesafe', 'openrouter']).parse(env.JEV_PROVIDER || 'typesafe');
   const secrets = Object.fromEntries(physicalModels.map(key => [key, env[models[key].apiKeyEnv] || undefined])) as Config['secrets'];
-  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, teachat: readTeachatSettings(env, root), secrets };
+  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, webReader: { mode: z.enum(readerModes).parse(env.WEB_READER || 'auto'), agentBrowserBin: env.AGENT_BROWSER_BIN || undefined }, teachat: readTeachatSettings(env, root), workspace: readWorkspaceSettings(env), secrets };
+}
+const hosts = (value: string | undefined) => (value ?? '').split(',').map(host => host.trim().toLowerCase()).filter(Boolean);
+function readWorkspaceSettings(env: NodeJS.ProcessEnv): WorkspaceSettings {
+  return { sandbox: z.enum(['auto', 'off']).parse(env.WORKSPACE_SANDBOX || 'auto'), allowedDomains: hosts(env.WORKSPACE_ALLOWED_DOMAINS), deniedDomains: hosts(env.WORKSPACE_DENIED_DOMAINS) };
 }
 export { modelSchema };

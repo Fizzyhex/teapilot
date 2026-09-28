@@ -7,6 +7,9 @@ import { endpointDriver, managedRuntimes, type ProvisionedModel, type RuntimeDri
 import { configureOllamaModel, hardware, isTeapilotAlias, ollamaAlias, ollamaJSON, presets, provisionedOllama, roleChoices, roleLabel, type OllamaModel, type PreparedModel } from '../runtime/ollama.js';
 import { Navigation, runTabs, type ScreenTab, type SetupScreen } from './screen.js';
 import { configureSearch } from './search.js';
+import { configureReader } from './reader.js';
+import { configureWorkspaceStep } from './workspace.js';
+import type { WorkspaceIO } from '../workspace/configure.js';
 import type { SetupUI } from './terminal.js';
 
 export const setupTabs: ScreenTab[] = [
@@ -17,10 +20,11 @@ export const setupTabs: ScreenTab[] = [
   { id: 'routing', label: 'Routing' },
   { id: 'checks', label: 'Run Checks', short: 'Checks' },
   { id: 'search', label: 'Configure Search', short: 'Search' },
+  { id: 'workspace', label: 'Workspace Extras', short: 'Workspace' },
   { id: 'save', label: 'Save?' },
 ];
-type TabId = 'source' | 'install' | 'limits' | 'routing' | 'checks' | 'search' | 'save';
-const order: TabId[] = ['source', 'install', 'limits', 'routing', 'checks', 'search', 'save'];
+type TabId = 'source' | 'install' | 'limits' | 'routing' | 'checks' | 'search' | 'workspace' | 'save';
+const order: TabId[] = ['source', 'install', 'limits', 'routing', 'checks', 'search', 'workspace', 'save'];
 
 export interface Outcome { ready: boolean; coding: boolean }
 /** A tab returns the tab to open next (the following one when undefined), or ends setup. */
@@ -34,6 +38,7 @@ interface Session {
   verbose?: boolean;
   credentials?: CredentialStorage;
   runtimes: Runtimes;
+  workspace?: WorkspaceIO;
   original: { models: Config['models']; env: Record<string, string>; routing: Config['routingMode']; provider: string; budget: Config['policy']['budget']; search?: string };
   /** keep, endpoint, or the ID of the managed runtime chosen. */
   source: string;
@@ -47,6 +52,7 @@ interface Session {
   notes: string[];
   checks?: { fingerprint: string; reports: Map<PhysicalModel, LiveReport | undefined>; routingReady: boolean };
   searchStatus: string;
+  workspaceStatus?: string;
 }
 
 /**
@@ -54,7 +60,7 @@ interface Session {
  * when the tab finishes, so leaving a tab part-way never undoes earlier work.
  * Nothing is written to disk until Save.
  */
-export async function tabbedSetup(draft: Draft, screen: SetupScreen, ui: SetupUI, root: AbortSignal, options: { verbose?: boolean; credentials?: CredentialStorage; runtimes?: Runtimes }): Promise<Outcome | undefined> {
+export async function tabbedSetup(draft: Draft, screen: SetupScreen, ui: SetupUI, root: AbortSignal, options: { verbose?: boolean; credentials?: CredentialStorage; runtimes?: Runtimes; workspace?: WorkspaceIO }): Promise<Outcome | undefined> {
   const quit = new AbortController();
   const signal = AbortSignal.any([root, quit.signal]);
   const { config, env } = draft;
@@ -85,7 +91,7 @@ export async function tabbedSetup(draft: Draft, screen: SetupScreen, ui: SetupUI
   return outcome;
 }
 
-const tabs: Record<TabId, (session: Session, signal: AbortSignal) => Promise<TabResult>> = { source, install, limits, routing, checks, search, save };
+const tabs: Record<TabId, (session: Session, signal: AbortSignal) => Promise<TabResult>> = { source, install, limits, routing, checks, search, workspace, save };
 
 /** The models the configuration had before setup started, if they run on Ollama. */
 const currentlyOllama = (s: Session) => s.draft.hasConfiguration && physicalModels.some(role => s.original.models[role].enabled && s.original.models[role].provider === 'ollama');
@@ -378,12 +384,23 @@ async function checks(s: Session, signal: AbortSignal): Promise<TabResult> {
 
 async function search(s: Session, signal: AbortSignal): Promise<TabResult> {
   const config = cloneConfig(s.draft.config), env = { ...s.draft.env };
-  const status = await configureSearch(config, env, s.draft.directory, s.screen, signal);
+  let status = await configureSearch(config, env, s.draft.directory, s.screen, signal);
+  if (config.searchUrl && config.policy.permissions.includes('web.search')) status += ` · ${await configureReader(config, env, s.screen, signal)}`;
   s.searchStatus = status;
   s.draft.config.searchUrl = config.searchUrl;
+  s.draft.config.webReader = config.webReader;
   s.draft.config.policy.permissions = config.policy.permissions;
   s.draft.env = env;
-  s.screen.mark('search', config.searchUrl !== s.original.search ? 'changed' : undefined);
+  s.screen.mark('search', config.searchUrl !== s.original.search || env.WEB_READER !== s.original.env.WEB_READER || env.AGENT_BROWSER_BIN !== s.original.env.AGENT_BROWSER_BIN ? 'changed' : undefined);
+  return undefined;
+}
+
+async function workspace(s: Session, signal: AbortSignal): Promise<TabResult> {
+  const config = cloneConfig(s.draft.config), env = { ...s.draft.env };
+  s.workspaceStatus = await configureWorkspaceStep(config, env, s.screen, signal, s.workspace);
+  s.draft.config.workspace = config.workspace;
+  s.draft.env = env;
+  s.screen.mark('workspace', env.WORKSPACE_SANDBOX !== s.original.env.WORKSPACE_SANDBOX ? 'changed' : undefined);
   return undefined;
 }
 
@@ -407,11 +424,11 @@ async function save(s: Session, signal: AbortSignal): Promise<TabResult> {
   // Apply results before the review, so it shows the limits each verified tier will run with.
   if (c.changed) applyReports(c.config, c.roles, fresh?.reports ?? new Map());
   const lines = summaryLines(draft, c.config, c.roles, {
-    displayModel: c.displayModel, routingReady, searchStatus: s.searchStatus,
+    displayModel: c.displayModel, routingReady, searchStatus: s.searchStatus, workspaceStatus: s.workspaceStatus,
     checks: fresh ? checksLine(report) : c.changed ? 'not run · coding stays disabled until checks pass' : 'not run · current models kept',
   });
   for (const line of lines) screen.log(line);
-  const changed = setupTabs.filter(tab => ['source', 'install', 'limits', 'routing', 'search'].includes(tab.id) && screen.markOf(tab.id) === 'changed').map(tab => tab.label);
+  const changed = setupTabs.filter(tab => ['source', 'install', 'limits', 'routing', 'search', 'workspace'].includes(tab.id) && screen.markOf(tab.id) === 'changed').map(tab => tab.label);
   screen.log(changed.length ? `Changed: ${changed.join(', ')}.` : 'Nothing has changed yet. Use ←/→ to revisit any tab.');
   const choice = await screen.choose(draft.hasConfiguration ? 'Save these settings? The previous configuration is kept for rollback.' : 'Save these settings?', ['Save settings', 'Leave without saving'], 0);
   if (choice === 1) return await leave(s);

@@ -42,10 +42,12 @@
     "pack": "npm run build && node scripts/pack.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.77",
     "@earendil-works/pi-agent-core": "0.87.0",
     "@earendil-works/pi-ai": "0.87.0",
     "@earendil-works/pi-coding-agent": "0.87.0",
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "@napi-rs/canvas": "1.0.9",
     "@teapilot/discord-play": "0.1.0",
     "discord.js": "14.27.0",
     "dotenv": "17.3.1",

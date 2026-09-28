@@ -93,3 +93,19 @@ it('clears activity for approvals and cancellation and honours no-motion and JSO
   new TerminalPresentation(false, true).start(); new TerminalPresentation(true, false).start();
   expect(vi.getTimerCount()).toBe(0);
 });
+it('does not stream a conversational reply, so its lines can be shown one at a time', () => {
+  vi.stubEnv('TEAPILOT_NO_MOTION', '1');
+  Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true });
+  Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: true });
+  const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  const presentation = new TerminalPresentation(false, true);
+  presentation.start();
+  presentation.event({ type: 'route', capability: 'ask.normal', casual: true });
+  presentation.event({ type: 'text', text: 'duno mate\nmy source is public haha' });
+  presentation.event({ type: 'message_end' });
+  expect(out.mock.calls.join('')).not.toContain('duno mate');
+  presentation.answer('duno mate');
+  expect(strip(out.mock.calls.join(''))).toContain('duno mate');
+  presentation.close();
+});

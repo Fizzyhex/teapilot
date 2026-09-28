@@ -1,16 +1,23 @@
 // An in-memory Discord for testing teapilot's Discord features without Discord. It stands in for
 // src/discord/gateway.ts only: routing, conversations, models and discord.play all run for real.
 // Everything the bot sends is checked the way discord.js and Discord would check it.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CardButton, CardControls, DiscordTransport } from '../../src/discord/bridge.js';
 import type { connect, GatewayHandlers } from '../../src/discord/gateway.js';
 import { parseCustomId, type ModalPayload } from '../../src/discord/play/render.js';
 import type { PlayInteraction } from '../../src/discord/play/runtime.js';
 import type { DiscordSettings } from '../../src/discord/settings.js';
-import { checkMessage, checkModal, DiscordRejected } from './validate.js';
+import { checkFiles, checkMessage, checkModal, DiscordRejected } from './validate.js';
 
 type Json = Record<string, unknown>;
 type Row = { type: number; components: Json[] };
-interface Payload { content?: string; embeds?: Json[]; components?: Row[] }
+interface Upload { name: string; data: Buffer }
+interface Payload { content?: string; embeds?: Json[]; components?: Row[]; files?: Upload[] }
+/** An attachment as the simulator keeps it: on disk, so whoever drives it can open the file. */
+export interface Attachment { name: string; size: number; path: string }
+const kilobytes = (bytes: number) => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 export interface Person { name: string; id: string }
 /** An operator, a whitelisted user, and someone teapilot does not know. */
@@ -26,7 +33,7 @@ export const channelId = '200000000000000001';
 
 export interface Channel { id: string; name: string; kind: 'dm' | 'channel' | 'thread'; parent?: string }
 export interface Message {
-  id: string; channel: Channel; author: string; content: string; embeds: Json[]; components: Row[];
+  id: string; channel: Channel; author: string; content: string; embeds: Json[]; components: Row[]; files: Attachment[];
   /** Ephemeral: only this person sees it. */
   only?: string;
   edits: number;
@@ -57,6 +64,18 @@ export class World {
   private recent?: Channel;
   private lastEvent = Date.now();
 
+  /** `files` is where attachments are written, one file per upload. */
+  constructor(private readonly files = join(tmpdir(), 'teapilot-discord-files')) {}
+  private store(message: string, uploads: Upload[]): Attachment[] {
+    if (!uploads.length) return [];
+    mkdirSync(this.files, { recursive: true });
+    return uploads.map((upload, index) => {
+      const path = join(this.files, `${message}-${Date.now().toString(36)}-${index}-${upload.name.replace(/[^\w.-]+/g, '_')}`);
+      writeFileSync(path, upload.data);
+      return { name: upload.name, size: upload.data.length, path };
+    });
+  }
+
   /** Every message, edit, warning and log line, as the text `screen` shows. */
   onEvent(listener: (text: string) => void): () => void {
     this.listeners.add(listener);
@@ -85,7 +104,8 @@ export class World {
         edit: async (channel, id, payload) => {
           const message = this.find(id);
           if (message.channel.id !== channel) throw new Error('Unknown Message');
-          this.update(message, payload as Payload);
+          // Like the gateway, an app's edit replaces the attachments the message had.
+          this.update(message, { ...payload as Payload, files: (payload as Payload).files ?? [] });
         },
         request: async (method, route) => {
           this.warn(`A trusted app called Discord REST ${method} ${route}; the simulator does not emulate REST routes.`);
@@ -140,8 +160,9 @@ export class World {
   }
 
   private post(channel: Channel, author: string, payload: Payload, only?: string): Message {
-    if (author === bot.name) this.check(`a message in #${channel.name}`, () => checkMessage(payload));
-    const message: Message = { id: `m${++this.counters.message}`, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], only, edits: 0 };
+    if (author === bot.name) this.check(`a message in #${channel.name}`, () => { checkMessage(payload); checkFiles(payload); });
+    const id = `m${++this.counters.message}`;
+    const message: Message = { id, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], files: this.store(id, payload.files ?? []), only, edits: 0 };
     this.messages.push(message);
     this.recent = channel;
     this.emit(this.render(message));
@@ -150,8 +171,12 @@ export class World {
 
   private update(message: Message, payload: Payload): void {
     const next = { content: payload.content ?? message.content, embeds: payload.embeds ?? message.embeds, components: payload.components ?? message.components };
-    this.check(`an edit to ${message.id}`, () => checkMessage(next));
+    const uploads = payload.files;
+    // Attachments the edit leaves in place still count for attachment:// references.
+    const kept = uploads ?? message.files.map(file => ({ name: file.name, data: Buffer.alloc(file.size) }));
+    this.check(`an edit to ${message.id}`, () => { checkMessage({ ...next, files: kept }); checkFiles({ ...next, files: kept }); });
     Object.assign(message, next);
+    if (uploads) message.files = this.store(message.id, uploads);
     message.edits++;
     this.emit(this.render(message));
   }
@@ -159,6 +184,7 @@ export class World {
   transport(channel: Channel): DiscordTransport {
     return {
       send: async text => this.post(channel, bot.name, { content: text }).id,
+      sendFiles: async (text, files) => this.post(channel, bot.name, { content: text, files }).id,
       edit: async (id, text) => this.update(this.find(id), { content: text }),
       card: async (text, controls, id) => {
         const payload = { content: text, components: [{ type: 1, components: [
@@ -170,7 +196,7 @@ export class World {
         this.cards.set(message.id, controls.press);
         return message.id;
       },
-      typing: () => undefined,
+      typing: () => this.emit(`… ${bot.name} is typing in ${channel.name}`),
       askApproval: (text, signal) => {
         if (signal.aborted) return Promise.resolve(false);
         const nonce = ++this.counters.approval;
@@ -193,7 +219,7 @@ export class World {
   }
 
   /** A person sends a message: in their DM by default, in `channel` (mentioning teapilot), or in a thread. */
-  say(name: string, text: string, where?: string): Message {
+  say(name: string, text: string, where?: string, uploads: Array<Upload & { contentType?: string }> = []): Message {
     const person = this.person(name);
     const handlers = this.handlers;
     if (!handlers) throw new SimError('teapilot is not connected.');
@@ -201,7 +227,7 @@ export class World {
     if (channel.kind === 'dm' && channel.name !== `dm-${person.name}`) throw new SimError(`${channel.name} is someone else's DM.`);
     let content = this.mention(text);
     if (channel.kind === 'channel' && !content.includes(`<@${bot.id}>`)) content = `<@${bot.id}> ${content}`;
-    const message = this.post(channel, person.name, { content });
+    const message = this.post(channel, person.name, { content, files: uploads });
     const thread = channel.kind === 'thread' ? channel : undefined;
     handlers.message({
       authorId: person.id, authorIsBot: false, authorName: person.name,
@@ -209,6 +235,7 @@ export class World {
       ownThread: Boolean(thread), mentionsBot: content.includes(`<@${bot.id}>`),
       // The gateway strips mentions of the bot.
       content: content.replaceAll(`<@${bot.id}>`, '').trim(),
+      attachments: uploads.map(upload => ({ name: upload.name, size: upload.data.length, contentType: upload.contentType, download: async () => upload.data })),
       replyChain: async () => ({ messages: [], truncated: false }),
       transport: () => this.transport(channel),
       startThread: async title => {
@@ -348,7 +375,7 @@ export class World {
       defer: async () => { first('deferUpdate'); state = 'deferred'; },
       update: async payload => {
         if (state !== 'deferred') throw new Error('editReply before deferUpdate.');
-        this.update(message, payload as Payload);
+        this.update(message, { ...payload as Payload, files: (payload as Payload).files ?? [] });
         updated = true;
       },
       followUp: async (content, embeds) => {
@@ -419,6 +446,7 @@ export class World {
       ...(message.content ? this.display(message.content).split('\n') : []),
       ...message.embeds.flatMap(embed => this.renderEmbed(embed)),
       ...message.components.map(row => row.components.map(control => this.renderControl(control)).join(' ')),
+      ...message.files.map(file => `📎 ${file.name} (${kilobytes(file.size)}) → ${file.path}`),
     ];
     return [header, ...lines.map(line => `  ${line}`)].join('\n');
   }

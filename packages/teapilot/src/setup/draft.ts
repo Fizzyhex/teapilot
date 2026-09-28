@@ -194,7 +194,7 @@ export function tierLines(config: Config, roles: PhysicalModel[]): string[] {
   });
 }
 
-export function summaryLines(draft: Draft, config: Config, roles: PhysicalModel[], details: { displayModel?: string; checks: string; routingReady: boolean; searchStatus: string }): string[] {
+export function summaryLines(draft: Draft, config: Config, roles: PhysicalModel[], details: { displayModel?: string; checks: string; routingReady: boolean; searchStatus: string; workspaceStatus?: string }): string[] {
   const { hasConfiguration, before, previousModels } = draft;
   const models = roles.map(role => config.models[role].id).join(', ');
   const lines = [`  Models:    ${details.displayModel ?? models}${hasConfiguration && before.models !== models ? ` (was ${before.models})` : ''}`];
@@ -206,6 +206,7 @@ export function summaryLines(draft: Draft, config: Config, roles: PhysicalModel[
   lines.push(`  Budgets:   $${config.policy.budget.requestUsd}/request · $${config.policy.budget.dailyUsd}/UTC day`);
   lines.push(`  Routing:   ${config.routingMode}${config.routingMode === 'hosted' ? ' £' : ''}${hasConfiguration ? ` (was ${before.routing})` : ''}`);
   lines.push(`  Search:    ${details.searchStatus}${hasConfiguration ? ` (was ${before.search})` : ''}`);
+  if (details.workspaceStatus) lines.push(`  Workspace: ${details.workspaceStatus}`);
   lines.push(`  Checks:    ${details.checks}`);
   lines.push(`  Routing check: ${config.routingMode === 'direct' ? 'Not needed' : details.routingReady ? 'Passed' : 'Not verified; see routing result above'}`);
   return lines;

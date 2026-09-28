@@ -196,7 +196,7 @@ it('drives the simulator from the command line, one call at a time', async () =>
   await writeFile(join(f.cwd, 'policy.json'), JSON.stringify(f.config.policy));
   const env = {
     TEAPILOT_MODELS_FILE: join(f.cwd, 'models.json'), TEAPILOT_POLICY_FILE: join(f.cwd, 'policy.json'), TEAPILOT_STATE_DIR: f.config.stateDir,
-    JEV_PROVIDER: 'typesafe', TYPESAFE_API_KEY: 'never-log-this-secret', JEV_API_URL: `${f.server.url}/jev`,
+    JEV_PROVIDER: 'typesafe', TYPESAFE_API_KEY: 'never-log-this-secret', JEV_API_URL: `${f.server.url}/jev`, WORKSPACE_SANDBOX: 'off',
   };
   const name = `vitest-${process.pid}`;
   cleanups.push(() => discord(['stop', name]));

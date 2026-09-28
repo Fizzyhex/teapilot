@@ -15,9 +15,12 @@ import { Evidence, type EscalationReason } from '../routing/escalation.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
+import { casualPrompt } from './casual.js';
 import { coder } from './coder.js';
 import { fitHistory, turnSteps } from './history.js';
-import { latestCode, play, withoutCode, type Drafts, type PlayContext } from './play.js';
+import { latestBlock, latestCode, pastedEmoji, play, withoutCode, type Drafts, type PlayContext } from './play.js';
+import { workspace, type ConversationWorkspace } from './workspace.js';
+import type { WebController } from '../web/controller.js';
 
 export interface AttemptInput {
   config: Config; tier: Tier; workload: Workload; cwd: string; prompt: string; web: boolean;
@@ -25,17 +28,24 @@ export interface AttemptInput {
   history?: ConversationTurn[]; onEvent?: EventSink; onActivity?: ActivitySink; beforeMutation?: BeforeMutation;
   /** The model's reasoning as it streams, redacted; only callers that show it ask for it. */
   onReasoning?: (text: string) => void;
-  mode?: Mode; conversational?: boolean; authorization?: import('../execution/grants.js').SessionGrants;
+  mode?: Mode; conversational?: boolean;
+  /** Conversational mode: the casual prompt and no tools; see routing/intent.ts. */
+  casual?: boolean;
+  authorization?: import('../execution/grants.js').SessionGrants;
   activePermissions?: Permission[];
   /** Set only for a Discord sender with a role; drives the access-management tools. */
   access?: AccessAdmin;
   /** Set only for Discord conversations; drives the discord.play tools. */
   play?: PlayContext;
+  /** The conversation's workspace, where Discord and terminal chat sessions keep files and run commands. */
+  workspace?: ConversationWorkspace;
   requestCapabilities?: (required: Permission[], reason: string, signal?: AbortSignal) => Promise<boolean>;
   onAgenticWork?: () => void;
   unresolvedChecks?: string[];
   /** Search already failed or ran dry earlier in this request; this attempt runs without it. */
   searchUnavailable?: boolean;
+  /** The request's web controller: reads, budgets and the URLs seen so far outlast a single attempt. */
+  webController?: WebController;
 }
 export interface AttemptResult {
   success: boolean; text: string; reason?: EscalationReason;
@@ -77,10 +87,16 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // discord.play takes an app's code from the newest code block in this request's replies, so code never
   // has to be escaped into JSON arguments; blocks it used are left out of the answer shown to people.
   let messages = (): Message[] => [];
-  const drafts: Drafts = { latest: () => latestCode(messages()), used: new Set<string>() };
-  // Models that call a play tool without writing its code tend to repeat that call; a reply without tools cannot.
-  let paused: AgentTool[] | undefined, writing = false, pauses = 0;
+  const drafts: Drafts = { latest: () => latestCode(messages()), block: () => latestBlock(messages()), used: new Set<string>() };
+  // Models that call a play tool or file_send without writing its code tend to repeat that call; a reply without tools cannot.
+  let paused: AgentTool[] | undefined, pausedFor: Drafts['missing'], writing = false, pauses = 0;
+  // Small models sometimes answer "done" to a change request without calling a tool; the host holds them to it once.
+  let changed = false, claimChecked = false, claimNotice = false;
+  // A page is at most about a third of this model's context, and pages together at most about a quarter
+  // of it in tokens, so the attempt keeps room to reason and answer.
+  const reader = input.webController && { controller: input.webController, maxChars: Math.min(12_000, Math.floor(profile.contextTokens * 0.35)), budget: { remaining: profile.contextTokens } };
   const compose = async () => {
+    if (input.casual) return { systemPrompt: casualPrompt(), tools: [] as AgentTool[] };
     const repository = effectiveConfig.policy.permissions.includes('repository.read');
     if (repository && !repositorySetup) {
       input.onAgenticWork?.();
@@ -90,7 +106,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${inventory.content.filter(part => part.type === 'text').map(part => part.text).join('\n')}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
       await telemetry.event('repository_inventory', { succeeded: true });
     }
-    const setup = ask(effectiveConfig, effectiveConfig.policy.permissions.includes('web.search'), repository, input.searchUnavailable);
+    const setup = ask(effectiveConfig, effectiveConfig.policy.permissions.includes('web.search'), repository, input.searchUnavailable, reader);
     if (repository && repositorySetup) {
       // Rebuild declarations after additional grants without rereading instructions
       // or reinventorying. Tool execution still checks the current effective policy.
@@ -104,11 +120,18 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       : mode === 'ask' ? '\nAsk mode: give focused answers, research, and plans. Ask questions only when needed to answer accurately.'
       : '\nCode mode: complete requested repository work and report changes and verification; answer ordinary questions directly without unnecessary repository inspection.';
     if (input.play && effectiveConfig.policy.permissions.includes('discord.play')) {
-      const apps = play(input.play, effectiveConfig, policy, input.approve, drafts);
+      // Server emoji people pasted reach apps through ctx.emoji whether or not the model passes them on.
+      const emojis = { ...input.play.emojis, ...pastedEmoji(...(input.history ?? []).map(turn => turn.user), input.prompt) };
+      const apps = play({ ...input.play, emojis, requested: Object.keys(pastedEmoji(input.prompt)) }, effectiveConfig, policy, input.approve, drafts);
       setup.tools.push(...apps.tools);
       setup.systemPrompt += '\n' + apps.systemPrompt;
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
       setup.systemPrompt += '\n- For interactive Discord apps (games, polls, quizzes, boards, timers with buttons), request `discord.play` with request_capabilities; it is granted without a prompt.';
+    }
+    if (input.workspace) {
+      const shared = await workspace(input.workspace, drafts, input.approve, input.play);
+      setup.tools.push(...shared.tools);
+      setup.systemPrompt += '\n' + shared.systemPrompt;
     }
     if (input.conversational) setup.systemPrompt += '\nKeep context for follow-up turns; do not treat each message as an unrelated task.';
     if (input.access) setup.systemPrompt += input.access.role === 'operator'
@@ -118,7 +141,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     setup.tools.push(...controlTools);
     return setup;
   };
-  if (model.toolCalling) controlTools.push({
+  if (model.toolCalling && !input.casual) controlTools.push({
     name: 'request_escalation', label: 'Request escalation',
     description: 'Stop this attempt when concrete uncertainty or unsupported capability prevents progress. The host decides whether escalation is allowed.',
     parameters: Type.Object({ reason: Type.Union([Type.Literal('uncertainty'), Type.Literal('unsupported')]) }),
@@ -130,7 +153,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let toolsChanged = false;
   // discord.play means nothing outside Discord, so only Discord conversations can ask for it.
   const requestable: Permission[] = ['repository.read', 'repository.write', 'repository.shell', 'web.search', ...(input.play ? ['discord.play' as const] : [])];
-  if (input.requestCapabilities && model.toolCalling) controlTools.push({
+  if (input.requestCapabilities && model.toolCalling && !input.casual) controlTools.push({
     name: 'request_capabilities', label: 'Request access',
     description: `Request narrowly scoped host-granted access when the user request requires repository reading, editing, shell commands, or live web research${input.play ? ', or interactive Discord apps (discord.play)' : ''}.`,
     parameters: Type.Object({ permissions: Type.Array(Type.Union(requestable.map(permission => Type.Literal(permission))), { minItems: 1, maxItems: requestable.length }) }),
@@ -155,7 +178,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       return { content: [{ type: 'text', text: `Active access: ${effectiveConfig.policy.permissions.join(', ')}. Continue with the tools provided on the next turn.` }], details: {} };
     },
   });
-  if (input.access && model.toolCalling) controlTools.push(...accessTools(input.access, input.approve, input.prompt));
+  if (input.access && model.toolCalling && !input.casual) controlTools.push(...accessTools(input.access, input.approve, input.prompt));
   const setup = await compose();
   if (!model.toolCalling && setup.tools.length) throw new Error('Selected model cannot use the required tools');
   // Earlier turns get at most half of what the instructions, tools and request leave, so this turn's own
@@ -165,7 +188,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const stream = guardedStream(config, tier, input.budget, telemetry, inference, playing ? { outputTokens: profile.maxOutputTokens } : undefined);
   // Populated in afterToolCall (which has args) and consumed once by the matching
   // tool_execution_end event below (which only carries the result).
-  const toolDetails = new Map<string, { path?: string; size?: number; command?: string }>();
+  const toolDetails = new Map<string, { path?: string; size?: number; command?: string; url?: string }>();
   // Calls that ran, or that the host stopped; any other finished call was refused before execution.
   const settled = new Map<string, 'ran' | 'stopped'>();
   const agent = new Agent({
@@ -176,27 +199,38 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     toolExecution: 'sequential',
     prepareNextTurnWithContext: async ({ context }) => {
+      if (claimNotice) {
+        claimNotice = false;
+        return { messages: [{ role: 'user', content: '[host notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (play_update with edits on its current source), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
+      }
       if (lostNotice) {
         lostNotice = false;
         const messages = context.messages.filter(message => !(message.role === 'assistant' && lost(message)));
         return { context: { ...context, messages }, messages: [{ role: 'user', content: '[host notice] The model server could not read your last tool call, so nothing ran. Keep tool arguments short: put code and long text in your reply (an app goes in one ```js code block), then call the tool again.', timestamp: Date.now() }] };
       }
       if (drafts.missing && context.tools?.length && pauses < 2) {
-        drafts.missing = false; pauses++; paused = context.tools; writing = true;
-        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: '[host notice] That call had no new app code to use. Tools are paused for this reply: write the whole app now as one ```js code block, with at most a sentence around it. The tools return on your next turn.', timestamp: Date.now() }] };
+        pausedFor = drafts.missing; drafts.missing = undefined; pauses++; paused = context.tools; writing = true;
+        const write = pausedFor === 'file'
+          ? 'That call had nothing to send: file_send never writes content itself. Tools are paused for this reply: write the whole content to send now as one code block, with at most a sentence around it.'
+          : pausedFor === 'script'
+          ? 'That call had no script to save: workspace_run saves the newest code block in your reply. Tools are paused for this reply: write the whole script now as one code block, with at most a sentence around it.'
+          : 'That call had no new app code to use. Tools are paused for this reply: write the whole app now as one ```js code block, with at most a sentence around it.';
+        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: `[host notice] ${write} The tools return on your next turn.`, timestamp: Date.now() }] };
       }
       if (paused) {
         const tools = paused; paused = undefined;
-        return { context: { ...context, tools }, messages: [{ role: 'user', content: '[host notice] Tools are back. Call play_start (or play_update) now; it reads the code block you just wrote.', timestamp: Date.now() }] };
+        const call = pausedFor === 'file' ? 'Call file_send now with the file name; it sends' : pausedFor === 'script' ? 'Call workspace_run again now with script and command; it saves' : 'Call play_start (or play_update) now; it reads';
+        return { context: { ...context, tools }, messages: [{ role: 'user', content: `[host notice] Tools are back. ${call} the code block you just wrote.`, timestamp: Date.now() }] };
       }
       // The last turn of a discord.play attempt answers about what is live rather than ending mid-call at the limit.
       if (playing && !evidence.answerNow && inference.turns >= config.policy.limits.maxTurns - 1) { evidence.answerNow = true; evidence.answerWhy = 'This is the last turn'; }
       if (evidence.answerNow && context.tools?.length) {
         return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: `[host notice] ${evidence.answerWhy}, so tools are withdrawn for this attempt. Answer now from what you already have, clearly stating any gaps.`, timestamp: Date.now() }] };
       }
-      // Once search is exhausted or down, take the tool away: a refusal message alone does not stop a model retrying it.
-      const withoutSearch = <T extends { name: string }>(tools: T[]) => evidence.searchExhausted ? tools.filter(tool => tool.name !== 'web_search') : tools;
-      if (!toolsChanged) return evidence.searchExhausted && context.tools?.some(tool => tool.name === 'web_search') ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
+      // Once search or reading is exhausted, take the tool away: a refusal message alone does not stop a model retrying it.
+      const withdrawn = (name: string) => (evidence.searchExhausted && name === 'web_search') || (evidence.readsExhausted && name === 'web_read');
+      const withoutSearch = <T extends { name: string }>(tools: T[]) => tools.filter(tool => !withdrawn(tool.name));
+      if (!toolsChanged) return context.tools?.some(tool => withdrawn(tool.name)) ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
       toolsChanged = false;
       const next = await compose();
       return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[host notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
@@ -204,15 +238,17 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     beforeToolCall: async ({ toolCall }) => {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) { settled.set(toolCall.id, 'stopped'); return { block: true, terminate: true, reason: 'Attempt stopped' }; }
       if (evidence.searchExhausted && toolCall.name === 'web_search') return { block: true, reason: 'Search refused: search is unavailable or repeated searches found no new evidence. Continue without it, clearly stating any gaps.' };
+      if (evidence.readsExhausted && toolCall.name === 'web_read') return { block: true, reason: 'Reading refused: the page budget is spent or reads kept returning the same page. Continue without it, clearly stating any gaps.' };
       if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
       return undefined;
     },
     afterToolCall: async ({ toolCall, args, isError, result }) => {
       settled.set(toolCall.id, 'ran');
+      if (!isError && ['play_start', 'play_update'].includes(toolCall.name) && result.content.some(part => part.type === 'text' && /^(Started|Updated) app /.test(part.text))) changed = true;
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
       evidence.observe(toolCall.name, args, isError, result.content.filter(part => part.type === 'text').map(part => part.text).join('\n'));
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
-      const data = args as { path?: string; command?: string };
+      const data = args as { path?: string; command?: string; url?: string };
       // Tools normalize args.path to an absolute path before executing; keep that
       // for evidence (unambiguous for the model's continuation) but show relative
       // paths in the per-call trail, matching how a person names files here.
@@ -224,6 +260,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         toolDetails.set(toolCall.id, { path: relPath(data.path), size });
       } else if (toolCall.name === 'read' && data.path) toolDetails.set(toolCall.id, { path: relPath(data.path) });
       else if (['bash', 'powershell'].includes(toolCall.name) && data.command) toolDetails.set(toolCall.id, { command: data.command });
+      else if (toolCall.name === 'web_read' && typeof data.url === 'string') toolDetails.set(toolCall.id, { url: shortUrl(data.url) });
       if (evidence.warning) return { content: [...result.content, { type: 'text' as const, text: evidence.warning }] };
       return undefined;
     },
@@ -231,7 +268,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
       // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
       if (lost(message) && lostCalls < 2) { lostCalls++; lostNotice = true; return { action: 'continue' }; }
-      if (writing) { writing = false; if (drafts.latest()) return { action: 'continue' }; paused = undefined; }
+      if (writing) { writing = false; if (pausedFor === 'app' ? drafts.latest() : drafts.block?.()) return { action: 'continue' }; paused = undefined; }
+      if (playing && !changed && !claimChecked && message.stopReason === 'stop' && !message.content.some(part => part.type === 'toolCall')
+        && claimsChange(message.content.map(part => part.type === 'text' ? part.text : '').join('\n'))
+        && input.play!.runtime.list(input.play!.conversation, input.play!.channelId).some(app => app.status === 'running')) {
+        claimChecked = true; claimNotice = true;
+        return { action: 'continue' };
+      }
       return undefined;
     },
   });
@@ -257,11 +300,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       input.onEvent?.({ type: 'message_end' });
     } else if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
       if (event.type === 'tool_execution_start') input.onActivity?.({ kind: 'waiting', label: `Running ${event.toolName}...` });
-      let detail: { path?: string; size?: number; command?: string; refused?: boolean } | undefined;
+      let detail: { path?: string; size?: number; command?: string; url?: string; refused?: boolean } | undefined;
       if (event.type === 'tool_execution_start') {
         // What is about to run, for progress displays; the end event reports what actually ran.
-        const args = (event.args ?? {}) as { path?: unknown; command?: unknown };
+        const args = (event.args ?? {}) as { path?: unknown; command?: unknown; url?: unknown };
         if (typeof args.command === 'string') detail = { command: args.command };
+        else if (typeof args.url === 'string') detail = { url: shortUrl(args.url) };
         else if (typeof args.path === 'string') detail = { path: relative(policy.root, resolve(policy.root, args.path)) || args.path };
       } else {
         const state = settled.get(event.toolCallId); settled.delete(event.toolCallId);
@@ -321,4 +365,16 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     check: evidence.unresolvedChecks.size ? 'failed' : evidence.lastCheck,
     ending: { stopReason: last?.role === 'assistant' ? last.stopReason : undefined, error: last?.role === 'assistant' ? last.errorMessage?.slice(0, 300) : undefined, textChars: text.length },
   };
+}
+
+/** Whether an answer says something was changed, such as "done", "swapped" or "the snake now has a face". */
+export function claimsChange(text: string): boolean {
+  return /\b(done|updated|changed|swapped|replaced|added|removed|fixed|switched|renamed|now (?:is|are|has|have|shows?|uses?|looks?))\b/i.test(text);
+}
+
+/** A URL as progress displays show it: host and path, without scheme or query, within 80 characters. */
+export function shortUrl(raw: string): string {
+  let text = raw;
+  try { const url = new URL(raw); text = `${url.host}${url.pathname === '/' ? '' : url.pathname}${url.search ? '?…' : ''}`; } catch { /* shown as given */ }
+  return text.length > 80 ? `${text.slice(0, 79)}…` : text;
 }

@@ -98,13 +98,13 @@ function checkSelect(data: Json, where: string): void {
 }
 
 /** A message as teapilot sends it: `content`, raw `embeds` and raw action rows. */
-export function checkMessage(payload: { content?: unknown; embeds?: unknown; components?: unknown }): void {
+export function checkMessage(payload: { content?: unknown; embeds?: unknown; components?: unknown; files?: unknown[] }): void {
   const content = payload.content ?? '';
   if (typeof content !== 'string') throw new DiscordRejected('content must be a string.');
   if (content.length > limits.content) throw new DiscordRejected(`content is ${content.length} characters; Discord allows ${limits.content}.`);
   checkEmbeds(payload.embeds);
   const rows = records(payload.components, 'components');
-  if (!content.trim() && !records(payload.embeds, 'embeds').length && !rows.length) throw new DiscordRejected('Cannot send an empty message.');
+  if (!content.trim() && !records(payload.embeds, 'embeds').length && !rows.length && !payload.files?.length) throw new DiscordRejected('Cannot send an empty message.');
   if (rows.length > limits.rows) throw new DiscordRejected(`components: ${rows.length} rows; Discord allows ${limits.rows}.`);
   const ids = new Set<string>();
   rows.forEach((row, index) => {
@@ -155,4 +155,21 @@ export function checkModal(payload: { custom_id?: unknown; title?: unknown; comp
   });
   // discord.js builds raw modals with ModalBuilder before sending; this is that exact step.
   at('modal', () => new ModalBuilder(payload as never).toJSON());
+}
+
+/** Discord's upload limit for bots, and how many files one message may carry. */
+const upload = { bytes: 10 * 1024 * 1024, files: 10 };
+/** Attachments: within Discord's limits, and every attachment:// an embed shows is one the message carries. */
+export function checkFiles(payload: { embeds?: unknown; files?: Array<{ name: string; data: Buffer }> }): void {
+  const files = payload.files ?? [];
+  if (files.length > upload.files) throw new DiscordRejected(`files: ${files.length} attachments; Discord allows ${upload.files}.`);
+  for (const file of files) if (file.data.length > upload.bytes) throw new DiscordRejected(`files: ${file.name} is ${(file.data.length / 1024 / 1024).toFixed(1)} MB; bots may upload 10 MB (Request entity too large).`);
+  records(payload.embeds, 'embeds').forEach((embed, index) => {
+    for (const key of ['image', 'thumbnail'] as const) {
+      const url = (embed[key] as { url?: unknown } | undefined)?.url;
+      if (typeof url === 'string' && url.startsWith('attachment://') && !files.some(file => file.name === url.slice('attachment://'.length))) {
+        throw new DiscordRejected(`embeds[${index}].${key}: ${url} is not attached to the message, so Discord shows no image.`);
+      }
+    }
+  });
 }

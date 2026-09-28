@@ -15,6 +15,7 @@ import { defaultPolicy, JevRouter } from 'jevrouter';
 import { capabilities } from './routing/capabilities.js';
 import { effectiveProfile, modelFor, profileAvailable, profileFor, reasoningTier, type ThinkingLevel } from './routing/execution.js';
 import { managedRuntimes, runtimeHints, type Runtimes } from './runtime/index.js';
+import { configureWorkspace } from './workspace/configure.js';
 
 /** Hints from the runtimes TeaPilot manages, for a model whose endpoint check failed. */
 export async function endpointHint(config: Config, tier: Tier, log: (text: string) => void, signal?: AbortSignal, runtimes?: Runtimes): Promise<void> {
@@ -249,6 +250,7 @@ export async function doctor(config: Config, cwd: string, options: ActivityUI & 
       healthy &&= result.ask && (!model.toolCalling || result.coding);
     }
   }
+  await configureWorkspace(config, { ...options, confirm: options.consent }, options.signal ?? new AbortController().signal);
   log(`Budgets: $${config.policy.budget.requestUsd}/request; $${config.policy.budget.dailyUsd}/UTC day`);
   if (!options.live) log('Run teapilot doctor --live to verify streamed inference and coding.');
   return healthy && available;

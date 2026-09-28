@@ -55,6 +55,38 @@ export function readPlayGrant(raw: JevRawResponse | null | undefined, threshold:
   } catch { return false; }
 }
 
+/**
+ * Conversational mode: a message aimed at teapilot itself rather than a job for it. Asked in the routing call, so it
+ * costs no extra call. `+` signals open conversational mode and `-` signals bar it; see readCasual.
+ */
+const conversationSignals = {
+  'conversation.threat': ['+', 'Is the current message a threat or insult aimed at teapilot itself?'],
+  'conversation.personal': ['+', 'Does the current message concern teapilot as a person, such as its opinions, feelings, likeability or the way it talks?'],
+  'conversation.existential': ['+', 'Is the current message an existential question about teapilot itself, such as whether it is conscious or alive?'],
+  'conversation.banter': ['+', 'Is the current message banter, small talk or joking around with teapilot?'],
+  'conversation.romance': ['+', 'Is the current message romantic or flirting with teapilot?'],
+  'conversation.task': ['-', 'Is the user tasking teapilot with a job, such as work, research, a fix, a lookup or an explanation of a topic other than teapilot itself?'],
+  'conversation.make': ['-', 'Is the user asking teapilot to make, write, build or change something?'],
+} as const;
+export const conversationQuestions: Record<string, JevRouteQuestion> = Object.fromEntries(Object.entries(conversationSignals).map(([key, [, question]]) => [key, { type: 'choice',
+  instructions: `${question} Assess the current user request in conversational context.`,
+  criteria: { yes: 'Clearly true for the current message', no: 'Not true', unclear: 'Cannot determine' },
+}]));
+/** Conversational mode needs every `-` signal confidently no and at least one `+` signal confidently yes. */
+export function readCasual(raw: JevRawResponse | null | undefined, threshold: number): boolean {
+  if (!raw) return false;
+  let open = false;
+  for (const [key, [sign]] of Object.entries(conversationSignals)) {
+    try {
+      const answer = getChoiceAnswer(raw, key);
+      const confident = Number.isFinite(answer.confidence) && answer.confidence >= threshold;
+      if (sign === '-' && !(answer.choice === 'no' && confident)) return false;
+      if (sign === '+' && answer.choice === 'yes' && confident) open = true;
+    } catch { if (sign === '-') return false; }
+  }
+  return open;
+}
+
 /** Which teachat identity would most likely be given this request. Asked in the first turn's routing call, so it costs no extra call. */
 export const teachatIdentityQuestion = (identities: Record<string, string>): Record<string, JevRouteQuestion> => ({
   teachat_identity: { type: 'choice', instructions: IDENTITY_INSTRUCTIONS, criteria: identities },

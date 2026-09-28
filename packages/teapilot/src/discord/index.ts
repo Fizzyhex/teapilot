@@ -9,6 +9,10 @@ import { AccessStore } from './access-store.js';
 import { HistoryStore } from './history-store.js';
 import { SeatStore, type Seat } from './seat-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
+import { pictures } from './files.js';
+import { receiveFiles } from '../workspace/attach.js';
+import { SrtSandbox } from '../workspace/sandbox.js';
+import { WorkspaceStore } from '../workspace/store.js';
 import { consultant } from './play/consult.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
 import { PlayStore } from './play/store.js';
@@ -73,8 +77,13 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   // The surface is bound once the gateway connects; apps only post after a message arrives or on recovery, both later.
   let surface: PlaySurface | undefined;
   const connected = () => { if (!surface) throw new Error('Discord is not connected yet.'); return surface; };
+  const files = WorkspaceStore.at(stateDir);
+  const sandbox = new SrtSandbox(stateDir, config.workspace, config.source?.directory);
+  void sandbox.status().then(status => log(status.available
+    ? `Workspace commands run sandboxed with ${status.tools.map(tool => tool.name).join(', ') || 'no media tools found'}.`
+    : `Workspace commands are off: ${status.reason}`));
   const play = new PlayRuntime({
-    store: PlayStore.at(stateDir), log, clock,
+    store: PlayStore.at(stateDir), log, clock, pictures: pictures(files),
     surface: { post: (...args) => connected().post(...args), edit: (...args) => connected().edit(...args), request: (...args) => connected().request(...args) },
     consult: consultant({ config, root, access, queue, run, signal }),
   });
@@ -126,7 +135,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
     const conversation = new Conversation({
-      key, transport, queue, redact, log, access,
+      key, transport, queue, redact, log, access, files, sandbox,
       // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
       once: oneShot,
       request: { prompt: '', cwd: root, mode: setup.mode ?? settings.startMode, tier: setup.tier, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
@@ -143,14 +152,22 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     return conversation;
   };
 
+  /** Keeps a message's attachments in the conversation's workspace and says what arrived, for the prompt. */
+  const receive = async (conversation: string, message: Pick<GatewayMessage, 'attachments' | 'authorName'>, room: number): Promise<string> => {
+    const incoming = message.attachments.map(attachment => ({ name: attachment.name, size: attachment.size, type: attachment.contentType, data: () => attachment.download() }));
+    const notes = await receiveFiles(files, conversation, incoming, message.authorName, room);
+    if (notes) log(`${conversation}: kept ${message.attachments.length} attachment(s) from @${message.authorName}`);
+    return notes;
+  };
+
   const handle = async (message: GatewayMessage): Promise<void> => {
     const target = route(message, settings, allowed);
     if (!target) return;
     access.rememberName(message.authorId, message.authorName);
-    if (!message.content) { await message.transport().send('teapilot reads text messages only.'); return; }
+    if (!message.content && !message.attachments.length) { await message.transport().send('teapilot reads text messages and attachments only.'); return; }
     // A running conversation already holds its earlier turns, so only a new one needs the reply chain.
     const chain = target.kind === 'new-thread' || !conversations.get(target.key)?.active ? await message.replyChain() : undefined;
-    const prompt = chain && (chain.messages.length || chain.truncated) ? quoteMessage({ author: message.authorName, text: message.content }, chain) : message.content;
+    let prompt = chain && (chain.messages.length || chain.truncated) ? quoteMessage({ author: message.authorName, text: message.content }, chain) : message.content;
     let key = target.key;
     let channelId = message.channelId;
     let transport: DiscordTransport;
@@ -158,6 +175,11 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       const thread = await message.startThread(message.content);
       key = `thread:${thread.id}`; transport = thread.transport; channelId = thread.id;
     } else transport = message.transport();
+    // Files belong to the conversation they arrive in, a new thread included; its apps show them.
+    if (message.attachments.length) {
+      const notes = await receive(key, message, config.policy.limits.maxPromptChars - prompt.length - 1500);
+      prompt = [prompt, notes].filter(Boolean).join('\n\n');
+    }
     log(`${key} @${message.authorName}: ${message.content.split('\n')[0]!.slice(0, 80)}`);
     (await open(key, transport, { channelId })).push(prompt, { sender: message.authorId, senderName: message.authorName });
   };
@@ -199,6 +221,11 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     const target = routeReply(reply, settings, allowed);
     if (!target) { await reply.respond('You are not allowed to use teapilot here.'); return; }
     if (!reply.content) { await reply.respond('teapilot reads text messages only.'); return; }
+    /** The prompt with notes on the files that came with it, which are kept in the conversation's workspace. */
+    const prompt = async (workspace: string) => reply.attachments.length
+      ? [reply.content, await receive(workspace, reply, config.policy.limits.maxPromptChars - reply.content.length - 1500)].filter(Boolean).join('\n\n')
+      : reply.content;
+    const from = { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName, yolo: reply.yolo };
     if (reply.oneShot) {
       const seat: Seat = reply.collab ? 'collab' : 'solo';
       const current = seats.seat(reply.channelId, reply.authorId);
@@ -220,11 +247,13 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       const setup = seats.remember(historyKey, reply.setup);
       const key = `reply:${reply.id}`;
       log(`${historyKey} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
+      // A one-shot's apps and files live under its history, so later one-shots there still have them.
+      const content = await prompt(historyKey);
       await enqueue(historyKey, async () => {
         // A one-shot stops after one input, so the chosen mode and tier go in when it opens rather than as commands.
         const conversation = await open(key, transport, { channelId: reply.channelId, oneShot: true, setup, historyKey });
         runningOneShots.set(historyKey, conversation);
-        conversation.push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
+        conversation.push(content, from);
         try { await conversation.done; }
         finally { conversations.delete(key); if (runningOneShots.get(historyKey) === conversation) runningOneShots.delete(historyKey); }
       });
@@ -246,9 +275,11 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     log(`${key} @${reply.authorName} (reply): ${reply.title.split('\n')[0]!.slice(0, 80)}`);
     // A new conversation starts with the chosen mode and tier; one already running switches to them first.
     const running = conversations.get(key)?.active;
+    const content = await prompt(key);
     const conversation = await open(key, transport, { channelId, setup: reply.setup });
-    if (running) for (const command of setupCommands(reply.setup)) conversation.push(command, { sender: reply.authorId, senderName: reply.authorName });
-    conversation.push(reply.content, { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName });
+    // Switching to Code mode asks for access, which yolo approves as well.
+    if (running) for (const command of setupCommands(reply.setup)) conversation.push(command, { sender: reply.authorId, senderName: reply.authorName, yolo: reply.yolo });
+    conversation.push(content, from);
   };
   const failed = (what: string) => (error: unknown) => log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
   const gateway = await connect(settings, {
@@ -269,6 +300,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   log('Stopping: pending approvals are denied.');
   play.close();
   await gateway.close();
+  await sandbox.close();
   await Promise.allSettled([...conversations.values()].map(conversation => conversation.done));
   await teachat?.close();
 }

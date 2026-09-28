@@ -1,6 +1,6 @@
 # teapilot
 
-hi, teapilot is a small personal agent for coding and questions.
+hi, teapilot is a small personal agent for coding and questions, for windows or linux.
 
 **capabilities:**
 

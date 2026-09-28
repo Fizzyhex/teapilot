@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
 import { configDirectory, isTierPreference, loadConfig, tierPreferences, type Workload } from './config.js';
 import { runHost, type HostRequest } from './host.js';
+import { casualLines, paceLines } from './casual.js';
 import { runSession } from './chat.js';
 import { doctor } from './diagnostics.js';
 import { setup } from './setup/index.js';
@@ -170,9 +171,12 @@ async function main(): Promise<void> {
         result = await runHost(config, { ...request, web: false }, dependencies);
         result.text = `Web search was unavailable. This answer is unverified against current sources.\n\n${result.text}`;
       }
+      // A conversational reply is shown a line at a time, like messages arriving, and without a result line.
+      const lines = result.casual && result.success && !values.json ? casualLines(result.text) : undefined;
       if (values.json) console.log(JSON.stringify(result, null, 2));
+      else if (lines) await paceLines(lines, line => presentation.answer(line), { signal: controller.signal });
       else presentation.answer(result.text);
-      if (!values.json) presentation.log(`\nResult: ${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
+      if (!values.json && !lines) presentation.log(`\nResult: ${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
       return result;
     };
     if (mode) {
@@ -181,9 +185,14 @@ async function main(): Promise<void> {
       if (interactive && !values.json && !values.once) presentation.log(`${mode[0]!.toUpperCase()}${mode.slice(1)} session started. Type /exit or /quit to leave.`);
       // Teachat only runs where someone can see it and press a key to stop it.
       const teachat = ui && !once ? await openTeachat(config, ui, presentation) : undefined;
-      process.exitCode = await runSession({ request: { ...request, authorization, mode }, maxPromptChars: config.policy.limits.maxPromptChars,
-        input: state => ui ? ui.prompt('>', state.cwd ?? resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted', idle: teachat?.composerIdle() }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
-        run: execute, once, approve, log: message => presentation.log(message), onEvent: dependencies.onEvent, extension: teachat });
+      const [{ SrtSandbox }, { WorkspaceStore }, { TerminalWorkspace }] = await Promise.all([import('./workspace/sandbox.js'), import('./workspace/store.js'), import('./workspace/terminal.js')]);
+      const sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
+      const workspace = new TerminalWorkspace(WorkspaceStore.at(config.stateDir), sandbox, approve);
+      try {
+        process.exitCode = await runSession({ request: { ...request, authorization, mode }, maxPromptChars: config.policy.limits.maxPromptChars,
+          input: state => ui ? ui.prompt('>', state.cwd ?? resolve(values.cwd), { ...state, routingMode: config.routingMode ?? 'hosted', idle: teachat?.composerIdle() }) : Promise.reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' })),
+          run: execute, once, approve, log: message => presentation.log(message), onEvent: dependencies.onEvent, extension: teachat, workspace });
+      } finally { await workspace.close().catch(() => undefined); await sandbox.close().catch(() => undefined); }
       await teachat?.close(controller.signal);
     } else {
       const result = await execute(request);

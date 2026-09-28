@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Action, Effect, Embed, Participants, User, View } from '@teapilot/discord-play';
 import { interactionLifetimeMs } from '../commands.js';
+import type { PictureSpec } from '../images.js';
 import { maxOutputChars, type CallInput, type ContextData, type PlayEngine } from './engine.js';
 import { describe, findControl, normalizeView, PlayError, renderEmbeds, renderModal, renderView, type MessagePayload, type ModalPayload } from './render.js';
 import { sandbox } from './sandbox.js';
@@ -37,11 +38,18 @@ export interface PlayInteraction {
   /** After defer(): a private note to the person who acted. */
   followUp(content: string, embeds?: Array<Record<string, unknown>>): Promise<void>;
 }
+/** Conversation images that apps show with picture(); `check` throws a PlayError for one that cannot be shown. */
+export interface Pictures {
+  check(conversation: string, spec: PictureSpec): void;
+  render(conversation: string, spec: PictureSpec): Promise<{ name: string; data: Buffer }>;
+}
 /** Asks the model on the app's behalf; resolves with the answer text. */
 export type Consultant = (play: { title: string; owner: User; channelId: string }, prompt: string) => Promise<string>;
 export type Source = PlayRecord['source'];
 export interface StartOptions {
   title: string; channelId: string; conversation: string; owner: User; source: Source; participants?: Participants; emojis?: Record<string, string>;
+  /** The attached file the code came from. */
+  file?: string;
   /** Posts the app through an interaction instead of in the channel. */
   post?: (payload: MessagePayload) => Promise<HostedMessage>;
 }
@@ -128,7 +136,7 @@ export class PlayRuntime {
 
   constructor(private readonly options: {
     store: PlayStore; surface: PlaySurface; log: (text: string) => void;
-    consult?: Consultant; clock?: Clock;
+    consult?: Consultant; clock?: Clock; pictures?: Pictures;
     /** Try every control before an app is posted or replaced (default true). */
     probe?: boolean;
   }) {}
@@ -168,6 +176,7 @@ export class PlayRuntime {
     const finish = checked.find(effect => effect.type === 'finish');
     const view = normalizeView(shown.value);
     const payload = renderView(record.id, view, Boolean(finish));
+    this.checkPictures(record, payload);
     const timers = new Map(record.timers.map(timer => [timer.id, timer.dueAt]));
     for (const effect of checked) {
       if (effect.type === 'after') timers.set(effect.id, input.ctx.now + effect.ms);
@@ -194,7 +203,10 @@ export class PlayRuntime {
     const base: PlayRecord = { ...record, state: from.state, seed: from.seed, timers: from.timers };
     const before = JSON.stringify(from.state) + describe(from.view);
     const tried: string[] = [], inert: string[] = [];
-    const shortcodes = new Set(shortcodesIn(describe(from.view)));
+    // Emoji that reach Discord as plain text: :shortcodes:, and server emoji inside backticks.
+    const shortcodes = new Set<string>(), coded = new Set<string>();
+    const lookAt = (view: View) => { const shown = describe(view); for (const code of shortcodesIn(shown)) shortcodes.add(code); for (const code of codedEmojiIn(shown)) coded.add(code); };
+    lookAt(from.view);
     // With nothing to press and nothing on its way, an app is stuck before anyone can start it.
     const usable = (from.view.rows ?? []).flatMap(row => row.controls).some(control => !control.disabled && !(control.type === 'button' && control.url));
     if (!usable && !from.timers.length && !from.effects.some(effect => effect.type === 'consult')) throw new PlayError('People could not do anything with this app: its view has no controls, and no timer or consult is on its way. Show the controls people need in every state, such as a start or join button.');
@@ -219,7 +231,7 @@ export class PlayRuntime {
         if (step.timers.length) timed = true;
         for (const timer of step.timers) scheduled.add(timer.id);
         if (!round && !step.effects.length && JSON.stringify(step.state) + describe(step.view) === before) inert.push(name);
-        for (const code of shortcodesIn(describe(step.view))) shortcodes.add(code);
+        lookAt(step.view);
         if (next.kind !== 'button' && next.kind !== 'select' && next.kind !== 'modal' && step.effects.some(effect => effect.type === 'ephemeral')) notes.add(`${label} returns ephemeral(), but no one pressed anything, so no one sees it. Show that message in the view instead.`);
         if (step.finished) {
           const left = (step.view.rows ?? []).flatMap(row => row.controls).filter(shown => !shown.disabled && !(shown.type === 'button' && shown.url));
@@ -235,14 +247,30 @@ export class PlayRuntime {
     }
     if (problems.length) throw new PlayError(`People using the app would hit these errors:\n${problems.map(problem => `- ${clip(problem, 400)}`).join('\n')}`);
     // Timer code that nothing reaches is also never checked, so its mistakes would only show once live.
-    if (shortcodes.size) notes.add(`The view shows ${[...shortcodes].slice(0, 5).join(' ')} as plain text: Discord turns :shortcodes: into emoji only when a person types them. Use the Unicode emoji instead.`);
-    if (tried.length && inert.length === tried.length) notes.add(`Using ${inert.join(', ')} changed nothing, so the app looks broken to whoever presses first. ${running ? 'If the kept state is what is stuck (a player now inside a wall, say), fix it in code or pass reset: true to start over from init().' : 'If people join by acting, add them the first time their id acts.'}`);
+    if (shortcodes.size) notes.add(`The view shows ${[...shortcodes].slice(0, 5).join(' ')} as plain text: Discord turns :shortcodes: into emoji only when a person types them. Use the Unicode emoji instead, or for a server emoji the whole <:name:id> as it was pasted.`);
+    if (coded.size) notes.add(`The view puts ${[...coded].slice(0, 3).join(' ')} inside a code block or inline code, where Discord shows server emoji as their raw <:name:id> text. Keep boards and lines that hold server emoji outside backticks.`);
+    if (tried.length && inert.length === tried.length) notes.add(`Using ${inert.join(', ')} changed nothing, so the app looks broken to whoever presses first. ${running ? 'If the kept state is what is stuck (a player now inside a wall, say), fix it in code or pass reset: true to start over from init().' : 'Check the first state: a player placed inside or boxed in by blocking tiles cannot move. If people instead join by acting, add them the first time their id acts.'}`);
     // A timer only an earlier step schedules (a start button long gone, say) never fires in an app already past it.
     const unreached = timed && record.source.kind === 'sandbox' ? [...new Set([...record.source.code.matchAll(/\bafter\(\s*[^,()]+,\s*(["'`])([\w.-]+)\1\s*\)/g)].map(match => match[2]!))].filter(id => !scheduled.has(id)) : [];
     const kick = (id: string) => running ? `This app is already running, so init() and any start button will not run again: to start it now, call play_update with timers: [{ id: "${id}", ms: 2000 }].` : '';
     if (unreached.length) notes.add(`Nothing tried from the current state schedules ${unreached.slice(0, 3).map(id => `after(…, "${id}")`).join(', ')}, so it will not fire yet. ${kick(unreached[0]!) || 'If it should already be running, also schedule it from something that still happens, such as a running tick or the next move.'}`);
     if (!timed && record.source.kind === 'sandbox' && /\bafter\b|["']timer["']/.test(record.source.code)) notes.add(`The code handles timers, but no timer is pending and using each control did not schedule one, so nothing will move on its own and the timer code is untested. ${kick('tick') || 'Schedule the first tick from the control that starts things: return step(state, after(2000, "tick")).'}`);
     return [...notes].slice(0, 3);
+  }
+
+  /** Every picture() the view shows names an image this conversation has. */
+  private checkPictures(record: PlayRecord, payload: MessagePayload): void {
+    if (!payload.pictures?.length) return;
+    if (!this.options.pictures) throw new PlayError('picture() is not available here.');
+    for (const spec of payload.pictures) this.options.pictures.check(record.conversation, spec);
+  }
+
+  /** The payload with its pictures rendered into attachments, ready to send. */
+  private async attach(record: PlayRecord, payload: MessagePayload): Promise<MessagePayload> {
+    const { pictures, ...rest } = payload;
+    if (!pictures?.length) return rest;
+    if (!this.options.pictures) throw new Error('picture() is not available here.');
+    return { ...rest, files: await Promise.all(pictures.map(spec => this.options.pictures!.render(record.conversation, spec))) };
   }
 
   private remember(record: PlayRecord, action: string, error?: string): void {
@@ -302,9 +330,10 @@ export class PlayRuntime {
   private async show(live: Live, payload: MessagePayload): Promise<void> {
     const { record } = live;
     if (!record.messageId) return;
-    if (!record.viaInteraction) return this.options.surface.edit(record.channelId, record.messageId, payload);
-    if (!this.reachable(live)) throw new Error('not shown yet: no one has used the app for 15 minutes, so its message changes only at the next click.');
-    await live.reach!.edit(payload);
+    if (record.viaInteraction && !this.reachable(live)) throw new Error('not shown yet: no one has used the app for 15 minutes, so its message changes only at the next click.');
+    const ready = await this.attach(record, payload);
+    if (!record.viaInteraction) return this.options.surface.edit(record.channelId, record.messageId, ready);
+    await live.reach!.edit(ready);
   }
 
   private arm(live: Live): void {
@@ -381,18 +410,19 @@ export class PlayRuntime {
         id: randomBytes(8).toString('hex').slice(0, 10), title: clip(options.title, 100), owner: options.owner, channelId: options.channelId, conversation: options.conversation,
         participants: 'everyone', source: options.source, state: null, seed: randomBytes(4).readUInt32LE(), view: {}, emojis: options.emojis ?? {},
         timers: [], consults: [], status: 'running', log: [], createdAt: now, updatedAt: now,
-        ...(options.post ? { viaInteraction: true } : {}),
+        ...(options.post ? { viaInteraction: true } : {}), ...(options.file ? { file: options.file } : {}),
       };
       const meta = (await engine.call('meta', { ctx: this.context(record) })).value as { participants?: unknown } | null;
       record.participants = checkParticipants(options.participants ?? meta?.participants ?? 'everyone');
       const step = await this.advance(engine, record);
       const notes = await this.probe(engine, record, step);
       const live: Live = { record, engine, timers: new Map(), consulting: false, chain: Promise.resolve() };
+      const ready = await this.attach(record, step.payload);
       if (options.post) {
-        const posted = await options.post(step.payload);
+        const posted = await options.post(ready);
         record.messageId = posted.id;
         live.reach = { edit: posted.edit, until: this.now() + interactionLifetimeMs };
-      } else record.messageId = await this.options.surface.post(record.channelId, step.payload);
+      } else record.messageId = await this.options.surface.post(record.channelId, ready);
       this.live.set(record.id, live);
       this.commit(live, step, 'start');
       return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
@@ -400,12 +430,12 @@ export class PlayRuntime {
   }
 
   /** Swaps in new code. Keeping state lets a fix land mid-game; the view re-renders in place. */
-  /** `start` schedules timers now, for a loop new code adds to an app whose init and start button already ran. */
-  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = []): Promise<{ record: PlayRecord; preview: string }> {
+  /** `start` schedules timers now, for a loop new code adds to an app whose init and start button already ran; `emojis` adds server emoji pasted since it started. */
+  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = [], emojis: Record<string, string> = {}): Promise<{ record: PlayRecord; preview: string }> {
     const live = this.owned(id, conversation);
     return this.serial(live, async () => {
       const engine = source ? await this.build(source) : await this.engine(live);
-      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
+      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
       const added: string[] = [];
       try {
         // Kept state lacks what the new version's init() adds (a leaderboard, a weather field); fill those in.
@@ -419,7 +449,9 @@ export class PlayRuntime {
         const step = reset ? await this.advance(engine, record) : await (async () => {
           const shown = await engine.call('view', { state: record.state, ctx: this.context(record) });
           const view = normalizeView(shown.value);
-          return { state: record.state, seed: shown.seed, view: view as View, payload: renderView(record.id, view), effects: [], timers: record.timers } satisfies Advance;
+          const payload = renderView(record.id, view);
+          this.checkPictures(record, payload);
+          return { state: record.state, seed: shown.seed, view: view as View, payload, effects: [], timers: record.timers } satisfies Advance;
         })();
         const started = checkEffects(start.map(timer => ({ type: 'after', ...timer }))) as Array<Extract<Effect, { type: 'after' }>>;
         step.timers = [...step.timers.filter(timer => !started.some(entry => entry.id === timer.id)), ...started.map(timer => ({ id: timer.id, dueAt: this.now() + timer.ms }))];
@@ -439,9 +471,9 @@ export class PlayRuntime {
   }
 
   /** A dry run with no message, persistence or timers, so the model can check an app before posting it. */
-  async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean; state?: unknown } = {}): Promise<string> {
+  async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean; state?: unknown; conversation?: string } = {}): Promise<string> {
     const engine = await this.build(source);
-    const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], createdAt: 0, updatedAt: 0 };
+    const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: options.conversation ?? '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], createdAt: 0, updatedAt: 0 };
     const lines: string[] = [];
     let last: string[] = [];
     // Actions that change nothing (a move into a wall, a turn out of order) are easy to miss in the final state alone.
@@ -481,12 +513,15 @@ export class PlayRuntime {
   /** The code an app runs now, so a change can be made as small edits to it. */
   source(id: string, conversation: string): Source { return this.owned(id, conversation).record.source; }
 
+  /** The attached file an app was started from, if any. */
+  file(id: string, conversation: string): string | undefined { return this.owned(id, conversation).record.file; }
+
   /** The state an app runs with now. */
   state(id: string, conversation: string): unknown { return this.owned(id, conversation).record.state; }
 
   /** Apps this conversation started, and with `channelId` also the others shown in that channel. */
-  list(conversation: string, channelId?: string): Array<{ id: string; title: string; status: string }> {
-    return [...this.live.values()].map(live => live.record).filter(record => record.conversation === conversation || (channelId !== undefined && record.channelId === channelId)).map(({ id, title, status }) => ({ id, title, status }));
+  list(conversation: string, channelId?: string): Array<{ id: string; title: string; status: string; file?: string }> {
+    return [...this.live.values()].map(live => live.record).filter(record => record.conversation === conversation || (channelId !== undefined && record.channelId === channelId)).map(({ id, title, status, file }) => ({ id, title, status, ...(file ? { file } : {}) }));
   }
 
   /**
@@ -500,7 +535,7 @@ export class PlayRuntime {
     return this.serial(live, async () => {
       const { record } = live;
       const ended = record.status !== 'running';
-      const payload = withNote(renderView(record.id, record.view, ended), ended ? record.note : undefined);
+      const payload = await this.attach(record, withNote(renderView(record.id, record.view, ended), ended ? record.note : undefined));
       const old = { messageId: record.messageId, channelId: record.channelId, viaInteraction: record.viaInteraction, reach: this.reachable(live) ? live.reach : undefined };
       if (target.post) {
         const posted = await target.post(payload);
@@ -564,7 +599,7 @@ export class PlayRuntime {
       const action = toAction({ kind: interaction.kind, id: interaction.controlId, values: interaction.values, fields: interaction.fields }, interaction.user);
       try {
         const { payload, notes } = await this.dispatch(live, action, `${interaction.kind} ${interaction.controlId} by ${interaction.user.id}`);
-        await interaction.update(payload);
+        await interaction.update(await this.attach(live.record, payload));
         for (const note of notes) await interaction.followUp(note.content, note.embeds && renderEmbeds(note.embeds));
       } catch (error) {
         this.options.log(`play ${record.id}: ${errorText(error)}`);
@@ -623,6 +658,11 @@ export class PlayRuntime {
 /** :name: shortcodes, which Discord shows as typed in anything a bot sends; <:name:id> custom emoji are left out. */
 function shortcodesIn(text: string): string[] {
   return [...text.matchAll(/(?<![<\w]):([a-z][a-z0-9_+-]{1,40}):(?!\d)/g)].map(match => match[0]);
+}
+
+/** Server emoji inside code blocks or inline code, where Discord shows them as typed. */
+function codedEmojiIn(text: string): string[] {
+  return [...text.matchAll(/```[\s\S]*?```|`[^`\n]+`/g)].flatMap(match => match[0].match(/<a?:\w{2,32}:\d{17,20}>/g) ?? []);
 }
 
 function checkParticipants(value: unknown): Participants {
