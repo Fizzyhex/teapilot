@@ -125,6 +125,12 @@ export class WorkspaceStore {
     renameSync(temporary, file);
   }
 
+  /**
+   * The conversation's scratchpad (workspace/scratch.ts): a hidden folder inside its workspace, so sandboxed commands
+   * reach it as .scratch/ while people never see it listed. Not created here.
+   */
+  scratch(conversation: string): string { return join(this.directory, this.id(conversation), '.scratch'); }
+
   /** The files people and teapilot can refer to, oldest first; internal folders are left out. */
   list(conversation: string): StoredFile[] { this.folder(conversation); return this.index(conversation).files; }
   get(conversation: string, name: string): StoredFile | undefined {

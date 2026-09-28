@@ -1,4 +1,4 @@
-import { realpath } from 'node:fs/promises';
+import { realpath, rm } from 'node:fs/promises';
 import { loadConfig, type Config } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
 import { runHost, type HostRequest } from '../host.js';
@@ -78,6 +78,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   let surface: PlaySurface | undefined;
   const connected = () => { if (!surface) throw new Error('Discord is not connected yet.'); return surface; };
   const files = WorkspaceStore.at(stateDir);
+  /** A conversation's scratchpad is working material for its task, so it goes when its history is cleared; files and apps stay. */
+  const clearScratch = (historyKey: string) => { void rm(files.scratch(historyKey), { recursive: true, force: true }).catch(error => log(`${historyKey}: scratchpad not cleared: ${error instanceof Error ? error.message : String(error)}`)); };
   const sandbox = new SrtSandbox(stateDir, config.workspace, config.source?.directory);
   void sandbox.status().then(status => log(status.available
     ? `Workspace commands run sandboxed with ${status.tools.map(tool => tool.name).join(', ') || 'no media tools found'}.`
@@ -116,7 +118,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     // Decided now: whoever joins after the last person left starts with a clean collab.
     if (seat === 'collab' && seats.collaborators(channelId)) return Promise.resolve();
     return enqueue(historyKey, async () => {
-      histories.save(historyKey, []);
+      histories.save(historyKey, []); clearScratch(historyKey);
       seats.remember(historyKey, undefined);
     });
   };
@@ -141,7 +143,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       request: { prompt: '', cwd: root, mode: setup.mode ?? settings.startMode, tier: setup.tier, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
         // A conversation picks up where it was before a restart, or where the last one-shot in its history left off.
         history: histories.load(historyKey) },
-      onHistory: history => { try { histories.save(historyKey, history); } catch (error) { log(`${historyKey}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
+      onHistory: history => { if (!history.length) clearScratch(historyKey); try { histories.save(historyKey, history); } catch (error) { log(`${historyKey}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
       maxPromptChars: config.policy.limits.maxPromptChars,
       run,
       extension: teachat && headlessTeachat(teachat, key),
@@ -204,7 +206,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     }
     if (command.text === '/exit' && target?.key) {
       // A conversation that is not running, such as one from before a restart, still has saved history to clear.
-      histories.save(target.key, []);
+      histories.save(target.key, []); clearScratch(target.key);
       await command.respond('Cleared this conversation\'s history.');
       return;
     }

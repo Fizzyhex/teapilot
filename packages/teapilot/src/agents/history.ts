@@ -2,6 +2,7 @@ import type { AssistantMessage, Message, ToolResultMessage } from '@earendil-wor
 import { emptyUsage } from '../integration/inference.js';
 import type { ConversationTurn } from '../integration/events.js';
 import { estimateValueTokens } from '../inference/context.js';
+import { savedLine } from '../workspace/scratch.js';
 
 type Model = { provider: string; id: string };
 
@@ -33,6 +34,12 @@ const clip = (text: string, limit: number) => text.length > limit ? `${text.slic
 const clipValue = (value: unknown): unknown => typeof value === 'string' ? clip(value, 300)
   : Array.isArray(value) ? value.map(clipValue)
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clipValue(item)])) : value;
+/** A result cut down still says where its full output was saved, so the detail it lost can be found again. */
+const clipResult = (text: string) => {
+  const clipped = clip(text, 400);
+  const saved = clipped === text ? null : text.match(savedLine);
+  return saved ? [clipped, ...saved].join('\n') : clipped;
+};
 /** Later turns carry the current version; an earlier one's code only costs context. */
 const withoutCode = (text: string) => text.replace(/```[^\n`]*\n([\s\S]*?)```/g, (block, body: string) =>
   body.length > 300 ? `[${body.trimEnd().split('\n').length}-line code block from an earlier turn omitted]` : block);
@@ -43,7 +50,7 @@ function compact(steps: Message[]): Message[] {
     ? { ...message, content: message.content.map(part => part.type === 'text' ? { ...part, text: withoutCode(part.text) }
       : part.type === 'toolCall' ? { ...part, arguments: clipValue(part.arguments) as typeof part.arguments } : part) }
     : message.role === 'toolResult'
-      ? { ...message, content: message.content.map(part => part.type === 'text' ? { ...part, text: clip(part.text, 400) } : part) } as ToolResultMessage
+      ? { ...message, content: message.content.map(part => part.type === 'text' ? { ...part, text: clipResult(part.text) } : part) } as ToolResultMessage
       : message);
 }
 
@@ -52,7 +59,8 @@ function compact(steps: Message[]): Message[] {
  * them compacted. When that is too much, the oldest turns fall back to their text, then drop out, and the
  * newest is cut down last.
  */
-export function fitHistory(turns: ConversationTurn[], budget: number, model: Model): Message[] {
+export interface HistoryFit { turns: number; kept: number; compacted: number; textOnly: number; budget: number; fullTokens: number; tokens: number }
+export function fitHistory(turns: ConversationTurn[], budget: number, model: Model, report?: (fit: HistoryFit) => void): Message[] {
   const forms = turns.map(turn => {
     const user: Message = { role: 'user', content: turn.user, timestamp: 0 };
     const assistant: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: turn.assistant }], api: 'openai-completions', provider: model.provider, model: model.id, timestamp: 0, usage: emptyUsage(), stopReason: 'stop' };
@@ -68,5 +76,8 @@ export function fitHistory(turns: ConversationTurn[], budget: number, model: Mod
     const newest = forms.length - 1;
     if (levels[newest]! < 2) levels[newest] = levels[newest]! + 1; else first++;
   }
+  const kept = levels.slice(first);
+  report?.({ turns: turns.length, kept: kept.length, compacted: kept.filter(level => level === 1).length, textOnly: kept.filter(level => level === 2).length,
+    budget, fullTokens: forms.reduce((sum, form) => sum + form[0]!.tokens, 0), tokens: forms.length ? total() : 0 });
   return forms.slice(first).flatMap((form, index) => form[levels[first + index]!]!.messages);
 }

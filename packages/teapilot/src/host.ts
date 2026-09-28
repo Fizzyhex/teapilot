@@ -24,6 +24,8 @@ import { directTier, modelFor, profileFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+  /** The session's scratchpad folder, from the surface that owns the session. */
+  scratch?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
@@ -314,7 +316,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           }
           return activate(required, reason, signal);
         } : undefined,
-        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web,
+        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web, scratch: request.scratch, attempt: attempts - 1,
         // Each attempt fits earlier turns, with their steps, to its own model's context.
         history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, onReasoning: dependencies.onReasoning, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {

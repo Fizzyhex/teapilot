@@ -3,7 +3,7 @@ import { relative, resolve, sep } from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import { Type } from '@earendil-works/pi-ai';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
-import { ExecutionPolicy, PolicyDenied } from '../execution/policy.js';
+import { ExecutionPolicy, PolicyDenied, within } from '../execution/policy.js';
 
 // A repo_list output cap tuned for a small local model's context window: ~4 KB
 // of JSON keeps one call well under a 16,384-token profile even before the
@@ -23,22 +23,30 @@ function formatCount(count: number): string {
 
 // Enumeration never invokes a shell. Every directory and file crosses the same
 // boundary as read; linked/protected paths are omitted, not followed.
-export function repositoryTools(policy: ExecutionPolicy): AgentTool[] {
-  return ['repo_list', 'repo_search'].map(name => ({
-    name, label: name === 'repo_list' ? 'List repository files' : 'Search repository text',
-    description: `${name === 'repo_list' ? 'List files' : 'Search literal text with line references'} inside the repository without shell approval. Respects .gitignore, skips protected/linked/generated paths, and reports truncation. An empty list is a valid empty project. A root with many subdirectories is summarised as immediate children with per-directory file counts instead of a full recursive dump; list a specific subdirectory by path to see inside it.`,
+// The same tools serve a session's scratchpad: in a repository they also take a path inside it, and without
+// repository access they are offered under `names`, rooted at the scratchpad itself.
+export function repositoryTools(policy: ExecutionPolicy, names: [list: string, search: string] = ['repo_list', 'repo_search']): AgentTool[] {
+  const scratchOnly = policy.scratch !== undefined && policy.root === policy.scratch;
+  return names.map((name, index) => ({
+    name, label: index === 0 ? (scratchOnly ? 'List scratchpad files' : 'List repository files') : (scratchOnly ? 'Search scratchpad text' : 'Search repository text'),
+    description: scratchOnly
+      ? `${index === 0 ? 'List files' : 'Search literal text with line references'} in your scratchpad folder, including output saved there in full. Reports truncation; narrow the path or query when it does.`
+      : `${index === 0 ? 'List files' : 'Search literal text with line references'} inside the repository without shell approval. Respects .gitignore, skips protected/linked/generated paths, and reports truncation. An empty list is a valid empty project. A root with many subdirectories is summarised as immediate children with per-directory file counts instead of a full recursive dump; list a specific subdirectory by path to see inside it.${policy.scratch ? ' Also takes a directory in your scratchpad folder.' : ''}`,
     parameters: Type.Object({
-      path: Type.Optional(Type.String({ description: 'Repository-relative directory; defaults to .', maxLength: 1000 })),
-      ...(name === 'repo_search' ? { query: Type.String({ minLength: 1, maxLength: 500 }), caseSensitive: Type.Optional(Type.Boolean()) } : {}),
+      path: Type.Optional(Type.String({ description: scratchOnly ? 'Directory in the scratchpad; defaults to .' : 'Repository-relative directory; defaults to .', maxLength: 1000 })),
+      ...(index === 1 ? { query: Type.String({ minLength: 1, maxLength: 500 }), caseSensitive: Type.Optional(Type.Boolean()) } : {}),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     }),
     execute: async (_id, params, signal) => {
-      policy.requireRead();
       const args = params as { path?: string; query?: string; caseSensitive?: boolean; limit?: number };
       const start = resolve(policy.root, args.path ?? '.');
-      if (start !== policy.root) await policy.path(start, false);
+      policy.requireRead(start);
+      // A scratchpad path from a repository session is walked from the scratchpad, and named in full so read finds it.
+      const base = policy.scratch !== undefined && within(policy.scratch, start, true) ? policy.scratch : policy.root;
+      const labelOf = (path: string) => slash(base === policy.root ? relative(base, path) : path);
+      if (start !== base) await policy.path(start, false);
       const limit = Math.min(200, Math.max(1, args.limit ?? 80));
-      const outputCap = name === 'repo_list' ? LIST_OUTPUT_CAP : SEARCH_OUTPUT_CAP;
+      const outputCap = index === 0 ? LIST_OUTPUT_CAP : SEARCH_OUTPUT_CAP;
       const results: Array<string | { path: string; line: number; text: string }> = [];
       let visited = 0, bytes = 0, output = 0, truncated = false, skipped = 0, summaryDirCount = 0;
       const deadline = Date.now() + 5000;
@@ -91,22 +99,22 @@ export function repositoryTools(policy: ExecutionPolicy): AgentTool[] {
         const rules = await rulesAt(directory, inherited);
         for await (const item of scan(directory, rules)) {
           if (item.isDir) {
-            if (name === 'repo_list') {
+            if (index === 0) {
               // Empty directories (including newly created ones) contribute no
               // file entries of their own; mark them explicitly so they are
               // still visible instead of silently vanishing from the listing.
               const before = results.length;
               await walk(item.path, rules, depth + 1);
               if (results.length === before && !truncated) {
-                const label = slash(relative(policy.root, item.path));
+                const label = labelOf(item.path);
                 results.push(`${label}/ (empty)`); output += label.length + 9;
               }
             } else {
               await walk(item.path, rules, depth + 1);
             }
           } else {
-            const label = slash(relative(policy.root, item.path));
-            if (name === 'repo_list') { results.push(label); output += label.length; }
+            const label = labelOf(item.path);
+            if (index === 0) { results.push(label); output += label.length; }
             else {
               const info = await stat(item.path);
               if (bytes + info.size > 8_000_000) { truncated = true; break; }
@@ -127,15 +135,15 @@ export function repositoryTools(policy: ExecutionPolicy): AgentTool[] {
         }
       }
       // Load ancestor rules even when the caller narrows the search directory.
-      let rules: Rules = [], ancestor = policy.root;
-      if (start !== policy.root) {
-        for (const part of relative(policy.root, start).split(sep)) {
+      let rules: Rules = [], ancestor = base;
+      if (start !== base) {
+        for (const part of relative(base, start).split(sep)) {
           rules = await rulesAt(ancestor, rules);
           ancestor = resolve(ancestor, part);
           if (rules.some(rule => rule.matcher.ignores(slash(relative(rule.directory, ancestor)) + '/'))) throw new Error('Directory is ignored; choose an included repository path.');
         }
       }
-      if (name === 'repo_list') {
+      if (index === 0) {
         // Cheap, side-effect-free probe (no ignore rules, no policy checks, no
         // shared budget consumed) purely to decide whether a full depth-first
         // walk would bury sibling directories under the cap.
@@ -149,7 +157,7 @@ export function repositoryTools(policy: ExecutionPolicy): AgentTool[] {
           summaryDirCount = dirCount;
           const startRules = await rulesAt(start, rules);
           const children: Array<{ label: string; path: string; isDir: boolean }> = [];
-          for await (const item of scan(start, startRules)) children.push({ label: slash(relative(policy.root, item.path)), path: item.path, isDir: item.isDir });
+          for await (const item of scan(start, startRules)) children.push({ label: labelOf(item.path), path: item.path, isDir: item.isDir });
           children.sort((a, b) => a.label.localeCompare(b.label));
           for (const child of children) {
             if (results.length >= limit) break;
@@ -167,7 +175,7 @@ export function repositoryTools(policy: ExecutionPolicy): AgentTool[] {
       const note = summaryDirCount > 0
         ? `Root has ${summaryDirCount} subdirectories; showing immediate children with per-directory file counts instead of a full recursive listing. List a specific subdirectory (path: "<name>") to see inside it.`
         : truncated
-          ? (name === 'repo_list' ? 'Output or scan limit reached; narrow the path or list a specific subdirectory.' : 'Output or scan limit reached; narrow the path/query. Long matching lines show their first 500 characters.')
+          ? (index === 0 ? 'Output or scan limit reached; narrow the path or list a specific subdirectory.' : 'Output or scan limit reached; narrow the path/query. Long matching lines show their first 500 characters.')
           : 'Scan complete within scope; ignored, protected, linked, generated, and binary paths are omitted.';
       const result = { results, truncated, skipped, note };
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: {} };

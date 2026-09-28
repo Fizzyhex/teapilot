@@ -198,7 +198,7 @@ export class Conversation {
     const conversation = play?.conversation ?? this.options.key;
     const workspace: ConversationWorkspace | undefined = files && { store: files, conversation, sandbox, delivery: 'post',
       send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) };
-    const request: HostRequest = { ...base, access: admin, workspace,
+    const request: HostRequest = { ...base, access: admin, workspace, ...(files ? { scratch: files.scratch(conversation) } : {}),
       play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined, files: workspace } };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);

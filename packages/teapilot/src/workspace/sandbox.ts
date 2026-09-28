@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import { cleanChildEnvironment } from '../execution/policy.js';
@@ -35,8 +36,11 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Asked when the command connects to a host that is neither allowed nor denied; true lets it through. */
   network(host: string): Promise<boolean>;
+  /** Receives all of the output as it arrives, before any of it is left out. */
+  tee?(text: string): void;
 }
-export interface RunResult { exitCode: number | null; output: string; timedOut: boolean; cancelled: boolean }
+/** `clipped` says part of the output was left out of `output`. */
+export interface RunResult { exitCode: number | null; output: string; timedOut: boolean; cancelled: boolean; clipped?: boolean }
 
 /** Runs commands with a workspace folder as the only place they can write; tests use their own. */
 export interface WorkspaceSandbox {
@@ -248,9 +252,15 @@ export class SrtSandbox implements WorkspaceSandbox {
     try {
       return await new Promise<RunResult>(resolve => {
         const child = spawn(argv[0]!, argv.slice(1), { cwd: folder, env, windowsHide: true, detached: !windows, stdio: ['ignore', 'pipe', 'pipe'] });
-        let output = '', timedOut = false, cancelled = false;
-        const keep = (chunk: Buffer) => { output += chunk.toString('utf8'); if (output.length > runLimits.outputChars * 8) output = clip(output, runLimits.outputChars * 4); };
-        child.stdout!.on('data', keep); child.stderr!.on('data', keep);
+        let output = '', timedOut = false, cancelled = false, clipped = false;
+        const decoders = [new StringDecoder('utf8'), new StringDecoder('utf8')];
+        const keep = (index: number) => (chunk: Buffer) => {
+          const text = decoders[index]!.write(chunk);
+          options.tee?.(text);
+          output += text;
+          if (output.length > runLimits.outputChars * 8) { output = clip(output, runLimits.outputChars * 4); clipped = true; }
+        };
+        child.stdout!.on('data', keep(0)); child.stderr!.on('data', keep(1));
         const kill = () => {
           if (child.exitCode !== null || child.pid === undefined) return;
           if (windows) execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => undefined);
@@ -266,8 +276,8 @@ export class SrtSandbox implements WorkspaceSandbox {
         const finish = (exitCode: number | null) => {
           clearTimeout(timer);
           options.signal?.removeEventListener('abort', abort);
-          const annotated = SandboxManager.annotateStderrWithSandboxFailures(commandId, output);
-          resolve({ exitCode, output: clip(annotated.trim(), runLimits.outputChars), timedOut, cancelled });
+          const annotated = SandboxManager.annotateStderrWithSandboxFailures(commandId, output).trim();
+          resolve({ exitCode, output: clip(annotated, runLimits.outputChars), timedOut, cancelled, clipped: clipped || annotated.length > runLimits.outputChars });
         };
         child.on('error', error => { output += `\n${error.message}`; finish(null); });
         child.on('close', code => finish(code));

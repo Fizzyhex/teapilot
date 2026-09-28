@@ -16,7 +16,8 @@ export class Evidence {
   largestResult?: { tool: string; chars: number };
   unresolvedChecks: Set<string>;
   checks: Array<{ command: string; status: 'passed' | 'failed' }> = [];
-  observations: Array<{ tool: string; failed: boolean; detail: string }> = [];
+  /** The latest calls for a retry to continue from: what each was asked, how it ended, and where its full output went. */
+  observations: Array<{ tool: string; args?: string; failed: boolean; detail: string; saved?: string }> = [];
   private inspectionWarning = false;
   // Set once a search repeats after its warning: further searches are refused so the model answers instead.
   searchExhausted = false;
@@ -29,7 +30,8 @@ export class Evidence {
   /** Why tools are withdrawn when answerNow is set, for the notice that asks for the answer. */
   answerWhy = 'Those calls could not run';
   private repeated = new Map<string, number>();
-  constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = []) {
+  /** `scratch` tells the agent's own scratchpad files apart: writing them changes nothing in the project. */
+  constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = [], private readonly scratch?: (path: string) => boolean) {
     this.unresolvedChecks = new Set(unresolvedChecks);
   }
   refuse(): void {
@@ -37,10 +39,11 @@ export class Evidence {
     if (this.answerNow) this.reason = 'ineffective_calls';
     else { this.answerNow = true; this.refused = 0; }
   }
-  observe(name: string, args: unknown, failed: boolean, result?: string): void {
+  observe(name: string, args: unknown, failed: boolean, result?: string, saved?: string): void {
     this.warning = undefined; this.refused = 0;
     const data = args as { path?: string; command?: string };
-    this.observations.push({ tool: name, failed, detail: (result ?? '').slice(0, 700) });
+    const asked = args && typeof args === 'object' ? ['command', 'path', 'url', 'query'].map(key => (args as Record<string, unknown>)[key]).find(value => typeof value === 'string') as string | undefined : undefined;
+    this.observations.push({ tool: name, ...(asked ? { args: asked.slice(0, 200) } : {}), failed, detail: (result ?? '').slice(0, 700), ...(saved ? { saved } : {}) });
     this.observations = this.observations.slice(-6);
     // Cheap signal for which call likely dominated context, without re-serializing on demand.
     const chars = (result ?? '').length + JSON.stringify(args ?? {}).length;
@@ -56,7 +59,7 @@ export class Evidence {
       this.testFailures = failed ? this.testFailures + 1 : 0;
       if (this.testFailures >= this.thresholds.consecutiveFailures) this.reason = 'test_failures';
     }
-    if (!failed && ['edit', 'write'].includes(name)) {
+    if (!failed && ['edit', 'write'].includes(name) && !(typeof data.path === 'string' && this.scratch?.(data.path))) {
       this.changedFiles.add(String(data.path)); this.lastCheck = undefined;
       this.repeated.clear(); this.inspectionWarning = false; return;
     }

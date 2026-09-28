@@ -1,8 +1,10 @@
+import { relative, sep } from 'node:path';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { Type } from '@earendil-works/pi-ai';
 import type { Approve } from '../execution/policy.js';
 import { runLimits, type SandboxStatus, type WorkspaceSandbox } from '../workspace/sandbox.js';
 import { describeFile, fileName, maxFileBytes, type Changes, type WorkspaceStore } from '../workspace/store.js';
+import { notKept, savedNote, scratchLimits, type Scratch } from '../workspace/scratch.js';
 import type { Drafts, PlayContext } from './play.js';
 
 /** The workspace of the conversation a turn belongs to; the surface builds it, never the model. */
@@ -43,7 +45,7 @@ function changesLine(changes: Changes): string {
  * A conversation's workspace: what people attached, what commands make there, and files sent back. Work on files is
  * ordinary commands and scripts in the sandbox (ffmpeg, ImageMagick, Python, Node), not a tool per task.
  */
-export async function workspace(context: ConversationWorkspace, drafts: Drafts, approve: Approve, play?: PlayContext): Promise<{ systemPrompt: string; tools: AgentTool[] }> {
+export async function workspace(context: ConversationWorkspace, drafts: Drafts, approve: Approve, play?: PlayContext, scratch?: Scratch): Promise<{ systemPrompt: string; tools: AgentTool[] }> {
   const { store, conversation } = context;
   const status: SandboxStatus | undefined = await context.sandbox?.status();
   const names = () => store.list(conversation).map(file => file.name);
@@ -87,12 +89,28 @@ export async function workspace(context: ConversationWorkspace, drafts: Drafts, 
         }
         return decision;
       };
+      // All of the output goes to the scratchpad as it arrives, and is kept there when the result has to leave some out.
+      const teed: string[] = [];
+      let teedBytes = 0, overflow = false;
+      const tee = scratch && ((chunk: string) => {
+        if (overflow) return;
+        teedBytes += Buffer.byteLength(chunk);
+        if (teedBytes > scratchLimits.fileBytes) overflow = true; else teed.push(chunk);
+      });
+      const folder = store.folder(conversation);
       const before = await store.snapshot(conversation);
-      const result = await context.sandbox!.run(store.folder(conversation), args.command, { timeoutSeconds: Math.min(args.timeout ?? runLimits.defaultSeconds, runLimits.maxSeconds), signal, network });
+      const result = await context.sandbox!.run(folder, args.command, { timeoutSeconds: Math.min(args.timeout ?? runLimits.defaultSeconds, runLimits.maxSeconds), signal, network, ...(tee ? { tee } : {}) });
       const changes = await store.reconcile(conversation, before);
+      let full = '';
+      if (scratch && result.clipped) {
+        try {
+          const saved = await scratch.save('logs', 'workspace_run', teed.join(''), '.log', overflow || result.cancelled || result.timedOut);
+          full = `\n${savedNote(saved)} Commands here see it as ${relative(folder, saved.path).split(sep).join('/')}.`;
+        } catch (error) { full = `\n${notKept(error)}`; }
+      }
       const ended = result.cancelled ? 'The command was stopped.' : result.timedOut ? `The command ran out of time and was stopped; pass a longer timeout (up to ${runLimits.maxSeconds}) or do less per command.` : `Exit code ${result.exitCode}.`;
       const denied = refused.length ? ` Connecting to ${refused.join(', ')} was not approved; do not try it again this turn.` : '';
-      return text(`${saved}${ended}${denied}\n${result.output ? `Output:\n\`\`\`\n${result.output}\n\`\`\`` : 'No output.'}\n${changesLine(changes)}`);
+      return text(`${saved}${ended}${denied}\n${result.output ? `Output:\n\`\`\`\n${result.output}\n\`\`\`${full}` : 'No output.'}\n${changesLine(changes)}`);
     },
   });
   tools.push({
