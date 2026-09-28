@@ -204,6 +204,9 @@ describe('web controller', () => {
     const page = await web.read(`${base}/x`, 30);
     expect(page.chars).toBeLessThanOrEqual(30);
     expect(page.text).toContain('Showing the first');
+    // The whole page comes back too, shown in full or not, so the reader can keep it.
+    expect(page.full).toMatchObject({ truncated: true, text: expect.stringContaining('Page /x') });
+    expect((await web.read(`${base}/x`, 4000)).full).toMatchObject({ truncated: false });
   });
 });
 

@@ -50,7 +50,7 @@ export class WebController {
   }
 
   /** The page as tool output, at most maxChars of its text. Refusals and failures are text, never thrown. */
-  async read(raw: string, maxChars: number, signal?: AbortSignal): Promise<{ text: string; chars: number }> {
+  async read(raw: string, maxChars: number, signal?: AbortSignal): Promise<{ text: string; chars: number; full?: { url: string; title: string; text: string; truncated: boolean } }> {
     const refuse = (reason: string, fields: Record<string, unknown> = {}) => {
       void this.options.event?.('web_read', { refused: reason.slice(0, 120), ...fields });
       return { text: reason.startsWith('Not read') ? reason : `Not read: ${reason}`, chars: 0 };
@@ -82,7 +82,8 @@ export class WebController {
     const header = [`Source: ${document.url}`, document.title && `Title: ${document.title}`,
       body.truncated && `Showing the first ${body.text.length} of ${document.text.length} characters.`].filter(Boolean).join('\n');
     const text = `${header}\n<<<untrusted page content>>>\n${body.text || '(no readable text)'}\n<<<end of page>>>${links}`;
-    return { text, chars: body.text.length };
+    // The whole page, so the reader can keep it where it can be searched after later turns cut this result down.
+    return { text, chars: body.text.length, full: { url: document.url, title: document.title, text: document.text, truncated: body.truncated } };
   }
 
   private async fetch(url: URL, signal?: AbortSignal): Promise<Document | string> {

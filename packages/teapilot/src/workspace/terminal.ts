@@ -12,6 +12,8 @@ export interface SessionWorkspace {
   context(cwd: string): ConversationWorkspace;
   /** Copies the files a prompt @mentions into the workspace and returns the prompt with notes on what arrived. */
   attach(prompt: string, cwd: string, room: number): Promise<string>;
+  /** The session's scratchpad, in every mode: Code mode keeps its working files here rather than in the repository. */
+  scratch(): string;
   /** /new starts a new task with an empty workspace. */
   reset(): Promise<void>;
   /** The session ended: its workspace goes too, since files sent back are already beside the user. */
@@ -29,6 +31,8 @@ export class TerminalWorkspace implements SessionWorkspace {
   context(cwd: string): ConversationWorkspace {
     return { store: this.store, conversation: this.conversation, sandbox: this.sandbox, delivery: 'save', send: (_text, files) => this.save(cwd, files) };
   }
+
+  scratch(): string { return this.store.scratch(this.conversation); }
 
   async attach(prompt: string, cwd: string, room: number): Promise<string> {
     const root = await realpath(cwd);

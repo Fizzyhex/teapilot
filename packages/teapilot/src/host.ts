@@ -24,6 +24,8 @@ import { directTier, modelFor, profileFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+  /** The session's scratchpad folder, from the surface that owns the session. */
+  scratch?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
@@ -154,7 +156,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     // A workload label such as ask.normal does not mean repository tools stayed
     // unused: mid-run capability requests can grant write/shell under any workload.
     const touchedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
-    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool result: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars).` : '';
+    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool call: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars, arguments and result).` : '';
     return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
       touchedRepository ? `Observed file edits: ${changedFiles.size ? [...changedFiles].map(path => fileSizes.has(path) ? `${path} (${formatSize(fileSizes.get(path)!)})` : path).join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}` : undefined,
       touchedRepository ? `Checks after latest observed edit: ${attempt.check ?? 'not run'}.` : undefined,
@@ -314,7 +316,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           }
           return activate(required, reason, signal);
         } : undefined,
-        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web,
+        unresolvedChecks: previous?.unresolvedChecks, searchUnavailable: searchDisabled, webController: web, scratch: request.scratch, attempt: attempts - 1,
         // Each attempt fits earlier turns, with their steps, to its own model's context.
         history: request.history, onEvent: dependencies.onEvent, onActivity: dependencies.onActivity, onReasoning: dependencies.onReasoning, beforeMutation: dependencies.beforeMutation,
         approve: async approval => {

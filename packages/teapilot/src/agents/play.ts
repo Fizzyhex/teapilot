@@ -102,12 +102,24 @@ const edits = (description: string) => Type.Optional(Type.Array(Type.Object({
   all: Type.Optional(Type.Boolean({ description: 'Replace every occurrence, e.g. one emoji used throughout.' })),
 }), { minItems: 1, maxItems: 20, description }));
 type Edit = { find: string; replace: string; all?: boolean };
+/** The lines of `code` most like the first line of `find`, numbered, so a near miss can be copied exactly. */
+function closest(code: string, find: string): string {
+  const words = (line: string) => new Set(line.toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) ?? []);
+  const wanted = words(find.split('\n').find(line => line.trim()) ?? '');
+  if (!wanted.size) return '';
+  const lines = code.split('\n').map((line, index) => {
+    const shared = [...words(line)].filter(word => wanted.has(word)).length;
+    return { line, index, score: shared / wanted.size };
+  }).filter(entry => entry.score >= 0.5).sort((a, b) => b.score - a.score).slice(0, 3).sort((a, b) => a.index - b.index);
+  return lines.length ? ` Closest lines there:\n${lines.map(entry => `${entry.index + 1}: ${entry.line}`).join('\n')}` : '';
+}
 /** `code` with each edit applied in order, or why one does not apply. */
 function applyEdits(code: string, changes: Edit[], where: string): { code: string } | string {
   for (const [index, change] of changes.entries()) {
     const count = code.split(change.find).length - 1;
     if (change.all && count) { code = code.split(change.find).join(change.replace); continue; }
-    if (count !== 1) return `Edit ${index + 1}: its find text occurs ${count} times in ${where}, not once.${count > 1 ? ' Add surrounding text to pick one, or set all: true to replace every one.' : ''} Nothing was changed.`;
+    if (count > 1) return `Edit ${index + 1}: its find text occurs ${count} times in ${where}, not once. Add surrounding text to pick one, or set all: true to replace every one. Nothing was changed.`;
+    if (!count) return `Edit ${index + 1}: its find text occurs 0 times in ${where}, not once; find must copy it exactly (play_inspect shows the current source). Nothing was changed.${closest(code, change.find)}`;
     code = code.replace(change.find, () => change.replace);
   }
   return { code };

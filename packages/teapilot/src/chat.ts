@@ -116,7 +116,8 @@ export async function runSession(options: {
     // With session grants the host routes by mode and activates access on demand;
     // without them the mode's workload is fixed for the turn.
     const result = await options.run({ ...options.request, ...extension?.request?.(), cwd, prompt, correction, tier, relatedTier, history,
-      mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode), ...(workspace ? { workspace: workspace.context(cwd) } : {}) });
+      mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode), ...(workspace ? { workspace: workspace.context(cwd) } : {}),
+      ...(options.workspace ? { scratch: options.workspace.scratch() } : {}) });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;

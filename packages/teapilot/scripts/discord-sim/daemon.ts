@@ -1,9 +1,9 @@
 // The long-lived half of scripts/agent-discord.mjs: runs teapilot's Discord service against the
 // simulated Discord in world.ts and answers the client's commands over a local socket.
-import { appendFileSync, cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
-import { basename, extname, join } from 'node:path';
+import { basename, extname, join, relative, sep } from 'node:path';
 import { configDirectory, loadConfig } from '../../src/config.js';
 import { AccessStore } from '../../src/discord/access-store.js';
 import { serveDiscord } from '../../src/discord/index.js';
@@ -21,6 +21,8 @@ export interface Spec {
   root: string; mode: 'ask' | 'chat'; configDir?: string; ttl: number; teachat: boolean;
   /** Time stands still except when `advance` moves it. */
   frozen?: boolean;
+  /** Scratchpad benchmark settings (teapilot-scratchpad-benchmark.md), passed to teapilot as its test hooks. */
+  bench?: { scratchpad?: 'on' | 'off'; historyTokens?: string; compactHistory?: boolean; forceRetry?: string; trace?: boolean; fixture?: { file: string; name: string; description: string } };
 }
 type Body = Record<string, unknown> & { op: string };
 
@@ -38,11 +40,28 @@ const uploads = (paths: string[]) => paths.map(path => {
 });
 const clock = new SkippableClock(spec.frozen);
 const notes: string[] = [];
-const config = await loadConfig(await configDirectory(spec.configDir, homedir()), { ...process.env });
+// The fixture is copied into the session's state, which teapilot's file tools do not open; the evaluator's
+// manifest stays wherever it was generated.
+const bench: Record<string, string> = {};
+if (spec.bench?.scratchpad) bench.TEAPILOT_SCRATCHPAD = spec.bench.scratchpad;
+if (spec.bench?.historyTokens) bench.TEAPILOT_TEST_HISTORY_TOKENS = spec.bench.historyTokens;
+if (spec.bench?.compactHistory) bench.TEAPILOT_TEST_COMPACT_HISTORY = '1';
+if (spec.bench?.forceRetry) bench.TEAPILOT_TEST_FORCE_RETRY = spec.bench.forceRetry;
+const traceDir = join(spec.directory, 'trace');
+if (spec.bench?.trace) bench.TEAPILOT_TRACE_DIR = traceDir;
+if (spec.bench?.fixture) {
+  const copy = join(spec.state, 'fixture', basename(spec.bench.fixture.file));
+  mkdirSync(join(spec.state, 'fixture'), { recursive: true });
+  copyFileSync(spec.bench.fixture.file, copy);
+  bench.TEAPILOT_FIXTURE_TOOL = JSON.stringify({ name: spec.bench.fixture.name, description: spec.bench.fixture.description, file: copy });
+}
+const startedAt = new Date().toISOString();
+const config = await loadConfig(await configDirectory(spec.configDir, homedir()), { ...process.env, ...bench });
 if (!config.policy.permissions.includes('discord.play')) {
   config.policy.permissions.push('discord.play');
   notes.push('This profile\'s policy.json lacks discord.play; the simulator allows it for this session only.');
 }
+if (Object.keys(bench).length) notes.push(`Benchmark settings: ${Object.entries(bench).map(([key, value]) => `${key}=${key === 'TEAPILOT_FIXTURE_TOOL' ? JSON.parse(value).name : value}`).join(', ')}.${spec.bench?.trace ? ` Traces go to ${traceDir}; copy them before stop.` : ''}`);
 const settings: DiscordSettings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelIds: [channelId], root: spec.root, startMode: spec.mode };
 AccessStore.at(spec.state, settings.allowedUserIds, config.policy.permissions).addUser(people.user.id, people.op.id, { name: people.user.name });
 const store = new PlayStore(join(spec.state, 'discord-play'));
@@ -119,6 +138,31 @@ function app(id: string): string {
   ].join('\n');
 }
 
+/** Each conversation's scratchpad files, and the events a scratchpad evaluation reads, since this session started. */
+function scratch(last: number): string {
+  const lines: string[] = [];
+  const workspaces = join(spec.state, 'workspaces');
+  for (const id of existsSync(workspaces) ? readdirSync(workspaces) : []) {
+    const folder = join(workspaces, id, '.scratch');
+    const files: string[] = [];
+    const visit = (directory: string) => {
+      for (const entry of existsSync(directory) ? readdirSync(directory, { withFileTypes: true }) : []) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) visit(path);
+        else files.push(`  ${relative(folder, path).split(sep).join('/')} (${statSync(path).size} B)`);
+      }
+    };
+    visit(folder);
+    if (files.length) lines.push(folder, ...files);
+  }
+  const types = new Set(['scratch_saved', 'scratch_access', 'fixture_invocation', 'history_fit', 'test_forced_retry', 'attempt_start', 'attempt_end', 'escalation', 'continuation']);
+  const outcomes = join(config.stateDir, 'outcomes.jsonl');
+  const events = existsSync(outcomes) ? readFileSync(outcomes, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try { const event = JSON.parse(line) as { at: string; type: string }; return event.at >= startedAt && types.has(event.type) ? [line] : []; } catch { return []; }
+  }) : [];
+  return [lines.length ? lines.join('\n') : 'No scratchpad files yet.', `## events (${outcomes})`, ...events.slice(-last)].join('\n');
+}
+
 async function handle(body: Body): Promise<Record<string, unknown>> {
   const as = String(body.as ?? 'op');
   const input = () => { fresh = ''; };
@@ -143,6 +187,7 @@ async function handle(body: Body): Promise<Record<string, unknown>> {
     case 'screen': return { text: world.screen(body.in as string | undefined, Number(body.last) || 15) };
     case 'apps': return { text: apps() };
     case 'app': return { text: app(String(body.id)) };
+    case 'scratch': return { text: scratch(Number(body.last) || 40) };
     case 'log': return { text: world.logs.slice(-(Number(body.last) || 30)).join('\n') || 'Nothing logged yet.' };
     case 'advance': {
       input();
