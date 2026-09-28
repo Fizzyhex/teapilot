@@ -1,4 +1,4 @@
-# Scratchpad Benchmark - Import audit board
+# ScratchBench - Import audit board
 
 Version: 1.0 — 28 September 2026  
 Status: executable test specification; the fixture, hooks and instrumentation exist (see [Running in this repository](#running-in-this-repository)). No benchmark has been run and no results are claimed here.  
@@ -167,7 +167,7 @@ The scratchpad is an ordinary folder per session (`.scratch/` inside the convers
 | Fixture and manifest | `node packages/teapilot/scripts/bench/import-diagnostic.mjs generate --seed <seed> --out <evaluator dir>` writes `snapshot.txt` and the evaluator-only `manifest.json`. |
 | `run_import_diagnostic` | `start --fixture <dir>/snapshot.txt`. The simulator copies the snapshot into the session's state and serves it through a read-only tool. Every call is logged as `fixture_invocation`, and repeats are never refused. |
 | Clipping-only baseline | `start --scratchpad off`. Long results are still bounded, but nothing is kept. |
-| Compaction boundary | `start --history-tokens N` caps how much of earlier turns an attempt replays, using the production `fitHistory`. `history_fit` events record turns, levels and tokens. |
+| Compaction boundary | `start --compact-history` replays every earlier turn through the production `compact()` step, the newest included, so each stage starts after a real boundary without losing turns. `start --history-tokens N` also caps the budget, which drops whole turns once it is small (4000 dropped stage 3's finding before stage 5). `history_fit` events record turns, levels and tokens. |
 | Forced retry | `start --force-retry run_import_diagnostic` ends the first attempt after the diagnostic's first success, through normal host continuation. |
 | Model-visible context | `start --trace` writes each model call's system prompt, tools and messages to the session's `trace/` folder. Copy it before `stop`. |
 | Capture and retrieval trace | `scratch <name>` lists each conversation's scratchpad files. It also lists the `scratch_saved`, `scratch_access`, `fixture_invocation`, `history_fit` and attempt events since the session started. |

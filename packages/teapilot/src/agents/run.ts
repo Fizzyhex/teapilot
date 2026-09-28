@@ -17,7 +17,7 @@ import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
 import { casualPrompt } from './casual.js';
 import { coder } from './coder.js';
-import { fitHistory, turnSteps, type HistoryFit } from './history.js';
+import { fitHistory, supersedePlayCalls, turnSteps, type HistoryFit } from './history.js';
 import { latestBlock, latestCode, pastedEmoji, play, withoutCode, type Drafts, type PlayContext } from './play.js';
 import { workspace, type ConversationWorkspace } from './workspace.js';
 import { captureResult, fixtureTool, scratchPrompt, scratchTools, scratchTouched } from './scratchpad.js';
@@ -206,11 +206,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // Earlier turns get at most half of what the instructions, tools and request leave, so this turn's own
   // calls and results still fit. The admission check at the provider remains the exact limit.
   const fixed = 2048 + estimateValueTokens([setup.systemPrompt, input.prompt]) + estimateValueTokens(setup.tools.map(({ name, description, parameters }) => ({ name, description, parameters })));
-  // A benchmark can squeeze earlier turns to force the compaction it measures (TEAPILOT_TEST_HISTORY_TOKENS).
+  // A benchmark can squeeze or compact earlier turns to force the compaction it measures (TEAPILOT_TEST_HISTORY_*).
   const historyBudget = Math.floor((profile.contextTokens - profile.maxOutputTokens - fixed) / 2);
   let fit = undefined as HistoryFit | undefined;
-  const history = fitHistory(input.history ?? [], Math.min(historyBudget, config.test?.historyTokens ?? Infinity), model, result => { fit = result; });
-  if (fit?.turns) await telemetry.event('history_fit', { attempt: input.attempt ?? 0, ...fit, ...(config.test?.historyTokens !== undefined ? { forced: true } : {}) });
+  const history = fitHistory(input.history ?? [], Math.min(historyBudget, config.test?.historyTokens ?? Infinity), model, result => { fit = result; }, config.test?.compactHistory);
+  if (fit?.turns) await telemetry.event('history_fit', { attempt: input.attempt ?? 0, ...fit, ...(config.test?.historyTokens !== undefined || config.test?.compactHistory ? { forced: true } : {}) });
   const stream = guardedStream(config, tier, input.budget, telemetry, inference, playing ? { outputTokens: profile.maxOutputTokens } : undefined);
   // What each model call is sent, for checking afterwards what the model could and could not see (TEAPILOT_TRACE_DIR).
   let traced = 0;
@@ -236,10 +236,16 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       return stream(...args);
     },
     toolExecution: 'sequential',
-    prepareNextTurnWithContext: async ({ context }) => {
+    prepareNextTurnWithContext: async ({ context: given }) => {
+      // Superseded app calls are dead weight for the rest of the attempt; a model rewriting an app several times
+      // otherwise fills the window with versions already replaced.
+      const room = profile.contextTokens - profile.maxOutputTokens;
+      const messages = playing ? supersedePlayCalls(given.messages as Message[], estimateValueTokens(given.messages) > room / 2) : given.messages;
+      const context = messages === given.messages ? given : { ...given, messages: messages as typeof given.messages };
+      const pruned = context === given ? undefined : { context };
       if (claimNotice) {
         claimNotice = false;
-        return { messages: [{ role: 'user', content: '[host notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (play_update with edits on its current source), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
+        return { ...pruned, messages: [{ role: 'user', content: '[host notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (play_update with edits on its current source), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
       }
       if (lostNotice) {
         lostNotice = false;
@@ -268,7 +274,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       // Once search or reading is exhausted, take the tool away: a refusal message alone does not stop a model retrying it.
       const withdrawn = (name: string) => (evidence.searchExhausted && name === 'web_search') || (evidence.readsExhausted && name === 'web_read');
       const withoutSearch = <T extends { name: string }>(tools: T[]) => tools.filter(tool => !withdrawn(tool.name));
-      if (!toolsChanged) return context.tools?.some(tool => withdrawn(tool.name)) ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
+      if (!toolsChanged) return context.tools?.some(tool => withdrawn(tool.name)) ? { context: { ...context, tools: withoutSearch(context.tools) } } : pruned;
       toolsChanged = false;
       const next = await compose();
       return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[host notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
@@ -306,7 +312,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       const relPath = (path: string) => relative(policy.root, path) || path;
       if (!isError && ['write', 'edit'].includes(toolCall.name) && data.path && !policy.inScratch(data.path)) {
         let size: number | undefined;
-        try { size = (await stat(resolve(policy.root, data.path))).size; } catch { /* stat is a display nicety, never blocks the call */ }
+        try { size = (await stat(policy.resolve(data.path))).size; } catch { /* stat is a display nicety, never blocks the call */ }
         if (size !== undefined) evidence.fileSizes.set(data.path, size);
         toolDetails.set(toolCall.id, { path: relPath(data.path), size });
       } else if (toolCall.name === 'read' && data.path) toolDetails.set(toolCall.id, { path: relPath(data.path) });
@@ -357,7 +363,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         const args = (event.args ?? {}) as { path?: unknown; command?: unknown; url?: unknown };
         if (typeof args.command === 'string') detail = { command: args.command };
         else if (typeof args.url === 'string') detail = { url: shortUrl(args.url) };
-        else if (typeof args.path === 'string') detail = { path: relative(policy.root, resolve(policy.root, args.path)) || args.path };
+        else if (typeof args.path === 'string') detail = { path: relative(policy.root, policy.resolve(args.path)) || args.path };
       } else {
         const state = settled.get(event.toolCallId); settled.delete(event.toolCallId);
         if (!state) evidence.refuse();

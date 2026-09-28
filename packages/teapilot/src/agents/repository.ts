@@ -27,6 +27,8 @@ function formatCount(count: number): string {
 // repository access they are offered under `names`, rooted at the scratchpad itself.
 export function repositoryTools(policy: ExecutionPolicy, names: [list: string, search: string] = ['repo_list', 'repo_search']): AgentTool[] {
   const scratchOnly = policy.scratch !== undefined && policy.root === policy.scratch;
+  // Complete searches already answered in this attempt: a model unsure whether something is absent repeats them.
+  const searched = new Map<string, string>();
   return names.map((name, index) => ({
     name, label: index === 0 ? (scratchOnly ? 'List scratchpad files' : 'List repository files') : (scratchOnly ? 'Search scratchpad text' : 'Search repository text'),
     description: scratchOnly
@@ -39,7 +41,7 @@ export function repositoryTools(policy: ExecutionPolicy, names: [list: string, s
     }),
     execute: async (_id, params, signal) => {
       const args = params as { path?: string; query?: string; caseSensitive?: boolean; limit?: number };
-      const start = resolve(policy.root, args.path ?? '.');
+      const start = policy.resolve(args.path ?? '.');
       policy.requireRead(start);
       // A scratchpad path from a repository session is walked from the scratchpad, and named in full so read finds it.
       const base = policy.scratch !== undefined && within(policy.scratch, start, true) ? policy.scratch : policy.root;
@@ -176,8 +178,14 @@ export function repositoryTools(policy: ExecutionPolicy, names: [list: string, s
         ? `Root has ${summaryDirCount} subdirectories; showing immediate children with per-directory file counts instead of a full recursive listing. List a specific subdirectory (path: "<name>") to see inside it.`
         : truncated
           ? (index === 0 ? 'Output or scan limit reached; narrow the path or list a specific subdirectory.' : 'Output or scan limit reached; narrow the path/query. Long matching lines show their first 500 characters.')
-          : 'Scan complete within scope; ignored, protected, linked, generated, and binary paths are omitted.';
-      const result = { results, truncated, skipped, note };
+          : index === 1
+            ? `These are all ${results.length} matches in scope${results.length ? '' : ': the text does not occur there'}; ignored, protected, linked, generated, and binary paths are omitted.`
+            : 'Scan complete within scope; ignored, protected, linked, generated, and binary paths are omitted.';
+      const key = JSON.stringify([start, args.query, args.caseSensitive ?? false]);
+      const found = JSON.stringify(results);
+      const repeated = index === 1 && !truncated && searched.get(key) === found;
+      if (index === 1 && !truncated) searched.set(key, found);
+      const result = { results, truncated, skipped, note: repeated ? `Same matches as your earlier search for this text; searching again will not find more. ${note}` : note };
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: {} };
     },
   }));

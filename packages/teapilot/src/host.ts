@@ -156,7 +156,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     // A workload label such as ask.normal does not mean repository tools stayed
     // unused: mid-run capability requests can grant write/shell under any workload.
     const touchedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
-    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool result: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars).` : '';
+    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool call: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars, arguments and result).` : '';
     return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
       touchedRepository ? `Observed file edits: ${changedFiles.size ? [...changedFiles].map(path => fileSizes.has(path) ? `${path} (${formatSize(fileSizes.get(path)!)})` : path).join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}` : undefined,
       touchedRepository ? `Checks after latest observed edit: ${attempt.check ?? 'not run'}.` : undefined,

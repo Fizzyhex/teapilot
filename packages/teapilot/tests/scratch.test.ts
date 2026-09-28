@@ -152,6 +152,14 @@ it('searches the scratchpad from a repository session, naming files so read can 
   const own = scratchTools(new ExecutionPolicy(scratch, config, async () => true, undefined, scratch));
   expect(own.map(tool => tool.name)).toEqual(['list_files', 'search_files', 'read', 'write', 'edit']);
   expect(JSON.parse(textOf(await own[0]!.execute('l', {}))).results).toEqual(['logs/bash-1.log']);
+  // `.scratch/` is what sandboxed commands call it, and it means the same folder to every file tool.
+  expect(JSON.parse(textOf(await own[1]!.execute('s', { path: '.scratch/logs', query: 'MARKER-7f2a' }))).results).toHaveLength(1);
+  expect(textOf(await own[2]!.execute('r', { path: '.scratch/logs/bash-1.log', offset: 5001, limit: 1 }))).toContain('MARKER-7f2a');
+  expect(policy.inScratch('.scratch/logs/bash-1.log')).toBe(true);
+  // A complete search says it is complete, and the same search again says it will find nothing more.
+  expect(JSON.parse(textOf(await own[1]!.execute('s', { query: 'no-such-text' }))).note).toMatch(/^These are all 0 matches in scope: the text does not occur there/);
+  const again = JSON.parse(textOf(await own[1]!.execute('s', { path: '.scratch/logs', query: 'MARKER-7f2a', limit: 200 })));
+  expect(again.note).toMatch(/^Same matches as your earlier search for this text; searching again will not find more\. These are all 1 matches/);
 });
 
 it('keeps all of a workspace command\'s output when its result leaves some out, where commands there can read it', async () => {

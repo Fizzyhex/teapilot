@@ -1,5 +1,5 @@
 import { lstat, realpath, readFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config } from '../config.js';
 import type { Permission } from './grants.js';
@@ -40,15 +40,23 @@ export class ExecutionPolicy {
    * writing them needs no repository permission or approval, and they never count as changes to the project.
    */
   constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation, readonly scratch?: string) {}
+  /**
+   * `path` made absolute. Sandboxed commands see the scratchpad as `.scratch/`, so that name means the scratchpad
+   * here too, wherever the root is.
+   */
+  resolve(path: string): string {
+    const [first, ...rest] = path.split(/[\\/]/);
+    return this.scratch !== undefined && first === '.scratch' && basename(this.scratch) === '.scratch' ? resolve(this.scratch, ...rest) : resolve(this.root, path);
+  }
   /** Whether `path` (relative to the root, or absolute) is in the scratchpad. */
-  inScratch(path: string): boolean { return this.scratch !== undefined && within(this.scratch, resolve(this.root, path), true); }
+  inScratch(path: string): boolean { return this.scratch !== undefined && within(this.scratch, this.resolve(path), true); }
   requireRead(path?: string): void {
     if (path !== undefined && this.inScratch(path)) return;
     if (!this.config.policy.permissions.includes('repository.read')) { this.denied = true; throw new PolicyDenied('Missing repository.read permission'); }
   }
   async path(path: string, mutation: boolean): Promise<string> {
     if (!path || path.includes('\0') || path.startsWith('~')) throw new PolicyDenied('Use repository-relative paths');
-    const target = resolve(this.root, path);
+    const target = this.resolve(path);
     const scratch = this.inScratch(target);
     const base = scratch ? this.scratch! : this.root;
     const rel = relative(base, target);

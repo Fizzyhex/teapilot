@@ -94,7 +94,7 @@ it('updates the newest app with small edits to its current source', async () => 
   const steps = [
     { tool: { name: 'play_start', arguments: { title: 'Counter', source } } },
     { tool: { name: 'play_update', arguments: { edits: [{ find: "'Count '", replace: "'Total '" }] } } },
-    { tool: { name: 'play_update', arguments: { edits: [{ find: 'no such text', replace: 'x' }] } } },
+    { tool: { name: 'play_update', arguments: { edits: [{ find: "view: n => ({ content: 'Total ' + n })", replace: 'x' }] } } },
     { text: 'Renamed it.' },
     { tool: { name: 'play_inspect', arguments: {} } },
     { text: 'It counts.' },
@@ -105,6 +105,8 @@ it('updates the newest app with small edits to its current source', async () => 
   expect(result.success, JSON.stringify(result)).toBe(true);
   expect(JSON.stringify(bodies[2].messages)).toContain('Total 0');
   expect(JSON.stringify(bodies[3].messages)).toContain('occurs 0 times in the current source');
+  // A near miss shows the line it was probably meant to copy.
+  expect(JSON.stringify(bodies[3].messages)).toMatch(/Closest lines there:(\\)+n2: export default app\(/);
   const [app] = f.runtime.list('dm:1');
   expect(f.runtime.source(app!.id, 'dm:1')).toMatchObject({ code: expect.stringContaining("'Total '") });
   // A later turn without the earlier calls still learns the app from the prompt, and play_inspect shows its code.

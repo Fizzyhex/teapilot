@@ -90,7 +90,7 @@ export function scratchTouched(scratch: Scratch, policy: ExecutionPolicy, tool: 
   const data = (args ?? {}) as { path?: unknown; command?: unknown };
   // The scratchpad's own listing and search start there; file tools have made their path absolute by now.
   if (['list_files', 'search_files'].includes(tool)) return typeof data.path === 'string' && data.path ? data.path.split(sep).join('/') : '.';
-  if (typeof data.path === 'string' && data.path && policy.inScratch(data.path)) return relative(scratch.folder, resolve(policy.root, data.path)).split(sep).join('/') || '.';
+  if (typeof data.path === 'string' && data.path && policy.inScratch(data.path)) return relative(scratch.folder, policy.resolve(data.path)).split(sep).join('/') || '.';
   if (typeof data.command === 'string' && (data.command.includes(scratch.folder) || /(^|[\s"'/\\])\.scratch\b/.test(data.command))) return '(command)';
   return undefined;
 }

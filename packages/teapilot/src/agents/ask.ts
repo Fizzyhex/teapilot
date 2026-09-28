@@ -4,11 +4,11 @@ import type { Config } from '../config.js';
 import { READS_SPENT, SEARCH_UNAVAILABLE } from '../routing/escalation.js';
 import { searchQuery, searchRepair, SearchSetupError } from '../search.js';
 import type { WebController } from '../web/controller.js';
-import { notKept, savedNote, type Scratch } from '../workspace/scratch.js';
+import { notKept, savedNote, scratchLimits, type Scratch } from '../workspace/scratch.js';
 
 /**
  * Page reading for one attempt: the request's controller, a per-page limit, and what this attempt may still add to
- * context. With a scratchpad, the whole of a page too long to show is kept there.
+ * context. With a scratchpad, the whole of any page longer than later turns replay is kept there.
  */
 export interface Reader { controller: WebController; maxChars: number; budget: { remaining: number }; scratch?: Scratch }
 
@@ -45,7 +45,8 @@ export function ask(config: Config, web: boolean, repository = false, searchUnav
       const page = await controller.read((args as { url: string }).url, Math.min(maxChars, budget.remaining), signal);
       budget.remaining -= page.chars;
       let text = page.text;
-      if (page.full && reader!.scratch) {
+      // Later turns replay a result cut down, so any page longer than that is kept whole, not only one too long to show.
+      if (page.full && reader!.scratch && (page.full.truncated || page.full.text.length > scratchLimits.keepChars)) {
         const { url, title } = page.full;
         const host = (() => { try { return new URL(url).hostname; } catch { return 'page'; } })();
         const kept = `Source: ${url}\n${title ? `Title: ${title}\n` : ''}\n${page.full.text}\n`;

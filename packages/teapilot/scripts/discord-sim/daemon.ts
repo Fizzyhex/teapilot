@@ -22,7 +22,7 @@ export interface Spec {
   /** Time stands still except when `advance` moves it. */
   frozen?: boolean;
   /** Scratchpad benchmark settings (teapilot-scratchpad-benchmark.md), passed to teapilot as its test hooks. */
-  bench?: { scratchpad?: 'on' | 'off'; historyTokens?: string; forceRetry?: string; trace?: boolean; fixture?: { file: string; name: string; description: string } };
+  bench?: { scratchpad?: 'on' | 'off'; historyTokens?: string; compactHistory?: boolean; forceRetry?: string; trace?: boolean; fixture?: { file: string; name: string; description: string } };
 }
 type Body = Record<string, unknown> & { op: string };
 
@@ -45,6 +45,7 @@ const notes: string[] = [];
 const bench: Record<string, string> = {};
 if (spec.bench?.scratchpad) bench.TEAPILOT_SCRATCHPAD = spec.bench.scratchpad;
 if (spec.bench?.historyTokens) bench.TEAPILOT_TEST_HISTORY_TOKENS = spec.bench.historyTokens;
+if (spec.bench?.compactHistory) bench.TEAPILOT_TEST_COMPACT_HISTORY = '1';
 if (spec.bench?.forceRetry) bench.TEAPILOT_TEST_FORCE_RETRY = spec.bench.forceRetry;
 const traceDir = join(spec.directory, 'trace');
 if (spec.bench?.trace) bench.TEAPILOT_TRACE_DIR = traceDir;

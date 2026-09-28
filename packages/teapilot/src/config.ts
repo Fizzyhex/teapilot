@@ -83,14 +83,15 @@ export interface Config {
 const fixtureSchema = z.object({ name: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), description: z.string().min(1).max(1000), file: z.string().min(1) }).strict();
 /**
  * For benchmarks only. TEAPILOT_FIXTURE_TOOL registers a read-only tool returning a file's text; TEAPILOT_TEST_HISTORY_TOKENS
- * caps how much of earlier turns an attempt replays; TEAPILOT_TEST_FORCE_RETRY ends the first attempt after that tool first
+ * caps how much of earlier turns an attempt replays, and TEAPILOT_TEST_COMPACT_HISTORY=1 replays even the newest compacted; TEAPILOT_TEST_FORCE_RETRY ends the first attempt after that tool first
  * succeeds; TEAPILOT_TRACE_DIR records what each model call was sent.
  */
-export interface TestHooks { fixture?: z.infer<typeof fixtureSchema>; historyTokens?: number; forceRetry?: string; traceDir?: string }
+export interface TestHooks { fixture?: z.infer<typeof fixtureSchema>; historyTokens?: number; compactHistory?: boolean; forceRetry?: string; traceDir?: string }
 function readTestHooks(env: NodeJS.ProcessEnv, root: string): TestHooks | undefined {
   const hooks: TestHooks = {
     ...(env.TEAPILOT_FIXTURE_TOOL ? { fixture: (fixture => ({ ...fixture, file: resolve(root, fixture.file) }))(fixtureSchema.parse(JSON.parse(env.TEAPILOT_FIXTURE_TOOL))) } : {}),
     ...(env.TEAPILOT_TEST_HISTORY_TOKENS ? { historyTokens: z.coerce.number().int().min(0).parse(env.TEAPILOT_TEST_HISTORY_TOKENS) } : {}),
+    ...(env.TEAPILOT_TEST_COMPACT_HISTORY === '1' ? { compactHistory: true } : {}),
     ...(env.TEAPILOT_TEST_FORCE_RETRY ? { forceRetry: env.TEAPILOT_TEST_FORCE_RETRY } : {}),
     ...(env.TEAPILOT_TRACE_DIR ? { traceDir: resolve(root, env.TEAPILOT_TRACE_DIR) } : {}),
   };

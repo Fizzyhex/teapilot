@@ -26,11 +26,12 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
                                      --root is teapilot's repository (default: an empty scratch directory)
                                      --frozen stops the clock: timers fire only when advance reaches them
         [--scratchpad on|off] [--fixture FILE [--fixture-name N] [--fixture-description T]]
-        [--history-tokens N] [--force-retry TOOL] [--trace]
+        [--history-tokens N] [--compact-history] [--force-retry TOOL] [--trace]
                                      for benchmarks: --scratchpad off is the clipping-only baseline;
                                      --fixture adds a tool (default run_import_diagnostic) returning
                                      FILE's text; --history-tokens caps how much of earlier turns is
-                                     replayed; --force-retry ends the first attempt after TOOL first
+                                     replayed; --compact-history cuts down every earlier turn's tool
+                                     results, the newest too; --force-retry ends the first attempt after TOOL first
                                      succeeds; --trace records what each model call was sent
   say <name> <text> [--as P] [--in C] [--attach FILE]...
                                      send a message; @op, @user, @stranger and @teapilot become mentions
@@ -104,7 +105,7 @@ async function client(argv) {
       'config-dir': { type: 'string' }, ttl: { type: 'string', default: '1800' }, teachat: { type: 'boolean', default: false }, frozen: { type: 'boolean', default: false },
       scratchpad: { type: 'string', default: 'on' }, fixture: { type: 'string' }, 'fixture-name': { type: 'string', default: 'run_import_diagnostic' },
       'fixture-description': { type: 'string', default: 'Run the import diagnostic and return its snapshot.' },
-      'history-tokens': { type: 'string' }, 'force-retry': { type: 'string' }, trace: { type: 'boolean', default: false },
+      'history-tokens': { type: 'string' }, 'compact-history': { type: 'boolean', default: false }, 'force-retry': { type: 'string' }, trace: { type: 'boolean', default: false },
     } });
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(values.name)) throw new UsageError('--name may contain letters, digits, _ and - (at most 40).');
     if (!['ask', 'chat'].includes(values.mode)) throw new UsageError('--mode is ask or chat.');
@@ -121,7 +122,7 @@ async function client(argv) {
     if (!values.root) mkdirSync(paths.root, { recursive: true });
     const spec = { name: values.name, directory: paths.directory, socket: paths.socket, meta: paths.meta, log: paths.log, state: paths.state,
       root: values.root ? resolve(values.root) : paths.root, mode: values.mode, configDir: values['config-dir'] && resolve(values['config-dir']), ttl, teachat: values.teachat, frozen: values.frozen,
-      bench: { scratchpad: values.scratchpad, historyTokens: values['history-tokens'], forceRetry: values['force-retry'], trace: values.trace,
+      bench: { scratchpad: values.scratchpad, historyTokens: values['history-tokens'], compactHistory: values['compact-history'], forceRetry: values['force-retry'], trace: values.trace,
         fixture: values.fixture && { file: resolve(values.fixture), name: values['fixture-name'], description: values['fixture-description'] } } };
     const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--conditions=teapilot-source', join(root, 'scripts', 'discord-sim', 'daemon.ts'), Buffer.from(JSON.stringify(spec)).toString('base64url')],
       { cwd: homedir(), detached: true, stdio: 'ignore', windowsHide: true });

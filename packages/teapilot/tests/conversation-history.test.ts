@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { Message } from '@earendil-works/pi-ai';
-import { fitHistory, turnSteps } from '../src/agents/history.js';
+import { fitHistory, supersedePlayCalls, turnSteps } from '../src/agents/history.js';
 import { Conversation, TurnQueue, type ConversationOptions } from '../src/discord/bridge.js';
 import { HistoryStore } from '../src/discord/history-store.js';
 import type { HostResult } from '../src/host.js';
@@ -47,6 +47,30 @@ it('replays the newest turn in full and cuts older ones down to fit the budget',
   expect(JSON.stringify(tight)).toContain('play_start');
   expect(JSON.stringify(tight)).not.toContain('Started app a1.');
   expect(fitHistory(turns, 0, model)).toEqual([]);
+  // Turns that drop out leave a count where the rest begin, so the gap is known rather than guessed across.
+  expect(tight[0]).toMatchObject({ role: 'user', content: expect.stringMatching(/^\[2 earlier turns of this conversation are not shown here\.\]\n/) });
+  expect(JSON.stringify(fitHistory(turns, 100_000, model))).not.toContain('not shown here');
+  // compactAll cuts the newest turn's steps down too, while every turn stays.
+  const compacted = JSON.stringify(fitHistory(turns, 100_000, model, undefined, true));
+  expect(compacted).not.toContain('const line = 1;');
+  expect(compacted).toContain('answer 1');
+});
+
+it('cuts app calls a later one superseded: unapplied ones always, applied ones under pressure, never the newest', () => {
+  const edits = [{ find: 'x'.repeat(2000), replace: 'y'.repeat(2000) }];
+  const update = (id: string) => assistant([{ type: 'text', text: '```js\n' + code + '\n```' }, { type: 'toolCall', id, name: 'play_update', arguments: { edits } }]);
+  const outcome = (id: string, text: string): Message => ({ role: 'toolResult', toolCallId: id, toolName: 'play_update', content: [{ type: 'text', text }], isError: false, timestamp: 0 });
+  const messages = [update('u1'), outcome('u1', 'Edit 1: its find text occurs 0 times. Nothing was changed.'), update('u2'), outcome('u2', 'Updated app a.'), update('u3'), outcome('u3', 'Updated app a.')];
+  const size = (message: Message) => JSON.stringify(message).length;
+  const calm = supersedePlayCalls(messages, false);
+  expect(size(calm[0]!)).toBeLessThan(size(messages[0]!) / 2);
+  expect(calm[2]).toBe(messages[2]);
+  const pressed = supersedePlayCalls(messages, true);
+  expect(size(pressed[2]!)).toBeLessThan(size(messages[2]!) / 2);
+  expect(JSON.stringify(pressed[2])).toContain('code block from an earlier turn omitted');
+  expect(pressed[4]).toBe(messages[4]);
+  const alone = messages.slice(4);
+  expect(supersedePlayCalls(alone, true)).toBe(alone);
 });
 
 it('keeps a Discord conversation\'s turns, steps included, and removes them when cleared', async () => {
