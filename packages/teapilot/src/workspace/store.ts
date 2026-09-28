@@ -4,6 +4,7 @@ import { lstat, readdir, rm } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { z } from 'zod';
 import { imageInfo } from '../discord/images.js';
+import { replaceFileSync } from '../replace.js';
 
 /** Discord's upload limit for bots in servers without boosts; files people send and teapilot posts stay within it. */
 export const maxFileBytes = 10 * 1024 * 1024;
@@ -122,7 +123,7 @@ export class WorkspaceStore {
     const file = this.indexPath(conversation);
     const temporary = `${file}.${randomUUID()}.tmp`;
     writeFileSync(temporary, JSON.stringify(index));
-    renameSync(temporary, file);
+    replaceFileSync(temporary, file);
   }
 
   /**

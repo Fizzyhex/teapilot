@@ -1,8 +1,9 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ConversationTurn } from '../integration/events.js';
+import { replaceFileSync } from '../replace.js';
 
 // Steps are pi messages written by teapilot itself; only their outline is checked here.
 const turns = z.array(z.object({ user: z.string(), assistant: z.string(), steps: z.array(z.object({ role: z.enum(['assistant', 'toolResult']) }).passthrough()).optional() }));
@@ -30,6 +31,6 @@ export class HistoryStore {
     const temporary = `${file}.${randomUUID()}.tmp`;
     writeFileSync(temporary, JSON.stringify(history), { mode: 0o600 });
     try { chmodSync(temporary, 0o600); } catch { /* not meaningful on every platform */ }
-    renameSync(temporary, file);
+    replaceFileSync(temporary, file);
   }
 }
