@@ -12,7 +12,7 @@ export async function fixture(): Promise<{ config: Config; cwd: string; cleanup:
   config.router.apiKey = 'fixture-jev-secret';
   config.secrets = { fast: undefined, capable: undefined };
   Object.assign(config.models.fast, { id: 'fast-test', reasoningEfforts: ['off'] });
-  Object.assign(config.models.capable, { id: 'capable-test', enabled: true, reasoningEfforts: ['off', 'medium', 'xhigh'] });
+  Object.assign(config.models.capable, { id: 'capable-test', enabled: true, reasoningEfforts: ['off', 'low', 'medium'] });
   config.policy.limits.requestTimeoutMs = 5000;
   config.policy.limits.attemptTimeoutMs = 10000;
   // Unit tests never start the real sandbox; tests/sandbox.integration.test.ts does.
@@ -48,14 +48,14 @@ export function jev(response: ServerResponse, selected: string, confidence = 0.9
     ...(conversation && Object.fromEntries(['threat', 'personal', 'existential', 'banter', 'romance', 'task', 'make'].map(key => [`conversation.${key}`, choice(conversation[key] ?? 'no')]))),
   }, usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 } }));
 }
-export function completion(response: ServerResponse, options: { text?: string; tool?: { name: string; arguments: unknown }; cost?: number; noUsage?: boolean; model?: string; reasoning?: string }): void {
+export function completion(response: ServerResponse, options: { text?: string; tool?: { name: string; arguments: unknown }; cost?: number; noUsage?: boolean; model?: string; reasoning?: string; finish?: 'length' }): void {
   response.setHeader('Content-Type', 'text/event-stream');
   const common = { id: 'mock-chat', object: 'chat.completion.chunk', created: 1, model: options.model ?? 'mock-model' };
   const delta = options.tool ? { role: 'assistant', ...(options.text !== undefined ? { content: options.text } : {}), tool_calls: [{ index: 0, id: `call-${Date.now()}`, type: 'function', function: { name: options.tool.name, arguments: JSON.stringify(options.tool.arguments) } }] } : { role: 'assistant', content: options.text ?? 'Done.' };
   const chunk = (value: unknown) => response.write(`data: ${JSON.stringify(value)}\n\n`);
   if (options.reasoning) chunk({ ...common, choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: options.reasoning }, finish_reason: null }] });
   chunk({ ...common, choices: [{ index: 0, delta, finish_reason: null }] });
-  chunk({ ...common, choices: [{ index: 0, delta: {}, finish_reason: options.tool ? 'tool_calls' : 'stop' }], ...(!options.noUsage ? { usage: { prompt_tokens: 120, completion_tokens: 20, total_tokens: 140, ...(options.cost !== undefined ? { cost: options.cost } : {}) } } : {}) });
+  chunk({ ...common, choices: [{ index: 0, delta: {}, finish_reason: options.finish ?? (options.tool ? 'tool_calls' : 'stop') }], ...(!options.noUsage ? { usage: { prompt_tokens: 120, completion_tokens: 20, total_tokens: 140, ...(options.cost !== undefined ? { cost: options.cost } : {}) } } : {}) });
   response.end('data: [DONE]\n\n');
 }
 export async function events(config: Config): Promise<any[]> {

@@ -1,10 +1,11 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { tierPreferences } from '../config.js';
 import { modes } from '../execution/grants.js';
 import type { PromptSetup } from './commands.js';
+import { replaceFileSync } from '../replace.js';
 
 /** Your own conversation in a channel, or the one everyone there shares. */
 export type Seat = 'solo' | 'collab';
@@ -39,7 +40,7 @@ export class SeatStore {
     const temporary = `${this.file}.${randomUUID()}.tmp`;
     writeFileSync(temporary, JSON.stringify(this.load()), { mode: 0o600 });
     try { chmodSync(temporary, 0o600); } catch { /* not meaningful on every platform */ }
-    renameSync(temporary, this.file);
+    replaceFileSync(temporary, this.file);
   }
 
   seat(channelId: string, userId: string): Seat | undefined { return this.load().seats[`${channelId}:${userId}`]; }

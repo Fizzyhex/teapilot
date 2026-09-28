@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { Policy } from '../config.js';
 
-export type EscalationReason = 'test_failures' | 'tool_failures' | 'ineffective_calls' | 'unsupported' | 'uncertainty' | 'turn_limit' | 'provider_error';
+/** overthinking: the reply ran out of tokens while still thinking, so a retry thinks less rather than more. */
+export type EscalationReason = 'test_failures' | 'tool_failures' | 'ineffective_calls' | 'unsupported' | 'uncertainty' | 'turn_limit' | 'provider_error' | 'overthinking';
 export const SEARCH_UNAVAILABLE = 'No results: the search engines were unavailable';
 export const READS_SPENT = 'Not read: the page-reading budget for this request is spent';
 export class Evidence {

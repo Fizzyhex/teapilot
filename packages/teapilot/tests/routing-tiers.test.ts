@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionGrants } from '../src/execution/grants.js';
-import { executionProfiles, directTier, effectiveProfile, profileAvailable } from '../src/routing/execution.js';
+import { executionProfiles, directTier, effectiveProfile, profileAvailable, reasoningTier, thinkingFor } from '../src/routing/execution.js';
 import { inferenceSchema, runInference } from '../src/integration/inference.js';
 import { loadConfig } from '../src/config.js';
 import { runHost } from '../src/host.js';
@@ -17,20 +17,27 @@ it('defines the four profiles from two physical models', async () => {
   expect(executionProfiles).toEqual({
     fast: expect.objectContaining({ model: 'fast', thinking: 'off', contextTokens: 8192, maxOutputTokens: 2048 }),
     normal: expect.objectContaining({ model: 'capable', thinking: 'off', contextTokens: 16384, maxOutputTokens: 4096 }),
-    reasoning: expect.objectContaining({ model: 'capable', thinking: 'medium', contextTokens: 24576, maxOutputTokens: 8192 }),
-    deep: expect.objectContaining({ model: 'capable', thinking: 'xhigh', contextTokens: 32768, maxOutputTokens: 16384 }),
+    reasoning: expect.objectContaining({ model: 'capable', thinking: 'low', contextTokens: 24576, maxOutputTokens: 8192 }),
+    deep: expect.objectContaining({ model: 'capable', thinking: 'medium', contextTokens: 32768, maxOutputTokens: 16384 }),
   });
+  expect(reasoningTier).toEqual({ off: 'normal', low: 'reasoning', medium: 'deep', xhigh: 'deep' });
   const f = await fixture(); cleanups.push(f.cleanup);
-  f.config.models.capable.reasoningEfforts = ['off', 'medium'];
+  f.config.models.capable.reasoningEfforts = ['off', 'low'];
   expect(profileAvailable(f.config, 'reasoning').available).toBe(true);
-  expect(profileAvailable(f.config, 'deep')).toMatchObject({ available: false, reason: expect.stringContaining('xhigh') });
+  expect(profileAvailable(f.config, 'deep')).toMatchObject({ available: false, reason: expect.stringContaining('medium') });
+  // xhigh is opted into by the policy, and then deep runs it.
+  f.config.models.capable.reasoningEfforts = ['off', 'low', 'medium', 'xhigh'];
+  expect(thinkingFor(f.config, 'deep')).toBe('medium');
+  f.config.policy.reasoning = { deepEffort: 'xhigh' };
+  expect(thinkingFor(f.config, 'deep')).toBe('xhigh');
+  expect(effectiveProfile(f.config, 'deep').thinking).toBe('xhigh');
 });
 
 it('gives the highest runnable tier on a model its configured limits', async () => {
   const f = await fixture(); cleanups.push(f.cleanup);
   Object.assign(f.config.models.capable, { contextTokens: 32768, maxOutputTokens: 16384, reasoningEfforts: ['off'] });
   expect(effectiveProfile(f.config, 'normal')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 16384 });
-  f.config.models.capable.reasoningEfforts = ['off', 'medium'];
+  f.config.models.capable.reasoningEfforts = ['off', 'low'];
   // A lower tier keeps its own reply length, but shares the context the model's server holds.
   expect(effectiveProfile(f.config, 'normal')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 4096 });
   expect(effectiveProfile(f.config, 'reasoning')).toMatchObject({ contextTokens: 32768, maxOutputTokens: 16384 });
@@ -60,7 +67,7 @@ it('sends exact native efforts and profile output caps through the production ad
     await runInference(f.config, inferenceSchema.parse({ model: tier, messages: [{ role: 'user', content: [{ type: 'text', text: 'reply' }] }] }), { approve: async () => true });
   }
   expect(payloads.map(body => [body.model, body.reasoning_effort, body.max_tokens])).toEqual([
-    ['fast-test', 'none', 2048], ['capable-test', 'none', 4096], ['capable-test', 'medium', 8192], ['capable-test', 'xhigh', 16384],
+    ['fast-test', 'none', 2048], ['capable-test', 'none', 4096], ['capable-test', 'low', 8192], ['capable-test', 'medium', 16384],
   ]);
 });
 

@@ -229,9 +229,9 @@ function rowLabel(s: Session, row: ModelRow): string {
   const installed = s.queue!.installed.some(model => model.name === id);
   const state = job
     ? job.state === 'running' ? `${job.phase.split(' ')[0]!.toLowerCase()}${job.percent === undefined ? '' : ` ${job.percent}%`}`
-      : job.state === 'done' ? 'ready' : job.state
+      : job.state === 'done' ? job.result?.gpuShare && job.result.gpuShare < 0.99 ? `ready, only ${Math.floor(job.result.gpuShare * 100)}% in GPU memory` : 'ready' : job.state
     : installed ? 'installed'
-    : preset ? `about ${(preset.bytes / 1e9).toFixed(1)} GB download, ${preset.memoryGiB}+ GiB RAM suggested` : 'not installed';
+    : preset ? `about ${(preset.bytes / 1e9).toFixed(1)} GB download, ${preset.memoryGiB}+ GiB GPU memory suggested` : 'not installed';
   const current = physicalModels.filter(role => s.original.models[role].enabled && s.original.models[role].provider === 'ollama' && s.original.models[role].id === ollamaAlias(id));
   const use = roles.length ? ` → ${roles.join(' + ')}` : current.length && s.source !== 'endpoint' ? ` · currently ${current.join(' + ')}` : '';
   return `${preset?.label ?? id} · ${state}${use}`;
@@ -321,7 +321,7 @@ async function modelAction(s: Session, row: ModelRow): Promise<void> {
     return;
   }
   const chosen = await chooseRoles(s, id, preset);
-  const context = await configureOllamaModel(screen, id, preset, queue.installed, s.hardware!.memory, queue.reservedBytes);
+  const context = await configureOllamaModel(screen, id, preset, queue.installed, s.hardware!.memory, queue.reservedBytes, s.signal);
   const queued = queue.add(id, context, preset?.bytes ?? 0);
   assign(s, queued, chosen);
   note(s, `Queued ${id} for ${chosen.join(' + ')}${queue.pending.length > 1 ? ` (${queue.pending.length - 1} ahead)` : ''}.`);

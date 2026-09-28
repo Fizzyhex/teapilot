@@ -1,12 +1,40 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { chooseMany, type SetupUI } from '../src/setup/terminal.js';
-import { ollamaAlias, presets, selectOllamaModel } from '../src/runtime/ollama.js';
+import { ensureServerSettings, ollamaAlias, presets, selectOllamaModel } from '../src/runtime/ollama.js';
 
 vi.mock('node:fs/promises', async importOriginal => ({
   ...await importOriginal<typeof import('node:fs/promises')>(),
   statfs: vi.fn(async () => ({ bavail: 100_000_000_000, bsize: 1 })),
 }));
 
+// Setup never reaches the real system here: the user's saved Ollama settings, setx, taskkill
+// and starting Ollama are all simulated.
+const system = vi.hoisted(() => ({ commands: [] as string[][], saved: {} as Record<string, string>, stopped: false }));
+vi.mock('../src/runtime/process.js', () => ({
+  command: vi.fn(async (executable: string, args: string[]) => {
+    system.commands.push([executable, ...args]);
+    if (executable === 'reg') {
+      const value = system.saved[args[3]!];
+      if (!value) throw new Error('reg failed (1).');
+      return `HKEY_CURRENT_USER\\Environment\r\n    ${args[3]}    REG_SZ    ${value}`;
+    }
+    if (executable === 'systemctl') return Object.entries(system.saved).map(([name, value]) => `${name}=${value}`).join(' ');
+    if (executable === 'setx') { system.saved[args[0]!] = args[1]!; return 'SUCCESS: Specified value was saved.'; }
+    if (executable === 'taskkill') { system.stopped = true; return ''; }
+    if (executable === 'nvidia-smi') return 'NVIDIA GeForce RTX 3090, 24576 MiB';
+    return '';
+  }),
+}));
+vi.mock('node:child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('node:child_process')>(),
+  spawn: vi.fn((executable: string) => {
+    system.commands.push(['spawn', executable]);
+    system.stopped = false;
+    return { on: (event: string, listener: () => void) => { if (event === 'spawn') queueMicrotask(listener); }, unref: () => {} };
+  }),
+}));
+const serverReady = { OLLAMA_FLASH_ATTENTION: '1', OLLAMA_KV_CACHE_TYPE: 'q8_0' };
+beforeEach(() => { system.commands = []; system.saved = { ...serverReady }; system.stopped = false; });
 afterEach(() => vi.unstubAllGlobals());
 
 function ui(answers: string[]): SetupUI {
@@ -20,15 +48,17 @@ it('accepts multiple selections in order, deduplicates and rejects invalid selec
   expect(await chooseMany(ui(['']), 'Models', ['a', 'b'], 1)).toEqual([1]);
 });
 
-function ollama(installed: string[] = [], failFirstPull = false, loadError?: string) {
-  const operations: Array<{ path: string; model: string }> = [];
+function ollama(installed: string[] = [], failFirstPull = false, loadError?: string, gpuShare = 1) {
+  const operations: Array<{ path: string; model: string; parameters?: Record<string, unknown> }> = [];
   let failed = false;
-  vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const path = new URL(url).pathname;
-    const body = init.body ? JSON.parse(String(init.body)) : {};
-    operations.push({ path, model: body.model });
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (path === '/api/version') return system.stopped ? Promise.reject(new TypeError('fetch failed')) : Response.json({ version: '0.34.3' });
+    operations.push({ path, model: body.model, ...(body.parameters ? { parameters: body.parameters } : {}) });
     if (path === '/api/tags') return Response.json({ models: installed.map(name => ({ name, size: 1 })) });
-    if (path === '/api/show') return Response.json({ capabilities: ['tools'], model_info: { 'qwen.context_length': 32768 } });
+    if (path === '/api/show') return Response.json({ capabilities: ['tools'], model_info: { 'qwen.context_length': 262144 } });
+    if (path === '/api/ps') return Response.json({ models: operations.filter(op => op.path === '/api/create').slice(-1).map(op => ({ name: op.model, size: 20e9, size_vram: 20e9 * gpuShare })) });
     if (path === '/api/pull' && failFirstPull && !failed) { failed = true; return new Response('{"error":"interrupted"}\n'); }
     if (path === '/api/generate' && loadError) return new Response(JSON.stringify({ error: loadError }), { status: 500 });
     return new Response('{"status":"success"}\n');
@@ -41,10 +71,59 @@ it('downloads and prepares queued models sequentially, retries in place and assi
   const prompts = ui(['1, 2, 1']);
   const models = await selectOllamaModel(prompts, new AbortController().signal);
   expect(operations.filter(op => op.path === '/api/pull').map(op => op.model)).toEqual([presets[0]!.id, presets[0]!.id, presets[1]!.id]);
-  expect(operations.map(op => op.path)).toEqual(['/api/tags', '/api/pull', '/api/pull', '/api/show', '/api/create', '/api/generate', '/api/pull', '/api/show', '/api/create', '/api/generate']);
+  const load = ['/api/show', '/api/create', '/api/generate', '/api/ps', '/api/generate'];
+  expect(operations.map(op => op.path)).toEqual(['/api/tags', '/api/pull', '/api/pull', ...load, '/api/pull', ...load]);
   expect(models.map(model => [model.source, model.roles])).toEqual([[presets[0]!.id, ['fast']], [presets[1]!.id, ['capable']]]);
-  expect(models[1]!.context).toBe(32768);
+  // The capable preset's 64K context needs the compressed context cache, which this server already has.
+  expect(models[1]).toMatchObject({ context: 65536, reasoning: [], gpuShare: 1, sampling: presets[1]!.sampling });
+  // Ollama's OpenAI API has no top_k or min_p, so the alias fixes them next to the context.
+  expect(operations.filter(op => op.path === '/api/create').map(op => op.parameters)).toEqual([
+    { num_ctx: 8192, top_k: 20, min_p: 0, repeat_penalty: 1 }, { num_ctx: 65536, top_k: 20, min_p: 0, repeat_penalty: 1 },
+  ]);
   expect(prompts.choose).not.toHaveBeenCalled();
+  expect(system.commands.filter(([executable]) => ['setx', 'taskkill', 'spawn'].includes(executable!))).toEqual([]);
+});
+
+it('warns when a prepared model does not fit in GPU memory', async () => {
+  ollama([presets[1]!.id], false, undefined, 0.8);
+  const prompts = ui(['2']);
+  const [model] = await selectOllamaModel(prompts, new AbortController().signal);
+  expect(model!.gpuShare).toBeCloseTo(0.8);
+  expect(prompts.log).toHaveBeenCalledWith(expect.stringMatching(/^Only 80% of .* fits in GPU memory at this context; the rest runs on the CPU/));
+});
+
+it('suggests the preset context only once the Ollama server keeps a compressed context cache', async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  try {
+    ollama();
+    const server = presets[1]!.server!;
+    // Declined: nothing is saved or restarted, and setup suggests the smaller context.
+    system.saved = {};
+    const declined = ui([]);
+    declined.confirm = vi.fn(async () => false);
+    expect(await ensureServerSettings(declined, server, new AbortController().signal)).toBe(false);
+    expect(declined.confirm).toHaveBeenCalledWith('Save OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0 for your Windows user and restart Ollama? Models loaded in Ollama are unloaded.');
+    expect(system.commands.filter(([executable]) => executable !== 'reg')).toEqual([]);
+    const fallback = ui(['2', '']);
+    fallback.confirm = vi.fn(async message => !message.startsWith('Save'));
+    const [model] = await selectOllamaModel(fallback, new AbortController().signal);
+    expect(fallback.input).toHaveBeenCalledWith('Context tokens', '32768');
+    expect(model!.context).toBe(32768);
+
+    // Accepted: both settings are saved for the user and Ollama restarts with them.
+    system.commands = [];
+    expect(await ensureServerSettings(ui([]), server, new AbortController().signal)).toBe(true);
+    expect(system.saved).toEqual(serverReady);
+    expect(system.commands.filter(([executable]) => executable !== 'reg').map(([executable, ...args]) => [executable, args[0], args[1]])).toEqual([
+      ['setx', 'OLLAMA_FLASH_ATTENTION', '1'], ['setx', 'OLLAMA_KV_CACHE_TYPE', 'q8_0'],
+      ['taskkill', '/IM', 'ollama app.exe'], ['taskkill', '/IM', 'ollama.exe'], ['spawn', expect.stringContaining('ollama app.exe'), undefined],
+    ]);
+    // Already saved: nothing to ask.
+    const ready = ui([]);
+    expect(await ensureServerSettings(ready, server, new AbortController().signal)).toBe(true);
+    expect(ready.confirm).not.toHaveBeenCalled();
+  } finally { Object.defineProperty(process, 'platform', platform); }
 });
 
 it('asks for the role of a non-preset model and rejects two models claiming one role', async () => {

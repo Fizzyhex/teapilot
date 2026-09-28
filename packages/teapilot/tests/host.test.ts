@@ -113,7 +113,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
       else {
         cloudCalls++;
         expect(body.model).toBe('capable-test');
-        expect(body.reasoning_effort).toBe('medium');
+        expect(body.reasoning_effort).toBe('low');
         expect(JSON.stringify(body.messages)).toContain('Previous attempt stopped');
         if (repair && cloudCalls === 1) completion(res, { tool: { name: 'write', arguments: { path: 'failing.test.cjs', content: '// repaired' } } });
         else if (repair && cloudCalls === 2) completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command } } });
@@ -322,15 +322,33 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
       else if (req.url?.endsWith('/models')) res.end('{}');
       else {
         efforts.push(body.reasoning_effort);
-        completion(res, body.reasoning_effort === 'xhigh' ? { text: 'Answered with evidence.' } : { tool: { name: 'request_escalation', arguments: { reason: 'uncertainty' } } });
+        completion(res, body.reasoning_effort === 'medium' ? { text: 'Answered with evidence.' } : { tool: { name: 'request_escalation', arguments: { reason: 'uncertainty' } } });
       }
     });
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Answer a question' }, { approve: async approval => { expect(approval.kind).toBe('route'); approvals++; return true; } });
     expect(result.success).toBe(true);
     expect(result.capability).toBe('ask.deep');
     expect(approvals).toBe(0);
-    expect(efforts).toEqual(['none', 'medium', 'xhigh']);
+    expect(efforts).toEqual(['none', 'low', 'medium']);
     expect(result.attempts).toBe(3);
+  });
+
+  it('steps down to less reasoning when a reply runs out of tokens while still thinking', async () => {
+    let routes = 0;
+    const efforts: string[] = [];
+    const f = await setup((body, req, res) => {
+      if (req.url === '/jev') jev(res, ['ask.deep', 'ask.reasoning'][routes++]!);
+      else if (req.url?.endsWith('/models')) res.end('{}');
+      else {
+        efforts.push(body.reasoning_effort);
+        completion(res, body.reasoning_effort === 'medium' ? { reasoning: 'Consider every alternative again...', text: '', finish: 'length' } : { text: 'Answered briefly.' });
+      }
+    });
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Answer a question' }, { approve: async () => true });
+    expect(result.success).toBe(true);
+    expect(result.capability).toBe('ask.reasoning');
+    expect(efforts).toEqual(['medium', 'low']);
+    expect((await events(f.config)).find(e => e.type === 'escalation')).toMatchObject({ from: 'ask.deep', to: 'ask.reasoning', reason: 'overthinking' });
   });
 
   it('exposes search only on opt-in and passes source snippets back to ask', async () => {

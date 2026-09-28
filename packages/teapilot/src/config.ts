@@ -13,7 +13,7 @@ const endpoint = z.string().url().refine(value => {
   const url = new URL(value);
   return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
 }, 'Use an HTTP(S) endpoint without embedded credentials, query, or fragment');
-export const reasoningLevels = ['off', 'medium', 'xhigh'] as const;
+export const reasoningLevels = ['off', 'low', 'medium', 'xhigh'] as const;
 export type ReasoningLevel = typeof reasoningLevels[number];
 const effort = z.enum(reasoningLevels);
 // How a model's server is asked for each reasoning level. It describes the wire
@@ -24,16 +24,26 @@ const effort = z.enum(reasoningLevels);
 //                         chat template decides thinking (e.g. enable_thinking: false)
 const templateValue = z.union([z.string(), z.number(), z.boolean()]);
 const reasoningSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('reasoning_effort'), values: z.object({ off: z.string().min(1), medium: z.string().min(1), xhigh: z.string().min(1) }).partial().strict() }).strict(),
+  z.object({ type: z.literal('reasoning_effort'), values: z.object({ off: z.string().min(1), low: z.string().min(1), medium: z.string().min(1), xhigh: z.string().min(1) }).partial().strict() }).strict(),
   z.object({ type: z.literal('chat_template_kwargs'), values: z.object(Object.fromEntries(reasoningLevels.map(level => [level, z.record(z.string().regex(/^[a-z_][a-z0-9_]*$/i), templateValue)])) as Record<ReasoningLevel, z.ZodRecord<z.ZodString, typeof templateValue>>).partial().strict() }).strict(),
 ]);
 export type ReasoningProtocol = z.infer<typeof reasoningSchema>;
+// Decoding settings for each reasoning level, sent with every request at that level.
+// Unset fields are left to the server's defaults.
+const samplingSchema = z.object({
+  temperature: z.number().min(0).max(2), top_p: z.number().gt(0).max(1), top_k: z.number().int().min(0),
+  min_p: z.number().min(0).max(1), presence_penalty: z.number().min(-2).max(2), repetition_penalty: z.number().gt(0).max(2),
+}).partial().strict();
+export type Sampling = z.infer<typeof samplingSchema>;
+const thinkingSamplingSchema = z.object(Object.fromEntries(reasoningLevels.map(level => [level, samplingSchema])) as Record<ReasoningLevel, typeof samplingSchema>).partial().strict();
+export type ThinkingSampling = z.infer<typeof thinkingSamplingSchema>;
 const modelSchema = z.object({
   enabled: z.boolean(), id: z.string().min(1), provider: z.string().min(1), baseUrl: endpoint,
   apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/), contextTokens: z.number().int().min(4096).max(2_000_000),
   maxOutputTokens: z.number().int().min(128).max(32768), inputUsdPerMillion: money, outputUsdPerMillion: money,
   vision: z.boolean().default(false), toolCalling: z.boolean().default(true), supportsDeveloperRole: z.boolean().default(false),
   supportsUsage: z.boolean().default(true), temperature: z.number().min(0).max(2).optional(),
+  sampling: thinkingSamplingSchema.optional(),
   reasoningEfforts: z.array(effort).min(1).default(['off']), reasoning: reasoningSchema.optional(), compatibility: z.boolean().default(false),
 }).strict().refine(m => m.maxOutputTokens + 2048 < m.contextTokens, 'Context must leave room for input')
   .refine(m => !m.reasoning || m.reasoningEfforts.every(level => level === 'off' || m.reasoning!.values[level]), 'Every verified reasoning level needs a value in the reasoning protocol');
@@ -60,6 +70,8 @@ export const policySchema = z.object({
   limits: z.object({ maxTurns: z.number().int().min(1).max(100), maxToolCalls: z.number().int().min(1).max(300), attemptTimeoutMs: z.number().int().min(1000).max(3_600_000), requestTimeoutMs: z.number().int().min(1000).max(120_000), commandTimeoutSeconds: z.number().int().min(1).max(600), maxPromptChars: z.number().int().min(1).max(20_000) }).strict(),
   escalation: z.object({ maxEscalations: z.number().int().min(0).max(3), consecutiveFailures: z.number().int().min(1).max(10), repeatedToolCalls: z.number().int().min(2).max(10) }).strict(),
   execution: z.object({ trustedCommands: z.array(z.string().min(1)), largeOverwriteBytes: z.number().int().min(1) }).strict(),
+  /** deepEffort: the reasoning level the deep tier runs (medium unless xhigh is opted into). */
+  reasoning: z.object({ deepEffort: z.enum(['medium', 'xhigh']) }).strict().optional(),
 }).strict();
 export type Policy = z.infer<typeof policySchema>;
 
@@ -75,6 +87,8 @@ export interface Config {
   workspace?: WorkspaceSettings;
   /** Each session's scratchpad folder; TEAPILOT_SCRATCHPAD=off turns it off. */
   scratchpad?: { enabled: boolean };
+  /** Summarising earlier context when it nears the model's limit (agents/compaction.ts); TEAPILOT_COMPACTION=off turns it off. */
+  compaction?: { enabled: boolean };
   /** Hooks for evaluating teapilot (see readTestHooks); each is off unless its variable is set. */
   test?: TestHooks;
   secrets: Record<PhysicalModel, string | undefined>;
@@ -114,7 +128,7 @@ function legacyCloudEnabled(raw: Record<string, unknown>, env: NodeJS.ProcessEnv
   return economy.enabled === true || strong.enabled === true || env.ECONOMY_ENABLED === 'true' || env.STRONG_ENABLED === 'true' || Boolean(env.ECONOMY_MODEL || env.STRONG_MODEL);
 }
 /** The reasoning request older Ollama configurations sent, keyed then by provider. */
-export const ollamaReasoning: ReasoningProtocol = { type: 'reasoning_effort', values: { off: 'none', medium: 'medium', xhigh: 'xhigh' } };
+export const ollamaReasoning: ReasoningProtocol = { type: 'reasoning_effort', values: { off: 'none', low: 'low', medium: 'medium', xhigh: 'xhigh' } };
 // Configurations saved before models declared a reasoning protocol: Ollama models
 // keep exactly the payload they sent, and other endpoints keep sending none.
 function withReasoningProtocol(models: CanonicalModels): CanonicalModels {
@@ -166,7 +180,7 @@ export async function loadConfig(root?: string, env = process.env): Promise<Conf
   if (env.DAILY_BUDGET_USD) policy.budget.dailyUsd = money.parse(Number(env.DAILY_BUDGET_USD));
   const provider = z.enum(['typesafe', 'openrouter']).parse(env.JEV_PROVIDER || 'typesafe');
   const secrets = Object.fromEntries(physicalModels.map(key => [key, env[models[key].apiKeyEnv] || undefined])) as Config['secrets'];
-  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, webReader: { mode: z.enum(readerModes).parse(env.WEB_READER || 'auto'), agentBrowserBin: env.AGENT_BROWSER_BIN || undefined }, teachat: readTeachatSettings(env, root), workspace: readWorkspaceSettings(env), scratchpad: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_SCRATCHPAD || 'on') === 'on' }, test: readTestHooks(env, root), secrets };
+  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, webReader: { mode: z.enum(readerModes).parse(env.WEB_READER || 'auto'), agentBrowserBin: env.AGENT_BROWSER_BIN || undefined }, teachat: readTeachatSettings(env, root), workspace: readWorkspaceSettings(env), scratchpad: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_SCRATCHPAD || 'on') === 'on' }, compaction: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_COMPACTION || 'on') === 'on' }, test: readTestHooks(env, root), secrets };
 }
 const hosts = (value: string | undefined) => (value ?? '').split(',').map(host => host.trim().toLowerCase()).filter(Boolean);
 function readWorkspaceSettings(env: NodeJS.ProcessEnv): WorkspaceSettings {

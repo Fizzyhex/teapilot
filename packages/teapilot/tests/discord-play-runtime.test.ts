@@ -279,15 +279,18 @@ it('resends through a new interaction, which lets held timers show again', async
 
 it('asks the model through consult and caps it', async () => {
   const consult = vi.fn<Consultant>(async (_play, prompt) => `answer to ${prompt}`);
-  const { runtime, edits } = await setup({ consult });
+  const { runtime, edits, log } = await setup({ consult });
   const { record } = await start(runtime);
+  // A consult still running refuses the next one, so each click waits for the last answer to land first.
+  const answered = () => log.mock.calls.filter(([line]) => String(line).includes('answered')).length;
   await runtime.interact(act(record.id, 'ask').interaction);
   await vi.waitFor(() => expect(edits.at(-1)?.content).toBe('0 answer to is 0 big?'));
   expect(consult).toHaveBeenCalledWith({ title: 'Counter', owner, channelId: 'channel-1' }, 'is 0 big?');
-  for (let index = 0; index < 20; index++) {
+  for (let index = 2; index <= 20; index++) {
     await runtime.interact(act(record.id, 'ask').interaction);
-    await vi.waitFor(() => expect(edits.at(-1)?.content).toMatch(/big\?|error/));
+    await vi.waitFor(() => expect(answered()).toBe(index));
   }
+  await runtime.interact(act(record.id, 'ask').interaction);
   await vi.waitFor(() => expect(edits.at(-1)?.content).toContain('used its 20 consults'));
   expect(consult).toHaveBeenCalledTimes(20);
 });
