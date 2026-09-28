@@ -69,11 +69,11 @@ export interface Context {
   /** Who started the app. */
   invoker: User;
   participants: Participants;
-  /** Custom emoji supplied by the user, by name, as `<:name:id>`. */
+  /** Server emoji people pasted in the conversation, by name, as `<:name:id>`. */
   emojis: Record<string, string>;
   /** Seeded and persisted, so it continues across restarts. */
   random(): number;
-  /** A custom emoji by name, or `:name:` when the user did not supply it. */
+  /** A server emoji by name (`name` or `:name:`), or `:name:` when no one pasted it. */
   emoji(name: string): string;
   /** Trusted apps only: a raw Discord REST call made as teapilot's bot, e.g. request('GET', `/channels/${id}`). */
   discord?: { request(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', route: string, body?: Json): Promise<unknown> };

@@ -249,14 +249,14 @@ export async function doctor(config: Config, cwd: string, options: ActivityUI & 
       healthy &&= result.ask && (!model.toolCalling || result.coding);
     }
   }
-  await during(options, 'Checking workspace sandbox...', () => workspaceStatus(config, options.consent, log));
+  await during(options, 'Checking workspace sandbox...', () => workspaceStatus(config, options.consent, log, options.signal));
   log(`Budgets: $${config.policy.budget.requestUsd}/request; $${config.policy.budget.dailyUsd}/UTC day`);
   if (!options.live) log('Run teapilot doctor --live to verify streamed inference and coding.');
   return healthy && available;
 }
 
-/** Workspace commands are optional: this reports them, and on Windows offers the sandbox's one-time install. */
-async function workspaceStatus(config: Config, consent: (message: string) => Promise<boolean>, log: (text: string) => void): Promise<void> {
+/** Workspace commands are optional: this reports them, offers teapilot's own tools, and on Windows the sandbox's one-time install. */
+async function workspaceStatus(config: Config, consent: (message: string) => Promise<boolean>, log: (text: string) => void, signal?: AbortSignal): Promise<void> {
   const { SrtSandbox, installWindowsSandbox } = await import('./workspace/sandbox.js');
   let sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
   let status = await sandbox.status();
@@ -270,6 +270,25 @@ async function workspaceStatus(config: Config, consent: (message: string) => Pro
   }
   await sandbox.close();
   if (!status.available) { log(`Workspace commands: OFF (${status.reason})`); return; }
+  // pandoc and Pillow are teapilot's to install: one pinned copy, read-only to every workspace.
+  const has = (kind: string) => status.tools.some(tool => tool.kind === kind);
+  const { installPandoc, installPythonPackages, pandocAsset, pandocRelease, pythonPackages, toolsFolder } = await import('./workspace/toolchain.js');
+  const python = status.python;
+  const offers = [
+    ...!has('pandoc') && pandocAsset() ? [{ name: 'pandoc', label: `pandoc ${pandocRelease.version} (GPL-2.0, about 40 MB from GitHub, checked against its pinned checksum)`, install: (signal: AbortSignal) => installPandoc(config.stateDir, signal) }] : [],
+    ...!has('pillow') && python ? [{ name: 'Pillow', label: `${pythonPackages.map(entry => `${entry.name} ${entry.version}`).join(', ')} (prebuilt, from PyPI for ${python.executable})`, install: (signal: AbortSignal) => installPythonPackages(config.stateDir, python, signal) }] : [],
+  ];
+  if (offers.length && await consent(`Install ${offers.map(offer => offer.label).join(' and ')} into ${toolsFolder(config.stateDir)} for workspace commands? Commands can read them there but not change them.`)) {
+    for (const offer of offers) {
+      await offer.install(signal ?? new AbortController().signal).then(
+        () => undefined,
+        error => log(`${offer.name} install failed: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    }
+    sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
+    status = await sandbox.status();
+    await sandbox.close();
+  }
   log(`Workspace commands: sandboxed ${status.shell}; ${status.tools.length ? status.tools.map(tool => `${tool.name} ${tool.version}`).join(', ') : 'no media tools found'}`);
   const missing = ['ffmpeg', 'imagemagick', 'python', 'node'].filter(name => !status.tools.some(tool => tool.kind === name));
   if (missing.length) log(`Workspace tools not found inside the sandbox: ${missing.join(', ')}. ${process.platform === 'win32'

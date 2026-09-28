@@ -374,6 +374,10 @@ it('notes controls that change nothing and :shortcodes: that Discord would show 
   const { preview: shown } = await start(runtime, { code: coded });
   expect(shown).toContain('Note: The view shows :man_fairy: as plain text');
   expect(shown).toMatch(/Note: The view shows :man_fairy: as plain text: /);
+  expect(shown).not.toContain('inside a code block');
+  // Server emoji inside backticks reach Discord as their raw text.
+  const boxed = counter.replace("button('boom', 'Boom'), ", '').replace("content: state.count + ' ' + state.said", "content: '```\\n⬜<:tea:123456789012345678>\\n``` `<a:wave:726396997648515153>` ' + state.count");
+  expect((await start(runtime, { code: boxed })).preview).toContain('Note: The view puts <:tea:123456789012345678> <a:wave:726396997648515153> inside a code block or inline code');
 });
 
 it('turns away an app no one can do anything with', async () => {

@@ -67,6 +67,28 @@ it('reads "invoker" and mentions inside a participants list, and turns away bad 
   expect(JSON.stringify(bodies[2].messages)).toContain('participants: [\\"111111111111111111\\",\\"222222222222222222\\"]');
 });
 
+it('gives apps the server emoji people pasted, and points out one an app swaps for a lookalike', async () => {
+  const bodies: any[] = [];
+  const lookalike = source.replace("'Count '", "'🐟 '");
+  const pasted = source.replace("'Count '", "ctx.emoji('cod') + ' '").replace('view: n =>', 'view: (n, ctx) =>');
+  const steps = [
+    { tool: { name: 'play_start', arguments: { title: 'Cod', source: lookalike } } },
+    { tool: { name: 'play_update', arguments: { edits: [{ find: "'🐟 '", replace: "ctx.emoji('cod') + ' '" }, { find: 'view: n =>', replace: 'view: (n, ctx) =>' }] } } },
+    { text: 'Done.' },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make a counter that shows <:cod:881267273447407646>', activePermissions: ['inference', 'discord.play'],
+    history: [{ user: 'hi <a:wave:726396997648515153>', assistant: 'hello' }],
+    play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1', owner: { id: '111111111111111111' } } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[1].messages)).toContain('the request pasted <:cod:881267273447407646>, which the app never uses');
+  const updated = String(bodies[2].messages.at(-1).content);
+  expect(updated).toContain('<:cod:881267273447407646> 0');
+  expect(updated).not.toContain('never uses');
+  const [app] = f.runtime.list('dm:1');
+  expect(f.runtime.source(app!.id, 'dm:1')).toMatchObject({ code: pasted });
+});
+
 it('updates the newest app with small edits to its current source', async () => {
   const bodies: any[] = [];
   const steps = [

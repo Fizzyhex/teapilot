@@ -20,6 +20,10 @@ export interface PlayContext {
   owner?: User;
   /** The conversation's workspace: attachments and what teapilot made, for play_start({ file }) and picture(). */
   files?: ConversationWorkspace;
+  /** Server emoji people pasted in this conversation, by name, so ctx.emoji knows them without the model passing them. */
+  emojis?: Record<string, string>;
+  /** Names among `emojis` pasted in the current request. */
+  requested?: string[];
 }
 
 /** Where the play tools find code the model wrote in its reply; the runner builds it from the current request. */
@@ -31,6 +35,12 @@ export interface Drafts {
   used: Set<string>;
   /** Set when a tool found no code, so the runner can ask for it with tools paused: an app's, a file's content, or a script to run. */
   missing?: 'app' | 'file' | 'script';
+}
+
+const customEmoji = /<a?:(\w{2,32}):\d{17,20}>/g;
+/** Server emoji written as <:name:id> in these texts, by name; the last one pasted wins a name used twice. */
+export function pastedEmoji(...texts: string[]): Record<string, string> {
+  return Object.fromEntries(texts.flatMap(value => [...value.matchAll(customEmoji)].map(match => [match[1]!, match[0]])));
 }
 
 const fence = /```([\w-]*)[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
@@ -176,6 +186,14 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     const approved = await approve({ kind: 'play', summary: `Run ${args.path} as a trusted Discord app? It runs as ordinary Node code, outside the sandbox, and can make any Discord API call as teapilot's bot.`, details: `File: ${target}\nSHA-256: ${sha256}\nAny later change to the file needs approval again.`, signal });
     return approved ? { kind: 'trusted', path: target, sha256 } : 'The operator did not approve running this app outside the sandbox.';
   };
+  /** Emoji apps may use: those pasted in the conversation, then any the model passes, named with or without colons. */
+  const known = (extra: Record<string, string> = {}): Record<string, string> => ({ ...context.emojis, ...Object.fromEntries(Object.entries(extra)
+    .map(([name, value]) => [name.replace(/^:|:$/g, ''), value.trim()]).filter(([, value]) => /^<a?:\w{2,32}:\d{17,20}>$/.test(value!))) });
+  /** Models swap server emoji for lookalikes, believing only Unicode shows in text; point out the ones this request pasted that the app leaves out. */
+  const unused = (source: Source | undefined) => {
+    const missing = source?.kind === 'sandbox' ? (context.requested ?? []).filter(name => !source.code.includes(name)) : [];
+    return missing.length ? `\nNote: the request pasted ${missing.map(name => context.emojis![name]).join(' ')}, which the app never uses. Server emoji show like any other emoji in text, grid cells and buttons: write each exactly as pasted, or ctx.emoji("${missing[0]}"), instead of a lookalike.` : '';
+  };
   /** Dry runs since the last start or update; small models loop on them until their context is full. */
   let tests = 0;
   /** Whether this turn dry-ran anything, so a long app posted untried gets a nudge to play it through. */
@@ -204,7 +222,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         edits: edits('Fixes to the code the last play_start or play_test tried, applied in order, instead of writing the whole app again. Use after a rejection or a failed dry run.'),
         trusted: Type.Optional(Type.Boolean({ description: 'Run the file at path as Node outside the sandbox, with ctx.discord for raw API calls. Needs repository.shell and an operator approval.' })),
         participants,
-        emojis: Type.Optional(Type.Record(Type.String(), Type.String(), { description: 'Only server emoji the user pasted as <:name:id>, by name, copied exactly. Never for :shortcodes: such as :angel:, which are standard Unicode emoji (😇).' })),
+        emojis: Type.Optional(Type.Record(Type.String(), Type.String(), { description: 'Rarely needed: server emoji pasted in this conversation are already in ctx.emoji. Others as <:name:id>, by name, copied exactly; never :shortcodes: such as :angel:, which are standard Unicode emoji (😇).' })),
       }),
       execute: async (_id, params, signal) => attempt(async () => {
         const args = params as { title?: string; source?: string; path?: string; file?: string; trusted?: boolean; edits?: Edit[]; participants?: string | string[]; emojis?: Record<string, string> };
@@ -226,13 +244,13 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         if (Array.isArray(participants) && !participants.every(id => /^\d{17,20}$/.test(id))) return 'Nothing was started: participants must be "everyone", "invoker", or Discord user IDs copied from <@id> mentions.';
         const source = await resolve(args, signal);
         if (typeof source === 'string') return source;
-        const emojis = Object.fromEntries(Object.entries(args.emojis ?? {}).filter(([, value]) => /^<a?:\w{2,32}:\d{17,20}>$/.test(value)));
+        const emojis = known(args.emojis);
         const origin = args.file === undefined ? undefined : context.files?.store.get(context.files.conversation, args.file)?.name;
         const { record, preview } = await context.runtime.start({ title, channelId: context.channelId, post: context.post, conversation: context.conversation, owner, source, participants: participants as never, emojis, file: origin });
         tests = 0; failed = false; started = { id: record.id, title };
         // Probing presses each control once; rules that play out over many turns only show up when played through.
         const untried = !tested && source.kind === 'sandbox' && source.code.split('\n').length > 120;
-        return `Started app ${record.id} (${record.participants === 'everyone' ? 'anyone can play' : `participants: ${JSON.stringify(record.participants)}`}). It is live in the channel; do not repeat its contents in your answer.\nPreview:\n${preview}${untried ? '\nThis long app was not dry-run: play it through once with play_test (a full round, acting as each player with user_id) and fix what breaks with play_update edits before answering.' : ''}`;
+        return `Started app ${record.id} (${record.participants === 'everyone' ? 'anyone can play' : `participants: ${JSON.stringify(record.participants)}`}). It is live in the channel; do not repeat its contents in your answer.\nPreview:\n${preview}${unused(source)}${untried ? '\nThis long app was not dry-run: play it through once with play_test (a full round, acting as each player with user_id) and fix what breaks with play_update edits before answering.' : ''}`;
       }),
     },
     {
@@ -266,9 +284,9 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         }
         const source = args.source === undefined && args.path === undefined && args.file === undefined ? undefined : await resolve(args, signal);
         if (typeof source === 'string') return source;
-        const { record, preview } = await context.runtime.update(id, context.conversation, source, Boolean(args.reset), args.timers);
+        const { record, preview } = await context.runtime.update(id, context.conversation, source, Boolean(args.reset), args.timers, known());
         tests = 0; failed = false;
-        return `Updated app ${record.id}.\nPreview:\n${preview}`;
+        return `Updated app ${record.id}.\nPreview:\n${preview}${unused(source)}`;
       }),
     },
     {
@@ -309,7 +327,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         const source = await resolve({ ...args, ...(latest !== undefined && args.path === undefined && args.file === undefined ? { source: latest } : {}), trusted: false }, signal);
         if (typeof source === 'string') return source;
         const running = updating && visible().some(app => app.id === updating) ? context.runtime.state(updating, context.conversation) : undefined;
-        return context.runtime.test(source, args.actions.map(({ user_id, ...action }) => user_id ? { ...action, user: { id: user_id } } : action), owner, { steps: args.steps, state: running, conversation: context.conversation });
+        return context.runtime.test(source, args.actions.map(({ user_id, ...action }) => user_id ? { ...action, user: { id: user_id } } : action), owner, { steps: args.steps, state: running, emojis: known(), conversation: context.conversation });
       }),
     },
     {
@@ -373,7 +391,7 @@ function playPrompt(repository: boolean, running: Array<{ id: string; title: str
     // Text input
     '- To collect text, give a button opens: modal(...); submitting it sends a modal action with the modal\'s id and fields.',
     // Emoji
-    '- Nothing an app sends renders :shortcodes:, and ctx.emoji(name) knows only server emoji the user pasted as <:name:id>; write the exact Unicode emoji in the code (:grinning: is 😀, :man_fairy: is 🧚‍♂️).',
+    '- Server emoji people pasted as <:name:id> or <a:name:id> show anywhere an app puts an emoji: text, grid cells, fields and buttons. Write each exactly as pasted, or ctx.emoji(name), outside backticks (code shows them as raw text), and never swap one for a lookalike. Nothing an app sends renders :shortcodes:, so every other emoji is the exact Unicode character (:grinning: is 😀, :man_fairy: is 🧚‍♂️).',
     // Changing apps
     '- To show a running app again (resend it, bring it back, "where is the game"), call play_resend; never play_start or reset, which lose its state.',
     '- To change a running app, call play_update with edits (exact find/replace text from its current source) and change only what was asked. State is kept, and top-level fields the new init() adds are filled in; a new field inside nested data (a player, a tile) needs a default where it is read, and a new timer loop needs play_update timers (e.g. [{ id: "tick", ms: 2000 }]) to start, since init and any start button already ran.',

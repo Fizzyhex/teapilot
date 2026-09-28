@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import { cleanChildEnvironment } from '../execution/policy.js';
+import { packagesFolder, pandocFolder, pythonAbi, toolsFolder, type PythonInfo } from './toolchain.js';
 
 /** How workspace commands are sandboxed: WORKSPACE_SANDBOX, WORKSPACE_ALLOWED_DOMAINS and WORKSPACE_DENIED_DOMAINS. */
 export interface WorkspaceSettings {
@@ -21,7 +22,14 @@ export const runLimits = { defaultSeconds: 60, maxSeconds: 300, outputChars: 800
 
 /** A tool commands can use: its command, what it is, and its version. */
 export interface Tool { name: string; kind: string; version: string }
-export interface SandboxStatus { available: boolean; reason?: string; shell: 'bash' | 'cmd'; tools: Tool[] }
+export interface SandboxStatus {
+  available: boolean;
+  reason?: string;
+  shell: 'bash' | 'cmd';
+  tools: Tool[];
+  /** The Python commands run, which teapilot's own packages must be installed for. */
+  python?: PythonInfo;
+}
 export interface RunOptions {
   timeoutSeconds: number;
   signal?: AbortSignal;
@@ -41,6 +49,7 @@ const probes: Array<{ name: string; commands: string[] }> = [
   { name: 'ffmpeg', commands: ['ffmpeg -hide_banner -version'] },
   { name: 'imagemagick', commands: ['magick -version', 'convert -version'] },
   { name: 'python', commands: ['python3 --version', 'python --version'] },
+  { name: 'pandoc', commands: ['pandoc --version'] },
   { name: 'node', commands: ['node --version'] },
 ];
 const versionOf = (name: string, output: string): string | undefined => {
@@ -80,6 +89,9 @@ export class SrtSandbox implements WorkspaceSandbox {
   /** Network questions waiting for a person; a command's time does not run out while it waits for one. */
   private asking = 0;
   private srtWin?: { path: string };
+  /** teapilot's own tools and Python packages, when installed: before the system's on PATH, and on PYTHONPATH. */
+  private toolPath: string[] = [];
+  private pythonPath?: string;
   private readonly probeFolder: string;
 
   constructor(private readonly stateDir: string, private readonly settings: WorkspaceSettings = defaultWorkspaceSettings, private readonly configDir?: string) {
@@ -104,15 +116,38 @@ export class SrtSandbox implements WorkspaceSandbox {
     }
     try { await mkdir(this.probeFolder, { recursive: true }); await this.session(this.probeFolder); }
     catch (error) { return unavailable(`The sandbox could not start: ${error instanceof Error ? error.message : String(error)}`); }
+    const pandoc = pandocFolder(this.stateDir);
+    if (await stat(join(pandoc, windows ? 'pandoc.exe' : 'pandoc')).catch(() => undefined)) this.toolPath = [pandoc];
     const tools: Tool[] = [];
-    for (const probe of probes) {
-      for (const command of probe.commands) {
-        const result = await this.execute(this.probeFolder, command, { timeoutSeconds: 20, network: async () => false }).catch(() => undefined);
-        const version = result?.exitCode === 0 ? versionOf(probe.name, result.output) : undefined;
-        if (version) { tools.push({ name: command.split(' ')[0]!, kind: probe.name, version }); break; }
+    const probe = (command: string) => this.execute(this.probeFolder, command, { timeoutSeconds: 20, network: async () => false }).catch(() => undefined);
+    let python: PythonInfo & { command: string } | undefined;
+    for (const { name, commands } of probes) {
+      for (const command of commands) {
+        const result = await probe(command);
+        const version = result?.exitCode === 0 ? versionOf(name, result.output) : undefined;
+        if (!version) continue;
+        tools.push({ name: command.split(' ')[0]!, kind: name, version });
+        if (name === 'python') python = await this.python(command.split(' ')[0]!, probe);
+        break;
+      }
+      if (name === 'python' && python) {
+        const pillow = await probe(`${python.command} -c "import PIL; print(PIL.__version__)"`);
+        const version = pillow?.exitCode === 0 ? versionOf('pillow', pillow.output) : undefined;
+        if (version) tools.push({ name: 'Pillow', kind: 'pillow', version });
       }
     }
-    return { available: true, shell, tools };
+    return { available: true, shell, tools, ...python ? { python: { executable: python.executable, abi: python.abi } } : {} };
+  }
+
+  /** Where the sandbox's Python lives and which ABI it has; teapilot's packages for that ABI go on PYTHONPATH. */
+  private async python(command: string, probe: (command: string) => Promise<RunResult | undefined>): Promise<PythonInfo & { command: string } | undefined> {
+    const result = await probe(`${command} -c "import sys, sysconfig; print(sys.executable); print(sysconfig.get_config_var('EXT_SUFFIX') or '')"`);
+    const [executable, suffix] = result?.exitCode === 0 ? result.output.split(/\r?\n/).map(line => line.trim()) : [];
+    const abi = suffix ? pythonAbi(suffix) : undefined;
+    if (!executable || !abi) return undefined;
+    const packages = packagesFolder(this.stateDir, abi);
+    if (await stat(packages).catch(() => undefined)) this.pythonPath = packages;
+    return { command, executable, abi };
   }
 
   /**
@@ -131,6 +166,10 @@ export class SrtSandbox implements WorkspaceSandbox {
       await copyFile(srt.VENDORED_SRT_WIN_EXE, copy);
     }
     await execFileAsync('icacls', [folder, '/grant', `*${user.sid}:(OI)(CI)RX`], { windowsHide: true });
+    // teapilot's own tools and packages, read-only; what is installed there later inherits this.
+    const tools = toolsFolder(this.stateDir);
+    await mkdir(tools, { recursive: true });
+    await execFileAsync('icacls', [tools, '/grant', `*${user.sid}:(OI)(CI)RX`], { windowsHide: true });
     this.srtWin = { path: copy };
     return undefined;
   }
@@ -180,6 +219,9 @@ export class SrtSandbox implements WorkspaceSandbox {
       HOME: folder, TMPDIR: temporary, TMP: temporary, TEMP: temporary,
       PYTHONUSERBASE: join(folder, '.packages'), PIP_USER: '1', PIP_NO_CACHE_DIR: '1', PIP_DISABLE_PIP_VERSION_CHECK: '1', PYTHONDONTWRITEBYTECODE: '1',
       npm_config_cache: join(folder, '.cache', 'npm'), npm_config_update_notifier: 'false', MPLCONFIGDIR: join(folder, '.cache', 'matplotlib'),
+      ...(this.pythonPath ? { PYTHONPATH: this.pythonPath } : {}),
+      // Windows builds PATH from teapilot's own and the command line, so it extends it there.
+      ...(windows && this.toolPath.length ? { PATH: [...this.toolPath, '%PATH%'].join(';') } : {}),
       ...(windows ? { USERPROFILE: folder, APPDATA: join(folder, '.appdata'), LOCALAPPDATA: join(folder, '.appdata', 'local') } : {}),
     };
     // Windows starts the command from the sandbox account's own environment and passes only what the command
@@ -193,7 +235,7 @@ export class SrtSandbox implements WorkspaceSandbox {
     let argv: string[];
     try { ({ argv } = await SandboxManager.wrapWithSandboxArgv(script, windows ? 'cmd' : '/bin/bash', undefined, options.signal, folder, { commandId, commandText: command })); }
     finally { if (shared === undefined) delete process.env.CLAUDE_CODE_TMPDIR; else process.env.CLAUDE_CODE_TMPDIR = shared; }
-    const env = { ...cleanChildEnvironment(), ...own, PATH: [join(folder, '.packages', 'bin'), join(folder, 'node_modules', '.bin'), process.env.PATH ?? ''].join(windows ? ';' : ':') };
+    const env = { ...cleanChildEnvironment(), ...own, PATH: [join(folder, '.packages', 'bin'), join(folder, 'node_modules', '.bin'), ...this.toolPath, process.env.PATH ?? ''].join(windows ? ';' : ':') };
     this.active = options;
     try {
       return await new Promise<RunResult>(resolve => {

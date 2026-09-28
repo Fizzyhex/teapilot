@@ -18,7 +18,7 @@ import { ask } from './ask.js';
 import { casualPrompt } from './casual.js';
 import { coder } from './coder.js';
 import { fitHistory, turnSteps } from './history.js';
-import { latestBlock, latestCode, play, withoutCode, type Drafts, type PlayContext } from './play.js';
+import { latestBlock, latestCode, pastedEmoji, play, withoutCode, type Drafts, type PlayContext } from './play.js';
 import { workspace, type ConversationWorkspace } from './workspace.js';
 import type { WebController } from '../web/controller.js';
 
@@ -120,7 +120,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       : mode === 'ask' ? '\nAsk mode: give focused answers, research, and plans. Ask questions only when needed to answer accurately.'
       : '\nCode mode: complete requested repository work and report changes and verification; answer ordinary questions directly without unnecessary repository inspection.';
     if (input.play && effectiveConfig.policy.permissions.includes('discord.play')) {
-      const apps = play(input.play, effectiveConfig, policy, input.approve, drafts);
+      // Server emoji people pasted reach apps through ctx.emoji whether or not the model passes them on.
+      const emojis = { ...input.play.emojis, ...pastedEmoji(...(input.history ?? []).map(turn => turn.user), input.prompt) };
+      const apps = play({ ...input.play, emojis, requested: Object.keys(pastedEmoji(input.prompt)) }, effectiveConfig, policy, input.approve, drafts);
       setup.tools.push(...apps.tools);
       setup.systemPrompt += '\n' + apps.systemPrompt;
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {

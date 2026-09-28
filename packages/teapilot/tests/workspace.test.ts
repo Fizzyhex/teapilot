@@ -17,6 +17,7 @@ import { Telemetry } from '../src/telemetry/outcome.js';
 import type { RunOptions, WorkspaceSandbox } from '../src/workspace/sandbox.js';
 import { fileLimits, WorkspaceStore } from '../src/workspace/store.js';
 import { TerminalWorkspace } from '../src/workspace/terminal.js';
+import { pandocAsset, pythonAbi } from '../src/workspace/toolchain.js';
 import { completion, fixture, mockServer } from './helpers.js';
 
 const cleanups: Array<() => unknown> = [];
@@ -379,4 +380,14 @@ it('copies @mentioned files into a terminal session\'s workspace and saves sent 
   const folder = store.folder(context.conversation);
   await session.close();
   expect(existsSync(folder)).toBe(false);
+});
+
+it('keeps teapilot\'s Python packages apart per interpreter ABI, and has a pinned pandoc for each desktop platform', () => {
+  expect(pythonAbi('.cp314-win_amd64.pyd')).toBe('cp314-win_amd64');
+  expect(pythonAbi('.cpython-312-x86_64-linux-gnu.so')).toBe('cpython-312-x86_64-linux-gnu');
+  expect(pythonAbi('')).toBeUndefined();
+  for (const [platform, arch] of [['win32', 'x64'], ['linux', 'x64'], ['linux', 'arm64'], ['darwin', 'x64'], ['darwin', 'arm64']] as const) {
+    expect(pandocAsset(platform, arch)?.sha256).toMatch(/^[0-9a-f]{64}$/);
+  }
+  expect(pandocAsset('win32', 'arm64')).toBeUndefined();
 });

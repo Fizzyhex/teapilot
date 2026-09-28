@@ -1,6 +1,6 @@
 // The long-lived half of scripts/agent-discord.mjs: runs teapilot's Discord service against the
 // simulated Discord in world.ts and answers the client's commands over a local socket.
-import { appendFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { basename, extname, join } from 'node:path';
@@ -9,6 +9,7 @@ import { AccessStore } from '../../src/discord/access-store.js';
 import { serveDiscord } from '../../src/discord/index.js';
 import { describe } from '../../src/discord/play/render.js';
 import { PlayStore } from '../../src/discord/play/store.js';
+import { toolsFolder } from '../../src/workspace/toolchain.js';
 import type { DiscordSettings } from '../../src/discord/settings.js';
 import { SkippableClock } from './clock.js';
 import { channelId, people, SimError, World } from './world.js';
@@ -45,6 +46,8 @@ if (!config.policy.permissions.includes('discord.play')) {
 const settings: DiscordSettings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelIds: [channelId], root: spec.root, startMode: spec.mode };
 AccessStore.at(spec.state, settings.allowedUserIds, config.policy.permissions).addUser(people.user.id, people.op.id, { name: people.user.name });
 const store = new PlayStore(join(spec.state, 'discord-play'));
+// Workspace commands use the tools `teapilot doctor` installed for the profile (pandoc, Pillow); a copy, since they are read-only.
+if (existsSync(toolsFolder(config.stateDir))) cpSync(toolsFolder(config.stateDir), toolsFolder(spec.state), { recursive: true });
 
 let fresh = '';
 const waiters = new Set<() => void>();
