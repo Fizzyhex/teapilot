@@ -3,8 +3,8 @@ import { mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Message } from '@earendil-works/pi-ai';
 import { convertToLlm } from '@earendil-works/pi-coding-agent';
-import { completion, fixture, mockServer } from './helpers.js';
-import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, summaryMessage, turnMark } from '../src/agents/compaction.js';
+import { completion, events, fixture, mockServer } from './helpers.js';
+import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, summaryLength, summaryMessage, turnMark } from '../src/agents/compaction.js';
 import { runAttempt } from '../src/agents/run.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import type { ConversationTurn } from '../src/integration/events.js';
@@ -85,8 +85,10 @@ it('refuses a sessions folder that is a link', async () => {
   await expect(SessionLog.open(new Scratch(scratch), cwd)).rejects.toThrow(/link/);
 });
 
-it('leaves room for a whole reply before compacting, and keeps pi’s defaults for large contexts', () => {
-  expect(compactionSettings({ contextTokens: 32768, maxOutputTokens: 16384 })).toEqual({ enabled: true, reserveTokens: 18432, keepRecentTokens: 8192 });
+it('leaves the room a reply is admitted with before compacting, and keeps pi’s defaults for large contexts', () => {
+  // A 16k reply limit on a 32k context is a ceiling, not room held back: compaction starts near 21k rather than 14k.
+  expect(compactionSettings({ contextTokens: 32768, maxOutputTokens: 16384 })).toEqual({ enabled: true, reserveTokens: 11468, keepRecentTokens: 8192 });
+  expect(compactionSettings({ contextTokens: 32768, maxOutputTokens: 4096 })).toEqual({ enabled: true, reserveTokens: 7372, keepRecentTokens: 8192 });
   expect(compactionSettings({ contextTokens: 262144, maxOutputTokens: 8192 })).toEqual({ enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 });
   expect(compactionSettings({ contextTokens: 8192, maxOutputTokens: 2048 }, false)).toEqual({ enabled: false, reserveTokens: 4096, keepRecentTokens: 2048 });
 });
@@ -157,6 +159,34 @@ it('compacts an attempt nearing the context limit with pi’s prompts, and carri
   expect(run.steps!.filter(step => step.role === 'toolResult').length).toBeLessThan(entries.filter(entry => entry.type === 'message' && entry.message.role === 'toolResult').length);
 });
 
+it('summarises briefly and without thinking, saying so while it happens', async () => {
+  const bodies: any[] = [];
+  let reads = 0;
+  const f = await attempt((body, _req, res) => {
+    bodies.push(body);
+    if (summaryRequest(body)) return completion(res, { text: summaryText });
+    const compacted = JSON.stringify(body.messages).includes('compacted into the following summary');
+    completion(res, compacted ? { text: 'r-0042 is fine.' } : { reasoning: `thinking about part ${reads + 1} `.repeat(40), tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } });
+  });
+  for (let part = 1; part <= 8; part++) {
+    await writeFile(join(f.scratch, `part-${part}.txt`), Array.from({ length: 300 }, (_, index) => `part ${part} line ${index} record r-${index % 97} state ok`).join('\n'));
+  }
+  const seen: string[] = [];
+  const run = await runAttempt({ ...f, tier: 'reasoning', workload: 'ask', web: false, approve: async () => true, prompt: 'why did r-0042 fail?', scratch: f.scratch, onEvent: event => seen.push(event.type) });
+  expect(run.success, JSON.stringify(run)).toBe(true);
+  const [summary] = bodies.filter(summaryRequest);
+  // The tier thinks; its summaries do not.
+  expect(bodies[0].reasoning_effort).toBe('low');
+  expect(summary.reasoning_effort).toBe('none');
+  expect(seen).toContain('compaction_start');
+  expect((await events(f.config)).find(e => e.type === 'compaction')).toMatchObject({ trigger: 'context', ms: expect.any(Number) });
+  // Only the newest reply keeps its thinking: earlier reasoning is not sent again.
+  const main = bodies.filter(body => !summaryRequest(body));
+  const before = main[main.indexOf(bodies[bodies.indexOf(summary) - 1])]!;
+  expect(JSON.stringify(before.messages)).toContain(`thinking about part ${reads - 1}`);
+  expect(JSON.stringify(before.messages)).not.toContain('thinking about part 1 ');
+});
+
 it('summarises earlier turns that no longer fit instead of dropping them, and reuses that summary next time', async () => {
   const bodies: any[] = [];
   const f = await attempt((body, _req, res) => { bodies.push(body); completion(res, { text: summaryRequest(body) ? summaryText : 'ok' }); });
@@ -167,6 +197,8 @@ it('summarises earlier turns that no longer fit instead of dropping them, and re
   expect(bodies.filter(summaryRequest)).toHaveLength(1);
   expect(JSON.stringify(bodies[0].messages)).toContain('detail 1');
   expect(JSON.stringify(bodies[0].messages)).toContain('Use this EXACT format');
+  // Each summary folds in the last, so it is held to a length for the context it has to fit in.
+  expect(JSON.stringify(bodies[0].messages)).toContain(`Keep the whole summary under ${summaryLength(16384).words} words`);
   const main = JSON.stringify(bodies[1].messages);
   expect(main).toContain('compacted into the following summary');
   expect(main).toContain('request 3');

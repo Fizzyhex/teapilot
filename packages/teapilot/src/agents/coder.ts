@@ -21,7 +21,7 @@ function detectWindowsShell(): WindowsShell {
 }
 
 // The small execution context cannot afford a whole-file read; default to a window the model can page through with offset.
-const DEFAULT_READ_LINES = 200;
+export const DEFAULT_READ_LINES = 200;
 export function boundedRead(tool: AgentTool): AgentTool {
   return { ...tool, execute: (id, args, ...rest) => tool.execute(id, { limit: DEFAULT_READ_LINES, ...(args as object) } as typeof args, ...rest) };
 }

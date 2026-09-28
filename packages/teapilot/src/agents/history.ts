@@ -3,6 +3,7 @@ import { emptyUsage } from '../integration/inference.js';
 import type { ConversationTurn } from '../integration/events.js';
 import { estimateValueTokens } from '../inference/context.js';
 import { savedLine } from '../workspace/scratch.js';
+import { DEFAULT_READ_LINES } from './coder.js';
 
 type Model = { provider: string; id: string };
 
@@ -87,6 +88,82 @@ export function supersedePlayCalls(messages: Message[], pressure: boolean): Mess
     return content.every((part, at) => part === message.content[at]) ? message : { ...message, content };
   });
   return changed ? result as Message[] : messages;
+}
+
+/**
+ * Thinking serves the step it led to, so every reply before the newest loses it, as Qwen's guidance does for
+ * history: old reasoning costs context that the calls and results after it already cover. A reply of nothing but
+ * thinking keeps it. Returns the same array when nothing changes.
+ */
+export function withoutOldThinking(messages: Message[]): Message[] {
+  const newest = messages.findLastIndex(message => message.role === 'assistant');
+  let changed = false;
+  const result = messages.map((message, index) => {
+    if (index >= newest || message.role !== 'assistant' || !message.content.some(part => part.type === 'thinking')) return message;
+    const content = message.content.filter(part => part.type !== 'thinking');
+    if (!content.length) return message;
+    changed = true;
+    return { ...message, content };
+  });
+  return changed ? result : messages;
+}
+
+/**
+ * Reads a later read of the same file covers, each cut to a note: the later one shows those lines as they are now,
+ * and a model that reads a file again after losing track of it otherwise carries every copy. `resolve` makes the
+ * paths the model gave comparable. Returns the same array when nothing changes.
+ */
+export function supersedeReads(messages: Message[], resolve: (path: string) => string): Message[] {
+  const reads = new Map<string, { path: string; file: string; from: number; to: number }>();
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    for (const part of message.content) {
+      if (part.type !== 'toolCall' || part.name !== 'read') continue;
+      const { path, offset, limit } = (part.arguments ?? {}) as { path?: unknown; offset?: unknown; limit?: unknown };
+      if (typeof path !== 'string' || !path) continue;
+      const from = typeof offset === 'number' && offset > 0 ? offset : 1;
+      reads.set(part.id, { path, file: resolve(path), from, to: from + (typeof limit === 'number' && limit > 0 ? limit : DEFAULT_READ_LINES) - 1 });
+    }
+  }
+  const newer: Array<{ file: string; from: number; to: number }> = [];
+  const result = [...messages];
+  let changed = false;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role !== 'toolResult' || message.toolName !== 'read' || message.isError) continue;
+    const read = reads.get(message.toolCallId);
+    if (!read) continue;
+    if (!newer.some(later => later.file === read.file && later.from <= read.from && later.to >= read.to)) { newer.push(read); continue; }
+    const note = `[Superseded: a later read of ${read.path} shows these lines as they are now.]`;
+    if (message.content.length === 1 && message.content[0]!.type === 'text' && message.content[0]!.text === note) continue;
+    result[index] = { ...message, content: [{ type: 'text', text: note }] };
+    changed = true;
+  }
+  return changed ? result : messages;
+}
+
+/**
+ * An attempt's messages, ready for another attempt on the same model to carry on from: without a reply that failed,
+ * was cut off, or announced calls it never made at the end, and without calls and results that lost their other
+ * half. Nothing is returned when no reply is left.
+ */
+export function carryOver(messages: Message[]): Message[] | undefined {
+  const kept = [...messages];
+  const unusable = (message: Message) => message.role === 'assistant' && (['error', 'aborted', 'length'].includes(message.stopReason)
+    || (message.stopReason === 'toolUse' && !message.content.some(part => part.type === 'toolCall')));
+  while (kept.length && unusable(kept.at(-1)!)) kept.pop();
+  const answered = new Set(kept.flatMap(message => message.role === 'toolResult' ? [message.toolCallId] : []));
+  const called = new Set<string>();
+  const paired = kept.flatMap((message): Message[] => {
+    if (message.role === 'toolResult') return called.has(message.toolCallId) ? [message] : [];
+    if (message.role !== 'assistant') return [message];
+    const content = message.content.filter(part => part.type !== 'toolCall' || answered.has(part.id));
+    for (const part of content) if (part.type === 'toolCall') called.add(part.id);
+    // A reply whose every call went reads as an ordinary answer, not as a call the server lost.
+    const calls = content.some(part => part.type === 'toolCall');
+    return content.length ? [content.length === message.content.length ? message : { ...message, content, ...(calls ? {} : { stopReason: 'stop' as const }) }] : [];
+  });
+  return paired.some(message => message.role === 'assistant') ? paired : undefined;
 }
 
 /** A turn as messages: in full, with its steps compacted, and as its text alone. */

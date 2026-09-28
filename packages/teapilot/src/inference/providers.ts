@@ -4,10 +4,10 @@ import { stream as openAIStream } from '@earendil-works/pi-ai/api/openai-complet
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import { createSdkProvider, type JevProvider } from 'jevrouter';
 import type { Config, ModelConfig, Tier, PhysicalModel } from '../config.js';
-import { effectiveProfile, modelFor, profileFor, type ExecutionProfile } from '../routing/execution.js';
+import { effectiveProfile, modelFor, profileFor, type ExecutionProfile, type ThinkingLevel } from '../routing/execution.js';
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
-import { calibratedTokens, estimateInputTokens, MAX_PAYLOAD_BYTES, wellFormedText } from './context.js';
+import { calibratedTokens, estimateInputTokens, estimatePayloadTokens, MAX_PAYLOAD_BYTES, replyRoom, wellFormedText } from './context.js';
 import { reasoningFields, samplingFor } from './reasoning.js';
 
 export function piModel(config: ModelConfig, profile?: ExecutionProfile): Model<'openai-completions'> {
@@ -156,16 +156,20 @@ export function wellFormed(value: unknown): unknown {
 
 export function guardedStream(
   config: Config, tier: Tier, governor: SpendGovernor, telemetry: Telemetry, state: InferenceState,
-  controls?: { toolChoice?: 'auto' | 'required' | 'none'; maxOutputTokens?: number; /** Replaces the tier's reply length, within the model's own limit. */ outputTokens?: number },
+  controls?: { toolChoice?: 'auto' | 'required' | 'none'; maxOutputTokens?: number; /** Replaces the tier's reply length, within the model's own limit. */ outputTokens?: number;
+    /** Replaces the tier's reasoning level, as for summaries, which gain nothing from thinking. */ thinking?: ThinkingLevel },
 ): StreamFn {
   const profile = effectiveProfile(config, tier);
   const spec = modelFor(config, tier);
   const model = piModel(spec, profile);
-  const reservedOutputTokens = controls?.outputTokens !== undefined ? Math.min(controls.outputTokens, spec.maxOutputTokens)
+  const cap = controls?.outputTokens !== undefined ? Math.min(controls.outputTokens, spec.maxOutputTokens)
     : Math.min(controls?.maxOutputTokens ?? profile.maxOutputTokens, profile.maxOutputTokens);
+  // A call is admitted while its input leaves this much room; the reply may then use all the room there is, up to `cap`.
+  const floor = replyRoom({ contextTokens: profile.contextTokens, maxOutputTokens: cap });
+  const thinking = controls?.thinking ?? profile.thinking;
   // Temperature travels as its own option; the other settings join the reasoning fields.
-  const { temperature, ...sampling } = samplingFor(spec, profile.thinking);
-  const fields = { ...sampling, ...reasoningFields(spec, profile.thinking) };
+  const { temperature, ...sampling } = samplingFor(spec, thinking);
+  const fields = { ...sampling, ...reasoningFields(spec, thinking) };
   return (_model, context, options) => {
     const output = new AssistantMessageEventStream();
     const run = async (): Promise<void> => {
@@ -175,6 +179,7 @@ export function guardedStream(
       let completed: AssistantMessage | undefined;
       let sent = false;
       let lexicalTokens: number | undefined;
+      let maxTokens = cap;
       const observed: { cost?: number; model?: string; completeUsage?: boolean } = {};
       // requestTimeoutMs bounds a stall, not a whole stream: long local generations keep
       // producing tokens, and attemptTimeoutMs already bounds the attempt overall.
@@ -189,16 +194,20 @@ export function guardedStream(
       try {
         const stream = openAIStream(model, context, {
           apiKey: config.secrets[profile.model] || 'local-no-key',
-          signal, maxTokens: reservedOutputTokens, maxRetries: 0,
+          signal, maxTokens: cap, maxRetries: 0,
           toolChoice: controls?.toolChoice,
           temperature,
           timeoutMs: config.policy.limits.requestTimeoutMs,
           onPayload: raw => {
             const payload = wellFormed(raw) as Record<string, unknown>;
+            // By the same estimate as the admission check, so a reply never asks for more than the context has left.
+            try { maxTokens = Math.max(floor, Math.min(cap, profile.contextTokens - calibratedTokens(estimatePayloadTokens(payload), state.calibration))); }
+            catch { maxTokens = cap; }
+            const sized = { ...payload, max_tokens: maxTokens };
             return spec.provider === 'openrouter' ? {
-              ...payload,
+              ...sized,
               provider: { require_parameters: true, max_price: { prompt: spec.inputUsdPerMillion, completion: spec.outputUsdPerMillion, request: 0 } },
-            } : { ...payload, ...fields };
+            } : { ...sized, ...fields };
           },
           fetch: async (input, init) => {
             const body = typeof init?.body === 'string' ? init.body : '';
@@ -207,9 +216,9 @@ export function guardedStream(
             const calibration = state.calibration;
             const estimatedInputTokens = lexicalTokens === undefined ? undefined : calibratedTokens(lexicalTokens, calibration);
             const rejection = payloadBytes > MAX_PAYLOAD_BYTES ? 'payload_limit'
-              : estimatedInputTokens !== undefined && estimatedInputTokens + reservedOutputTokens > profile.contextTokens ? 'context_limit' : undefined;
+              : estimatedInputTokens !== undefined && estimatedInputTokens + floor > profile.contextTokens ? 'context_limit' : undefined;
             await telemetry.event('context_admission', { tier, model: spec.id, payloadBytes, estimatedInputTokens, lexicalTokens,
-              contextTokens: profile.contextTokens, reservedOutputTokens, method: calibration ? 'calibrated-lexical' : 'conservative-lexical', rejection });
+              contextTokens: profile.contextTokens, reservedOutputTokens: floor, maxOutputTokens: maxTokens, method: calibration ? 'calibrated-lexical' : 'conservative-lexical', rejection });
             if (rejection) {
               state.stop = rejection; throw new Error('Request exceeds configured admission ceiling');
             }

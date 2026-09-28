@@ -38,8 +38,10 @@ export class ExecutionPolicy {
   /**
    * `scratch` is the session's scratchpad folder: files there are the agent's own working material, so reading and
    * writing them needs no repository permission or approval, and they never count as changes to the project.
+   * `own` marks the root as the conversation's own workspace rather than a repository: its files, which workspace
+   * commands change freely anyway, need no repository permission or approval either.
    */
-  constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation, readonly scratch?: string) {}
+  constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation, readonly scratch?: string, readonly own = false) {}
   /**
    * `path` made absolute. Sandboxed commands see the scratchpad as `.scratch/`, so that name means the scratchpad
    * here too, wherever the root is.
@@ -50,8 +52,10 @@ export class ExecutionPolicy {
   }
   /** Whether `path` (relative to the root, or absolute) is in the scratchpad. */
   inScratch(path: string): boolean { return this.scratch !== undefined && within(this.scratch, this.resolve(path), true); }
+  /** Whether `path` is the session's own to read and change: in its scratchpad, or anywhere in a workspace root. */
+  owns(path: string): boolean { return this.inScratch(path) || (this.own && within(this.root, this.resolve(path), true)); }
   requireRead(path?: string): void {
-    if (path !== undefined && this.inScratch(path)) return;
+    if (path !== undefined && this.owns(path)) return;
     if (!this.config.policy.permissions.includes('repository.read')) { this.denied = true; throw new PolicyDenied('Missing repository.read permission'); }
   }
   async path(path: string, mutation: boolean): Promise<string> {
@@ -63,7 +67,7 @@ export class ExecutionPolicy {
     // A working root the operator placed inside the state directory (a Discord workspace, say) is the
     // repository; the rest of the state directory, and any configuration inside the root, stays protected.
     const configDir = this.config.source?.directory;
-    const workspace = configDir !== undefined && within(this.config.stateDir, this.root) && !within(this.root, configDir, true);
+    const workspace = (this.own || configDir !== undefined) && within(this.config.stateDir, this.root) && !(configDir !== undefined && within(this.root, configDir, true));
     if (!scratch && within(this.config.stateDir, target, true) && !(workspace && within(this.root, target))) throw new PolicyDenied('Host state is protected');
     if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new PolicyDenied(scratch ? 'Path must be a file inside the scratchpad' : 'Path must be a file inside the working repository');
     const parts = rel.split(sep);
@@ -98,9 +102,9 @@ export class ExecutionPolicy {
         const shell = tool.name === 'bash' || tool.name === 'powershell';
         const mutation = tool.name === 'write' || tool.name === 'edit';
         const permission = shell ? 'repository.shell' : mutation ? 'repository.write' : 'repository.read';
-        // The scratchpad is the agent's own: it needs no repository permission, and replacing a file there asks nobody.
-        const scratch = !shell && typeof args.path === 'string' && Boolean(args.path) && this.inScratch(args.path);
-        if (!scratch && !this.config.policy.permissions.includes(permission)) throw new PolicyDenied(`Missing ${permission} permission`);
+        // The scratchpad and a workspace are the agent's own: they need no repository permission, and replacing a file there asks nobody.
+        const own = !shell && typeof args.path === 'string' && Boolean(args.path) && this.owns(args.path);
+        if (!own && !this.config.policy.permissions.includes(permission)) throw new PolicyDenied(`Missing ${permission} permission`);
         if (shell) {
           const command = String(args.command);
           if (!automaticCommand(command, this.config.policy.execution.trustedCommands)) {
@@ -115,7 +119,7 @@ export class ExecutionPolicy {
           await this.beforeMutation?.({ tool: tool.name }, signal);
         } else {
           const target = await this.path(String(args.path), mutation);
-          if (mutation && !scratch) {
+          if (mutation && !own) {
             const old = await readFile(target, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
             const removed = tool.name === 'write' ? old : String(args.oldText ?? '');
             const replacement = String(tool.name === 'write' ? args.content : args.newText);
@@ -125,7 +129,7 @@ export class ExecutionPolicy {
           }
           // Pi's factories accept absolute paths; validate again just before use.
           args.path = await this.path(target, mutation);
-          if (mutation && !scratch) await this.beforeMutation?.({ tool: tool.name, path: target }, signal);
+          if (mutation && !own) await this.beforeMutation?.({ tool: tool.name, path: target }, signal);
         }
         signal?.throwIfAborted();
         if (shell) this.shellRan = true;

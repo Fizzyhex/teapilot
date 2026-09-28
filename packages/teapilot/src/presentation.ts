@@ -29,6 +29,15 @@ export function describeTool(event: HostEvent): string {
   return `${tool}${suffix}`;
 }
 
+/** One line for a compaction (agents/compaction.ts), which takes a model call of its own, for the same trail. */
+export function describeCompaction(event: HostEvent): string {
+  const what = event.trigger === 'history' ? 'earlier turns' : 'earlier context';
+  const took = typeof event.ms === 'number' ? ` in ${Math.max(1, Math.round(event.ms / 1000))}s` : '';
+  if (event.type === 'compaction_failed') return `compacting ${what} failed${took}; carrying on without it`;
+  const size = typeof event.tokensBefore === 'number' ? ` (${(event.tokensBefore / 1000).toFixed(1)}k tokens)` : '';
+  return `compacted ${what}${size} into a summary${took}`;
+}
+
 /** Style complete lines, retaining every Markdown character and code indent. */
 export class MarkdownOutput {
   private pending = '';
@@ -436,6 +445,7 @@ export class TerminalPresentation implements ActivityUI {
     else if (event.type === 'message_end') { this.clear(); this.endMessage(); this.draw(); }
     else if (event.type === 'tool_execution_start') this.setActivity({ kind: 'waiting', label: `Running ${String(event.tool)}...` });
     else if (event.type === 'tool_execution_end') this.write(`${paint(describeTool(event), '2', this.colour)}\n`);
+    else if (event.type === 'compaction' || event.type === 'compaction_failed') this.write(`${paint(describeCompaction(event), '2', this.colour)}\n`);
     else if (event.type === 'request_end' || event.type === 'request_error') this.pause();
   }
   private endMessage(): void {

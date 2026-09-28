@@ -226,6 +226,42 @@ it('runs a script from the reply in the workspace, then posts what it made', asy
   expect(result.text).not.toContain('FLIP_LEFT_RIGHT');
 });
 
+it('gives the file tools the workspace workspace_run uses, so an edited script is the one that runs next', async () => {
+  const bodies: any[] = [];
+  const steps = [
+    { text: '```python\nprint("old")\n```', tool: { name: 'workspace_run', arguments: { script: 'scene.py', command: 'python3 scene.py' } } },
+    { tool: { name: 'edit', arguments: { path: 'scene.py', edits: [{ oldText: 'print("old")', newText: 'print("new")' }] } } },
+    { tool: { name: 'workspace_run', arguments: { command: 'python3 scene.py' } } },
+    { tool: { name: 'write', arguments: { path: '.scratch/notes.md', content: 'the scene works' } } },
+    { tool: { name: 'write', arguments: { path: 'credits.txt', content: 'made by teapilot' } } },
+    { tool: { name: 'list_files', arguments: {} } },
+    { tool: { name: 'file_send', arguments: { files: ['credits.txt'] } } },
+    { text: 'Done.' },
+  ];
+  const sandbox = fakeSandbox(async folder => `ran ${(await readFile(join(folder, 'scene.py'), 'utf8')).trim()}`);
+  const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); }, sandbox);
+  // As in Discord: the workspace is under teapilot's state folder, and the scratchpad is its .scratch folder.
+  const store = WorkspaceStore.at(f.config.stateDir);
+  const workspace = { ...f.workspace, store };
+  const shown: unknown[] = [];
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make a scene', activePermissions: ['inference'], workspace, scratch: store.scratch('dm:1'),
+    onEvent: event => { if (event.type === 'tool_execution_end') shown.push(event.path); } });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[0].messages)).toContain('take workspace file names, as workspace_run does');
+  expect(JSON.stringify(bodies[3].messages)).toContain('ran print(\\"new\\")');
+  expect(await readFile(join(store.scratch('dm:1'), 'notes.md'), 'utf8')).toBe('the scene works');
+  // Files the tools write join the workspace's list, so they can be sent; the scratchpad and its files stay out of sight.
+  expect(store.list('dm:1').map(file => file.name)).toEqual(['scene.py', 'credits.txt']);
+  expect(f.sent.map(entry => entry.files.map(file => file.name))).toEqual([['credits.txt']]);
+  const listed = JSON.stringify(bodies[6].messages.at(-1));
+  expect(listed).toContain('scene.py');
+  expect(listed).not.toContain('.scratch');
+  // Nothing asked anyone, and changed files read as workspace names (scratchpad writes are shown without one).
+  expect(f.approvals).toEqual([]);
+  expect(shown.filter(Boolean)).toEqual(['scene.py', 'credits.txt']);
+  expect(result.changedFiles).toEqual(['scene.py', 'credits.txt']);
+});
+
 it('asks once before a command reaches a package registry, and remembers the answer for the conversation', async () => {
   const hosts: boolean[] = [];
   const sandbox = fakeSandbox(async (_folder, _command, options) => {

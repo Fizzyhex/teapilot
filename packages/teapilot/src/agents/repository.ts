@@ -24,18 +24,21 @@ function formatCount(count: number): string {
 // Enumeration never invokes a shell. Every directory and file crosses the same
 // boundary as read; linked/protected paths are omitted, not followed.
 // The same tools serve a session's scratchpad: in a repository they also take a path inside it, and without
-// repository access they are offered under `names`, rooted at the scratchpad itself.
+// repository access they are offered under `names`, rooted at the scratchpad itself or at the conversation's workspace.
 export function repositoryTools(policy: ExecutionPolicy, names: [list: string, search: string] = ['repo_list', 'repo_search']): AgentTool[] {
   const scratchOnly = policy.scratch !== undefined && policy.root === policy.scratch;
+  const workspace = policy.own && !scratchOnly;
   // Complete searches already answered in this attempt: a model unsure whether something is absent repeats them.
   const searched = new Map<string, string>();
   return names.map((name, index) => ({
-    name, label: index === 0 ? (scratchOnly ? 'List scratchpad files' : 'List repository files') : (scratchOnly ? 'Search scratchpad text' : 'Search repository text'),
+    name, label: `${index === 0 ? 'List' : 'Search'} ${scratchOnly ? 'scratchpad' : workspace ? 'workspace' : 'repository'} ${index === 0 ? 'files' : 'text'}`,
     description: scratchOnly
       ? `${index === 0 ? 'List files' : 'Search literal text with line references'} in your scratchpad folder, including output saved there in full. Reports truncation; narrow the path or query when it does.`
+      : workspace
+      ? `${index === 0 ? 'List files' : 'Search literal text with line references'} in this conversation's workspace, by the names workspace_run uses. Hidden folders, such as your scratchpad (.scratch) and installed packages, are left out unless the path is inside one. Reports truncation; narrow the path or query when it does.`
       : `${index === 0 ? 'List files' : 'Search literal text with line references'} inside the repository without shell approval. Respects .gitignore, skips protected/linked/generated paths, and reports truncation. An empty list is a valid empty project. A root with many subdirectories is summarised as immediate children with per-directory file counts instead of a full recursive dump; list a specific subdirectory by path to see inside it.${policy.scratch ? ' Also takes a directory in your scratchpad folder.' : ''}`,
     parameters: Type.Object({
-      path: Type.Optional(Type.String({ description: scratchOnly ? 'Directory in the scratchpad; defaults to .' : 'Repository-relative directory; defaults to .', maxLength: 1000 })),
+      path: Type.Optional(Type.String({ description: scratchOnly ? 'Directory in the scratchpad; defaults to .' : workspace ? 'Directory in the workspace, such as .scratch; defaults to .' : 'Repository-relative directory; defaults to .', maxLength: 1000 })),
       ...(index === 1 ? { query: Type.String({ minLength: 1, maxLength: 500 }), caseSensitive: Type.Optional(Type.Boolean()) } : {}),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
     }),
@@ -45,7 +48,8 @@ export function repositoryTools(policy: ExecutionPolicy, names: [list: string, s
       policy.requireRead(start);
       // A scratchpad path from a repository session is walked from the scratchpad, and named in full so read finds it.
       const base = policy.scratch !== undefined && within(policy.scratch, start, true) ? policy.scratch : policy.root;
-      const labelOf = (path: string) => slash(base === policy.root ? relative(base, path) : path);
+      // In a workspace the scratchpad is .scratch/, so its files are named from the workspace like the rest.
+      const labelOf = (path: string) => slash(base === policy.root || workspace ? relative(policy.root, path) : path);
       if (start !== base) await policy.path(start, false);
       const limit = Math.min(200, Math.max(1, args.limit ?? 80));
       const outputCap = index === 0 ? LIST_OUTPUT_CAP : SEARCH_OUTPUT_CAP;
@@ -73,6 +77,8 @@ export function repositoryTools(policy: ExecutionPolicy, names: [list: string, s
           signal?.throwIfAborted();
           if (++visited > 5000 || Date.now() > deadline) { truncated = true; break; }
           if (['node_modules', 'dist', 'build', '.git'].includes(entry.name)) { skipped++; continue; }
+          // A workspace's hidden folders hold the scratchpad, packages and caches, not files people shared or asked for.
+          if (workspace && entry.isDirectory() && (entry.name.startsWith('.') || entry.name === '__pycache__')) { skipped++; continue; }
           const path = resolve(directory, entry.name);
           let ignored = false;
           for (const rule of rules) {

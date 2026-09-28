@@ -89,6 +89,17 @@ it('attaches the whole log when Details would not fit in one message', () => {
   expect(details.file?.name).toBe('turn-details.md');
   expect(details.file?.content).toBe(`completed · 1 step · 0s\n\n${'x'.repeat(3000)}\n\n- read a.ts\n`);});
 
+it('shows a compaction while it runs, then lists it among the steps without counting it as one', () => {
+  const card = new StatusCard(text => text);
+  card.push({ type: 'tool_execution_end', tool: 'read', path: 'scene.py' });
+  expect(card.push({ type: 'compaction_start', trigger: 'context' })).toBe(true);
+  expect(card.render()).toBe('🗜️ compacting earlier context. · 0s\n-# read scene.py');
+  card.push({ type: 'compaction', trigger: 'context', tokensBefore: 14948, ms: 36_200 });
+  card.push({ type: 'compaction_failed', trigger: 'history', ms: 400 });
+  expect(card.render()).toBe('🫖 thinking. · 0s\n-# read scene.py\n-# compacted earlier context (14.9k tokens) into a summary in 36s\n-# compacting earlier turns failed in 1s; carrying on without it');
+  expect(card.details('completed').text).toBe('**Turn details** · completed · 1 step · 0s\n- read scene.py\n- compacted earlier context (14.9k tokens) into a summary in 36s\n- compacting earlier turns failed in 1s; carrying on without it');
+});
+
 it('coalesces frequent progress updates and delivers the latest on flush', async () => {
   const action = vi.fn(async () => undefined);
   const update = throttle(action, 10_000);

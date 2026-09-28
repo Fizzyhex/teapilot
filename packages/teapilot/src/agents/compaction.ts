@@ -5,7 +5,7 @@ import type { AgentMessage, StreamFn } from '@earendil-works/pi-agent-core';
 import type { Message, Model } from '@earendil-works/pi-ai';
 import { compact, convertToLlm, DEFAULT_COMPACTION_SETTINGS, SessionManager, shouldCompact, type CompactionEntry, type CompactionResult, type FileEntry } from '@earendil-works/pi-coding-agent';
 import type { ConversationTurn } from '../integration/events.js';
-import { estimateValueTokens } from '../inference/context.js';
+import { estimateValueTokens, replyRoom } from '../inference/context.js';
 import type { Scratch } from '../workspace/scratch.js';
 
 /**
@@ -30,18 +30,29 @@ const turnText = (turn: ConversationTurn) => `${turn.user.trim()}\n${turn.assist
 export const markTurn = (turn: ConversationTurn) => turnMark(turnText(turn));
 
 /**
- * pi's defaults, scaled to the smaller contexts local models have: room for a whole reply and some headroom stays
+ * pi's defaults, scaled to the smaller contexts local models have: room for a reply and some headroom stays
  * free, and about a quarter of the context is kept word for word after a compaction.
  */
 export function compactionSettings(profile: { contextTokens: number; maxOutputTokens: number }, enabled = true): CompactionSettings {
+  // The room the admission check insists on (inference/context.ts), not the tier's whole reply limit.
+  const room = replyRoom(profile);
   return {
     enabled,
-    // pi's reserve, but always a whole reply and 2048 more, so compaction comes before the admission check refuses a call.
-    reserveTokens: Math.min(Math.max(DEFAULT_COMPACTION_SETTINGS.reserveTokens, profile.maxOutputTokens + 2048), profile.maxOutputTokens + Math.max(2048, Math.floor(profile.contextTokens * 0.1))),
+    // pi's reserve, but always that room and 2048 more, so compaction comes before the admission check refuses a call.
+    reserveTokens: Math.min(Math.max(DEFAULT_COMPACTION_SETTINGS.reserveTokens, room + 2048), room + Math.max(2048, Math.floor(profile.contextTokens * 0.1))),
     keepRecentTokens: Math.min(DEFAULT_COMPACTION_SETTINGS.keepRecentTokens, Math.floor(profile.contextTokens * 0.25)),
   };
 }
 export { shouldCompact };
+
+/**
+ * How long a summary may be: asked for in words, with twice as many tokens as the hard limit, since pi fails a
+ * summary cut short. Each summary folds in the one before it, so without a limit they grow with every compaction.
+ */
+export function summaryLength(contextTokens: number): { words: number; maxTokens: number } {
+  const tokens = Math.min(4096, Math.max(768, Math.floor(contextTokens * 0.06)));
+  return { words: Math.floor(tokens * 0.6), maxTokens: tokens * 2 };
+}
 
 const tokens = (message: Message) => estimateValueTokens(message) + 32;
 
@@ -68,11 +79,11 @@ export function cutMessages(messages: Message[], keepRecentTokens: number): { su
 
 /**
  * pi's summary of `summarise` (and, for a split turn, of `turnPrefix`), updating `previous` when there is one, with
- * the files read and changed. Every prompt is pi's own; `streamFn` is how teapilot calls models.
+ * the files read and changed. Every prompt is pi's own, with a length limit added; `streamFn` is how teapilot calls models.
  */
 export async function summarise(request: {
   summarise: Message[]; turnPrefix?: Message[]; previous?: Compaction; tokensBefore: number;
-  settings: CompactionSettings; model: Model<any>; streamFn: StreamFn; signal?: AbortSignal;
+  settings: CompactionSettings; model: Model<any>; streamFn: StreamFn; signal?: AbortSignal; words?: number;
 }): Promise<CompactionResult<CompactionDetails>> {
   const turnPrefix = request.turnPrefix ?? [];
   const fileOps = { read: new Set(request.previous?.details?.readFiles ?? []), written: new Set<string>(), edited: new Set(request.previous?.details?.modifiedFiles ?? []) };
@@ -89,7 +100,8 @@ export async function summarise(request: {
   const result = await compact({
     firstKeptEntryId: 'kept', messagesToSummarize: request.summarise, turnPrefixMessages: turnPrefix, isSplitTurn: turnPrefix.length > 0,
     tokensBefore: request.tokensBefore, previousSummary: request.previous?.summary, fileOps, settings: request.settings,
-  }, request.model, undefined, undefined, undefined, request.signal, undefined, request.streamFn);
+  }, request.model, undefined, undefined, request.words ? `Keep the whole summary under ${request.words} words: short bullets with only what is needed to carry on. Name files by path rather than quoting them; they can be read again.` : undefined,
+  request.signal, undefined, request.streamFn);
   return result as CompactionResult<CompactionDetails>;
 }
 

@@ -60,8 +60,9 @@ export class Evidence {
       this.testFailures = failed ? this.testFailures + 1 : 0;
       if (this.testFailures >= this.thresholds.consecutiveFailures) this.reason = 'test_failures';
     }
-    if (!failed && ['edit', 'write'].includes(name) && !(typeof data.path === 'string' && this.scratch?.(data.path))) {
-      this.changedFiles.add(String(data.path)); this.lastCheck = undefined;
+    if (!failed && ['edit', 'write'].includes(name)) {
+      // A changed file makes running the same command again a new experiment, a scratchpad script's too; only project files count as changes.
+      if (!(typeof data.path === 'string' && this.scratch?.(data.path))) { this.changedFiles.add(String(data.path)); this.lastCheck = undefined; }
       this.repeated.clear(); this.inspectionWarning = false; return;
     }
     const search = name === 'web_search' && !failed;

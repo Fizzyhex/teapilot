@@ -20,7 +20,7 @@ import { checkSearch, searchRepair } from './search.js';
 import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
 import { capabilityPlanner, conversationQuestions, playQuestion, readCasual, readPlayGrant, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
 import { markWork } from './teachat/busy.js';
-import { directTier, modelFor, profileFor, thinkingFor } from './routing/execution.js';
+import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
@@ -165,6 +165,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
   };
   let previous: AttemptResult | undefined;
+  let previousTier: Tier | undefined;
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
     const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }), ...(casual && { casual }) };
@@ -301,6 +302,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       attempts++;
       models.push(modelFor(config, tier).id);
       dependencies.onEvent?.({ type: 'attempt_start', attempt: attempts, model: modelFor(config, tier).id, tier });
+      // A retry on the same model carries on from what it last saw, with this tier's settings, rather than starting
+      // over from a summary of it and reading everything again.
+      const resume = previous?.resume && previousTier && profileFor(previousTier).model === profileFor(tier).model ? previous.resume : undefined;
       previous = await runAttempt({
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
         mode: request.mode, conversational: request.conversational, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
@@ -324,9 +328,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           await telemetry.event('approval', { kind: approval.kind, approved });
           return approved;
         },
-        signal: request.signal,
-        prompt: basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. ${previous.changedFiles?.length || previous.shellRan ? 'Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.' : 'It changed no files; continue the task from the context below.'}\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
+        signal: request.signal, resume,
+        prompt: resume ? resumeNotice(config, previousTier!, tier, previous!.reason)
+          : basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. ${previous.changedFiles?.length || previous.shellRan ? 'Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.' : 'It changed no files; continue the task from the context below.'}\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
       });
+      previousTier = tier;
       check = previous.check;
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
       for (const [path, size] of Object.entries(previous.fileSizes ?? {})) fileSizes.set(path, size);
@@ -374,6 +380,14 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     await telemetry.event('request_error', { name: error instanceof Error ? error.name : 'Error' });
     throw error;
   } finally { try { await unlock(); } finally { await idle(); dependencies.onActivity?.(undefined); } }
+}
+
+/** What a retry on the same model is told: why the last attempt stopped, and what this one has that it lacked. */
+function resumeNotice(config: Config, from: Tier, to: Tier, reason?: string): string {
+  const thinking = thinkingFor(config, to), reply = effectiveProfile(config, to).maxOutputTokens;
+  const now = [thinking !== thinkingFor(config, from) ? `${thinking === 'off' ? 'no' : thinking} reasoning` : '', reply > effectiveProfile(config, from).maxOutputTokens ? `replies of up to ${reply} tokens` : ''].filter(Boolean).join(' and ');
+  const advice = reason === 'turn_limit' ? 'Carry on from where it stopped.' : 'Work out what went wrong above before calling tools again, and do not repeat calls that already gave the same result.';
+  return `[host notice] That attempt stopped (${(reason ?? 'incomplete').replaceAll('_', ' ')}).${now ? ` It carries on here with ${now}.` : ''} ${advice}`;
 }
 
 /** Steps outlive the request (Discord keeps them on disk), so secrets are masked like the answer text; if masking breaks them they are dropped. */

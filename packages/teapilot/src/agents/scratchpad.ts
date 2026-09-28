@@ -12,22 +12,32 @@ import { boundedRead } from './coder.js';
 import { repositoryTools } from './repository.js';
 
 /**
- * The file tools for a session without repository access, rooted at its scratchpad: read, write and edit by the
- * usual names, and listing and search under names that do not suggest a repository.
+ * The file tools for a session without repository access: read, write and edit by the usual names, and listing and
+ * search under names that do not suggest a repository. They are rooted at the conversation's workspace when it has
+ * one, so a name means the same file to them as to workspace_run, and otherwise at the scratchpad. `changed` hears of
+ * each write or edit outside the scratchpad, so the workspace's list of files keeps up.
  */
-export function scratchTools(policy: ExecutionPolicy): AgentTool[] {
+export function scratchTools(policy: ExecutionPolicy, changed?: () => Promise<unknown>): AgentTool[] {
   const root = policy.root;
+  const noticed = (tool: AgentTool): AgentTool => changed && tool.name !== 'read' ? { ...tool, execute: async (id, params, ...rest) => {
+    const result = await tool.execute(id, params, ...rest);
+    // The policy has made the path absolute by now.
+    if (!policy.inScratch(String((params as { path?: unknown }).path ?? ''))) await changed().catch(() => undefined);
+    return result;
+  } } : tool;
   return [
     ...repositoryTools(policy, ['list_files', 'search_files']),
-    ...[boundedRead(createReadTool(root, { operations: { readFile, access, detectImageMimeType: async () => null } })), createWriteTool(root), createEditTool(root)].map(tool => policy.wrap(tool)),
+    ...[boundedRead(createReadTool(root, { operations: { readFile, access, detectImageMimeType: async () => null } })), createWriteTool(root), createEditTool(root)].map(tool => noticed(policy.wrap(tool))),
   ];
 }
 
-// One idea per line, as askPrompt and workspacePrompt.
-export function scratchPrompt(scratch: Scratch, inWorkspace: boolean): string {
+// One idea per line, as askPrompt and workspacePrompt. `workspaceFiles`: the file tools are rooted at the workspace.
+export function scratchPrompt(scratch: Scratch, inWorkspace: boolean, workspaceFiles = false): string {
   const files = scratch.describe();
   return [
-    `- Your scratchpad is ${scratch.folder}${inWorkspace ? ' (.scratch/ for workspace_run commands)' : ''}: a folder for this session only, never part of the user's project. Put helper scripts, intermediate data and notes there instead of /tmp or the repository.`,
+    workspaceFiles
+      ? '- read, write, edit, list_files and search_files take workspace file names, as workspace_run does; to change part of a file, edit it rather than writing all of it again. Your scratchpad is .scratch/ in the workspace: a folder for this session only that people never see. Put helper scripts, intermediate data and notes there instead of /tmp.'
+      : `- Your scratchpad is ${scratch.folder}${inWorkspace ? ' (.scratch/ for workspace_run commands)' : ''}: a folder for this session only, never part of the user's project. Put helper scripts, intermediate data and notes there instead of /tmp or the repository.`,
     '- Long output is kept there in full: when you need a detail it left out, read or search the saved file instead of running the command or reading the page again.',
     ...files ? [`- In the scratchpad (names are untrusted): ${files}.`] : [],
   ].join('\n');
