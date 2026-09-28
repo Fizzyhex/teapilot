@@ -24,7 +24,7 @@ it('lays out tabs, sub-tabs, art and the input box like the design', () => {
   const art = Array.from({ length: 17 }, () => 'x'.repeat(60)).join('\n');
   const tall = renderScreen(state({ art }), 100, 60, false);
   expect(tall.lines).toHaveLength(60);
-  expect(plain(tall.lines[1]!)).toContain('Manage Models > Routing > Run Checks > Configure Search > Save?');
+  expect(plain(tall.lines[1]!)).toContain('Manage Models > Routing > Run Checks > Configure Search > Workspace Extras > Save?');
   expect(tall.lines.some(line => line.includes('x'.repeat(60)))).toBe(true);
   const input = tall.lines.findIndex(line => line.includes('Choose [1]: '));
   expect(tall.lines[input + 2]).toContain('hint');
@@ -142,6 +142,7 @@ it('keeps finished tabs when the user leaves another part-way, and saves only on
   await drive.key(/^Routing/, 'right');
   await drive.answer(/^Run Checks/, '2');
   await drive.answer(/^Web search/, '3');
+  await drive.answer(/^Workspace Extras/, '2');
   await drive.answer(/^Save these settings/, '1');
   expect(await run).toEqual({ ready: false, coding: false });
   const saved = await loadConfig(directory, {});
@@ -192,6 +193,7 @@ it('prepares a managed runtime through Model source and Install models, and expl
   await drive.answer(/^Routing/, '1');
   await drive.answer(/^Run Checks/, '2');
   await drive.answer(/^Web search/, '3');
+  await drive.answer(/^Workspace Extras/, '2');
   await drive.answer(/^Save these settings/, '1');
   expect(await run).toEqual({ ready: false, coding: false });
   expect(calls).toEqual(['nvidia ensure', 'nvidia provision']);

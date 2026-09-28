@@ -46,6 +46,8 @@ teapilot ask --web "Research current information and cite sources"
 > [!NOTE] Auto Grants
 > If Jev is configured, the agent may search the web if context permits without the explicit `--web` permission.
 
+Setup also offers **Workspace Extras**: a sandbox where teapilot runs Python and media tools on your files, with pandoc, Pillow, numpy and yt-dlp installed for it.
+
 ## Automated local setup
 
 ```sh

@@ -15,6 +15,7 @@ import { defaultPolicy, JevRouter } from 'jevrouter';
 import { capabilities } from './routing/capabilities.js';
 import { effectiveProfile, modelFor, profileAvailable, profileFor, reasoningTier, type ThinkingLevel } from './routing/execution.js';
 import { managedRuntimes, runtimeHints, type Runtimes } from './runtime/index.js';
+import { configureWorkspace } from './workspace/configure.js';
 
 /** Hints from the runtimes TeaPilot manages, for a model whose endpoint check failed. */
 export async function endpointHint(config: Config, tier: Tier, log: (text: string) => void, signal?: AbortSignal, runtimes?: Runtimes): Promise<void> {
@@ -249,49 +250,8 @@ export async function doctor(config: Config, cwd: string, options: ActivityUI & 
       healthy &&= result.ask && (!model.toolCalling || result.coding);
     }
   }
-  await during(options, 'Checking workspace sandbox...', () => workspaceStatus(config, options.consent, log, options.signal));
+  await configureWorkspace(config, { ...options, confirm: options.consent }, options.signal ?? new AbortController().signal);
   log(`Budgets: $${config.policy.budget.requestUsd}/request; $${config.policy.budget.dailyUsd}/UTC day`);
   if (!options.live) log('Run teapilot doctor --live to verify streamed inference and coding.');
   return healthy && available;
-}
-
-/** Workspace commands are optional: this reports them, offers teapilot's own tools, and on Windows the sandbox's one-time install. */
-async function workspaceStatus(config: Config, consent: (message: string) => Promise<boolean>, log: (text: string) => void, signal?: AbortSignal): Promise<void> {
-  const { SrtSandbox, installWindowsSandbox } = await import('./workspace/sandbox.js');
-  let sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
-  let status = await sandbox.status();
-  if (!status.available && process.platform === 'win32' && /not set up/.test(status.reason ?? '')
-    && await consent('Set up the Windows sandbox for workspace commands? It adds a local srt-sandbox account and firewall rules for it, after one administrator prompt.')) {
-    const installed = await installWindowsSandbox();
-    log(installed ? 'Workspace sandbox: installed.' : 'Workspace sandbox: install cancelled; nothing changed.');
-    await sandbox.close();
-    sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
-    status = await sandbox.status();
-  }
-  await sandbox.close();
-  if (!status.available) { log(`Workspace commands: OFF (${status.reason})`); return; }
-  // pandoc and the Python packages are teapilot's to install: one pinned copy, read-only to every workspace.
-  const has = (kind: string) => status.tools.some(tool => tool.kind === kind);
-  const { installPandoc, installPythonPackages, pandocAsset, pandocRelease, pythonPackages, toolsFolder } = await import('./workspace/toolchain.js');
-  const python = status.python;
-  const offers = [
-    ...!has('pandoc') && pandocAsset() ? [{ name: 'pandoc', label: `pandoc ${pandocRelease.version} (GPL-2.0, about 40 MB from GitHub, checked against its pinned checksum)`, install: (signal: AbortSignal) => installPandoc(config.stateDir, signal) }] : [],
-    ...pythonPackages.some(entry => !has(entry.name.toLowerCase())) && python ? [{ name: 'Python packages', label: `${pythonPackages.map(entry => `${entry.name} ${entry.version}`).join(', ')} (prebuilt, from PyPI for ${python.executable})`, install: (signal: AbortSignal) => installPythonPackages(config.stateDir, python, signal) }] : [],
-  ];
-  if (offers.length && await consent(`Install ${offers.map(offer => offer.label).join(' and ')} into ${toolsFolder(config.stateDir)} for workspace commands? Commands can read them there but not change them.`)) {
-    for (const offer of offers) {
-      await offer.install(signal ?? new AbortController().signal).then(
-        () => undefined,
-        error => log(`${offer.name} install failed: ${error instanceof Error ? error.message : String(error)}`),
-      );
-    }
-    sandbox = new SrtSandbox(config.stateDir, config.workspace, config.source?.directory);
-    status = await sandbox.status();
-    await sandbox.close();
-  }
-  log(`Workspace commands: sandboxed ${status.shell}; ${status.tools.length ? status.tools.map(tool => `${tool.name} ${tool.version}`).join(', ') : 'no media tools found'}`);
-  const missing = ['ffmpeg', 'imagemagick', 'python', 'node'].filter(name => !status.tools.some(tool => tool.kind === name));
-  if (missing.length) log(`Workspace tools not found inside the sandbox: ${missing.join(', ')}. ${process.platform === 'win32'
-    ? 'Install them for all users (for example under Program Files); per-user installs are invisible to the sandbox account.'
-    : `Install them with your package manager, for example: sudo apt install ${missing.map(name => ({ imagemagick: 'imagemagick', python: 'python3', node: 'nodejs', ffmpeg: 'ffmpeg' })[name]).join(' ')}.`}`);
 }
