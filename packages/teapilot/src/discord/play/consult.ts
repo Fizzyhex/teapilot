@@ -23,7 +23,7 @@ export function consultant(options: {
     });
     if (!authorization.allows('inference')) throw new Error(`The app's owner no longer has teapilot access.`);
     const request: HostRequest = {
-      cwd: options.root, mode: 'chat', authorization, signal: options.signal,
+      cwd: options.root, mode: 'chat', authorization, signal: options.signal, tier: 'fast',
       prompt: [
         `A Discord app you built, "${play.title}", asks for the text below. Reply with only the text the app should receive: it is handed to the app's code and may be shown to players.`,
         'No preamble, sign-off or code fences. When the request asks for a format such as JSON, reply with exactly that and nothing else.',

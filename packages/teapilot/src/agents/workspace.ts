@@ -1,8 +1,10 @@
 import { createBashTool, createPowerShellTool, type BashOperations } from '@earendil-works/pi-coding-agent';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { Type } from '@earendil-works/pi-ai';
-import type { Approve } from '../execution/policy.js';
+import { PolicyDenied, type Approve, type ExecutionPolicy } from '../execution/policy.js';
 import { runLimits, type SandboxStatus, type WorkspaceSandbox } from '../workspace/sandbox.js';
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { describeFile, fileName, maxFileBytes, type Changes, type WorkspaceStore } from '../workspace/store.js';
 
 /** The workspace of the conversation a turn belongs to; the surface builds it, never the model. */
@@ -27,8 +29,8 @@ const hostFamilies = [
 ];
 /** An approved host, or `*.name` for any host under name. */
 const covers = (pattern: string, host: string) => pattern === host || (pattern.startsWith('*.') && host.endsWith(pattern.slice(1)));
-/** A workspace name as file_send and the play tools take it; a repository session's tools call the workspace .workspace/. */
-export const workspaceName = (name: string) => name.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\.workspace\//, '');
+/** A workspace name as file_send and the play tools take it. */
+export const workspaceName = (name: string) => name.replace(/\\/g, '/').replace(/^\.\//, '');
 
 function changesLine(changes: Changes): string {
   const lines = [
@@ -96,9 +98,10 @@ function sandboxShell(context: ConversationWorkspace, status: SandboxStatus, app
  * A conversation's workspace: what people attached, what commands make there, and files sent back. Work on files is
  * the session's own file tools and ordinary commands in the sandbox (ffmpeg, ImageMagick, Python, Node), not a tool
  * per task. `rooted` says the file tools work in the workspace itself, where the sandboxed shell (returned as `shell`)
- * goes with them; a repository session reaches the workspace as .workspace/ and keeps the repository's shell.
+ * goes with them. With repository access (`repository`, the policy its file tools go through) the workspace is not
+ * in play: the tools work in the repository, and all that is left of this is file_send, which sends its files.
  */
-export async function workspace(context: ConversationWorkspace, approve: Approve, rooted: boolean): Promise<{ systemPrompt: string; tools: AgentTool[]; shell?: AgentTool }> {
+export async function workspace(context: ConversationWorkspace, approve: Approve, rooted: boolean, repository?: ExecutionPolicy): Promise<{ systemPrompt: string; tools: AgentTool[]; shell?: AgentTool }> {
   const { store, conversation } = context;
   const status: SandboxStatus | undefined = await context.sandbox?.status();
   const names = () => store.list(conversation).map(file => file.name);
@@ -110,9 +113,9 @@ export async function workspace(context: ConversationWorkspace, approve: Approve
   };
   const tools: AgentTool[] = [{
     name: 'file_send', label: 'Send file',
-    description: `${context.delivery === 'save' ? 'Save workspace files for the user' : 'Post workspace files in this conversation as attachments'}, by name. It never writes content: create or change the file with write or edit first, then send it.`,
+    description: `${context.delivery === 'save' ? `Save ${repository ? 'repository' : 'workspace'} files for the user` : `Post ${repository ? 'repository' : 'workspace'} files in this conversation as attachments`}, by ${repository ? 'path' : 'name'}. It never writes content: create or change the file with write or edit first, then send it.`,
     parameters: Type.Object({
-      files: Type.Array(Type.String(), { minItems: 1, maxItems: 5, description: 'Workspace files by name.' }),
+      files: Type.Array(Type.String(), { minItems: 1, maxItems: 5, description: repository ? 'Repository files by path.' : 'Workspace files by name.' }),
       name: Type.Optional(Type.String({ maxLength: 100, description: 'Another name to send a single file under, extension included. Keep the names of files people gave you.' })),
       caption: Type.Optional(Type.String({ maxLength: 500 })),
     }),
@@ -125,8 +128,21 @@ export async function workspace(context: ConversationWorkspace, approve: Approve
       const args = params as { files: string[]; name?: string; caption?: string };
       const sent: Array<{ name: string; data: Buffer }> = [];
       // Files the file tools just wrote are listed once the folder is looked at again.
-      await store.reconcile(conversation);
+      if (!repository) await store.reconcile(conversation);
       for (const wanted of args.files) {
+        if (repository) {
+          // The checks a read makes; a file to send may be larger than one to read, so it is checked as a write is.
+          try {
+            repository.requireRead(wanted);
+            const data = await readFile(await repository.path(wanted, true));
+            if (data.length > maxFileBytes) return text(`${wanted} is ${size(data.length)}; files sent may be at most ${size(maxFileBytes)}. Make a smaller version first.`);
+            sent.push({ name: fileName(args.files.length === 1 && args.name ? args.name : basename(wanted)), data });
+          } catch (error) {
+            if (error instanceof PolicyDenied || (error as NodeJS.ErrnoException).code) return text(`Cannot send ${JSON.stringify(wanted)}: ${error instanceof PolicyDenied ? error.message : `no such file (${(error as NodeJS.ErrnoException).code})`}. Give the path of a file in the repository.`);
+            throw error;
+          }
+          continue;
+        }
         const stored = store.read(conversation, workspaceName(wanted));
         if (!stored) return text(`No file named ${JSON.stringify(wanted)} in the workspace. Write it first, or pick one of: ${names().join(', ') || 'none'}.`);
         if (stored.data.length > maxFileBytes) return text(`${stored.file.name} is ${size(stored.data.length)}; files sent may be at most ${size(maxFileBytes)}. Make a smaller version first, e.g. a lower bitrate or resolution.`);
@@ -138,7 +154,12 @@ export async function workspace(context: ConversationWorkspace, approve: Approve
     },
   }];
   const shell = rooted && status?.available ? sandboxShell(context, status, approve) : undefined;
-  return { tools, shell, systemPrompt: workspacePrompt(context, status, rooted) };
+  return { tools, shell, systemPrompt: repository ? repositoryPrompt(context) : workspacePrompt(context, status, rooted) };
+}
+
+/** What is left of the workspace's instructions when the repository is the place for files. */
+function repositoryPrompt(context: ConversationWorkspace): string {
+  return `- ${context.delivery === 'save' ? 'file_send saves a repository file into the user\'s folder' : 'file_send posts a repository file as an attachment'} by its path; never paste a file's contents instead.`;
 }
 
 // One idea per line, as askPrompt and playPrompt.
@@ -150,9 +171,7 @@ function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus |
   const legacy = status?.shell === 'powershell' ? ' It is Windows PowerShell 5.1: no && or ||; use ; or if ($?) {}.' : '';
   return [
     '- This conversation has a workspace folder: files people attach are kept there by name, next to what you make. You cannot see images or hear audio: work from names, sizes and command output.',
-    rooted
-      ? '- read, write, edit, ls, find and grep take workspace file names. Create files, scripts included, with write; change part of one with edit rather than writing all of it again.'
-      : '- The workspace is .workspace/ to read, write, edit, ls, find and grep; its files need no approval.',
+    ...rooted ? ['- read, write, edit, ls, find and grep take workspace file names. Create files, scripts included, with write; change part of one with edit rather than writing all of it again.'] : [],
     ...rooted && status?.available ? [
       `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed.${legacy} Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
       '- Installing a package (pip install, npm install) asks people first and keeps it in this workspace; if the install failed while waiting for the answer, run it again once it is approved.',

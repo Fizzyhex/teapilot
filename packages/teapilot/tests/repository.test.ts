@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest';
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { inventory, sessionTools } from '../src/agents/tools.js';
 import { ExecutionPolicy } from '../src/execution/policy.js';
@@ -59,18 +59,13 @@ it('opens a code session with each folder of the root and the files in it', asyn
   expect(listed).toContain('readme.md');
 });
 
-it('reaches the conversation\'s workspace from a repository as .workspace/, without repository permissions', async () => {
+it('keeps the conversation workspace out of a repository: .workspace/ is only a folder there', async () => {
   const f = await setup();
-  const workspace = join(f.config.stateDir, 'workspaces', 'abc');
-  await mkdir(workspace, { recursive: true });
-  f.config.policy.permissions = ['repository.read'];
-  const tools = sessionTools(new ExecutionPolicy(f.cwd, f.config, noApproval, undefined, undefined, false, workspace), { stateDir: f.config.stateDir });
+  f.config.policy.permissions = ['repository.read', 'repository.write'];
+  const tools = sessionTools(new ExecutionPolicy(f.cwd, f.config, noApproval), { stateDir: f.config.stateDir });
   const run = async (name: string, args: unknown) => (await tools.find(tool => tool.name === name)!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join('');
   await run('write', { path: '.workspace/apps/game.js', content: 'export default 1;\n' });
-  expect(await run('read', { path: '.workspace/apps/game.js' })).toContain('export default 1;');
-  expect(await run('find', { pattern: '*.js', path: '.workspace' })).toBe('apps/game.js');
-  // The rest of the state directory stays protected.
-  await expect(run('read', { path: join(f.config.stateDir, 'spend.jsonl') })).rejects.toThrow('Host state is protected');
+  expect(await readFile(join(f.cwd, '.workspace', 'apps', 'game.js'), 'utf8')).toBe('export default 1;\n');
 });
 
 it('gives repeated equivalent inspection one recovery opportunity and invalidates checks on edits', () => {

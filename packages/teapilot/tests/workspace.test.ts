@@ -11,7 +11,7 @@ import { canvasLibrary, imageInfo } from '../src/discord/images.js';
 import type { MessagePayload } from '../src/discord/play/render.js';
 import { PlayRuntime, type PlayInteraction, type PlaySurface } from '../src/discord/play/runtime.js';
 import { PlayStore } from '../src/discord/play/store.js';
-import type { Approval } from '../src/execution/policy.js';
+import { ExecutionPolicy, type Approval } from '../src/execution/policy.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import type { RunOptions, WorkspaceSandbox } from '../src/workspace/sandbox.js';
@@ -332,6 +332,27 @@ it('without a sandbox, keeps and sends files but says commands cannot run', asyn
   expect(setup.tools.map(tool => tool.name)).toEqual(['file_send']);
   expect(setup.shell).toBeUndefined();
   expect(setup.systemPrompt).toContain('Commands cannot run here (the sandbox is not installed)');
+});
+
+it('in a repository keeps only file_send, sending repository files by path with none of the workspace around it', async () => {
+  const f = await agentSetup(() => undefined);
+  const repo = await directory('teapilot-repo-');
+  await writeFile(join(repo, 'notes.txt'), 'hello');
+  await f.store.save('dm:1', 'elsewhere.txt', Buffer.from('workspace file'), 'op');
+  f.config.policy.permissions = ['inference', 'repository.read'];
+  const setup = await workspace(f.workspace, f.base.approve, false, new ExecutionPolicy(repo, f.config, f.base.approve));
+  expect(setup.tools.map(tool => tool.name)).toEqual(['file_send']);
+  expect(setup.shell).toBeUndefined();
+  expect(setup.systemPrompt).not.toMatch(/workspace|elsewhere\.txt/);
+  const send = setup.tools[0]!;
+  await send.execute('one', { files: ['notes.txt'], caption: 'here' });
+  expect(f.sent).toHaveLength(1);
+  expect(f.sent[0]!.files.map(file => [file.name, file.data.toString()])).toEqual([['notes.txt', 'hello']]);
+  // The workspace is not reachable from here, and neither is anything the repository's tools cannot read.
+  for (const files of [['elsewhere.txt'], ['../notes.txt'], ['.workspace/elsewhere.txt']]) {
+    expect(JSON.stringify(await send.execute('two', { files }))).toContain('Cannot send');
+  }
+  expect(f.sent).toHaveLength(1);
 });
 
 it('runs an app from its workspace file, and changes it with an edit to that file rather than a new copy', async () => {

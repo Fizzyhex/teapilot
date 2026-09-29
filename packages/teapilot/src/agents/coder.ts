@@ -20,11 +20,10 @@ function detectWindowsShell(): WindowsShell {
   return windowsShell;
 }
 
-/** `changed` hears of edits in the conversation's workspace, which the repository's tools reach as .workspace/. */
-export async function coder(config: Config, policy: ExecutionPolicy, changed?: () => Promise<unknown>): Promise<{ systemPrompt: string; tools: AgentTool[] }> {
+export async function coder(config: Config, policy: ExecutionPolicy): Promise<{ systemPrompt: string; tools: AgentTool[] }> {
   const root = policy.root;
   policy.requireRead();
-  const tools = sessionTools(policy, { shell: 'host', stateDir: config.stateDir, changed });
+  const tools = sessionTools(policy, { shell: 'host', stateDir: config.stateDir });
   // Instruction files cross the same boundary as tool reads. An upstream context
   // loader must not read ancestor directories or host state behind that gate.
   const instructions: Array<{ path: string; content: string }> = [];
@@ -35,14 +34,14 @@ export async function coder(config: Config, policy: ExecutionPolicy, changed?: (
   const shell: WindowsShell = process.platform === 'win32' ? detectWindowsShell() : { label: 'bash', legacy: false };
   return {
     tools,
-    systemPrompt: coderPrompt(root, shell, instructions, policy.workspace !== undefined && policy.workspace !== root),
+    systemPrompt: coderPrompt(root, shell, instructions),
   };
 }
 
 // One entry per line of the prompt, grouped by topic. Each line a single idea.
 // Assume the user is technically minded and don't baby them.
 // Always keep this concise and focused, its not a manifesto.
-function coderPrompt(root: string, shell: WindowsShell, instructions: Array<{ path: string; content: string }>, workspace: boolean): string {
+function coderPrompt(root: string, shell: WindowsShell, instructions: Array<{ path: string; content: string }>): string {
   const legacyShellNote = shell.legacy ? ' No && / || here: use ; or if ($?) {}.' : '';
   const projectInstructions = instructions.map(file => `--- ${file.path} ---\n${file.content}`).join('\n');
   return [
@@ -50,7 +49,6 @@ function coderPrompt(root: string, shell: WindowsShell, instructions: Array<{ pa
     `- You are teapilot, the coding agent :3, using pi's coding tools. Align with the user's typing style and tone - leaning towards informal lowercase responses.`,
     // Environment
     `- Working repository: ${root}. Shell: ${shell.label}. cd doesn't persist; use root-relative paths or /cd <path> to change root.${legacyShellNote}`,
-    ...workspace ? ['- This conversation\'s workspace (attachments, files you send, apps) is .workspace/ to every tool; its files need no approval.'] : [],
     // Discovery
     `- Inspect files and instructions before editing; follow AGENTS.md/CLAUDE.md, including nested files in subdirectories you touch, via the read tool.`,
     `- ls, find, grep and read need no approval: explore with them, not the shell, and keep the shell for tests, builds and what they can't do. An empty repository is valid: create requested files after checking instructions rather than re-listing it.`,

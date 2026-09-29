@@ -31,10 +31,13 @@ const routingQuestions: Record<string, JevRouteQuestion> = {
   relatedness: { type: 'choice', instructions: 'Classify whether this request continues the previous task. Unknown must preserve the capable model lock.', criteria: { new: 'Starts a new task boundary', related: 'Continues the previous task', unknown: 'Cannot determine; preserve capable model lock' } },
 };
 
+/** The access questions worth asking: none about the repository where it is not on offer, so it is never proposed. */
+const accessQuestions = (repository: boolean) => Object.fromEntries(Object.entries(questions).filter(([key]) => repository || !key.startsWith('repository.')));
+
 /** Decorates the SDK's existing routing question, retaining its policy engine and receipt. */
-export function capabilityPlanner(provider: JevProvider, extra?: Record<string, JevRouteQuestion>): JevProvider {
+export function capabilityPlanner(provider: JevProvider, extra?: Record<string, JevRouteQuestion>, repository = true): JevProvider {
   return { name: provider.name, decide: request => provider.decide({ ...request,
-    questions: { ...questions, ...webQuestions, ...routingQuestions, ...extra, ...(request.questions ?? { tool: {} }) },
+    questions: { ...accessQuestions(repository), ...webQuestions, ...routingQuestions, ...extra, ...(request.questions ?? { tool: {} }) },
   }) };
 }
 
@@ -116,9 +119,9 @@ export function readWebAutoGrant(raw: JevRawResponse | null | undefined): WebBas
 }
 
 export interface RoutingPlan { permissions: Permission[]; tier?: TierPreference; relatedness?: 'new' | 'related' | 'unknown' }
-export function readRoutingPlan(raw: JevRawResponse | null | undefined, threshold: number, workload: string): RoutingPlan | undefined {
+export function readRoutingPlan(raw: JevRawResponse | null | undefined, threshold: number, workload: string, repository = true): RoutingPlan | undefined {
   if (!raw) return undefined;
-  const permissions = readCapabilityPlan(raw, threshold, workload); if (!permissions) return undefined;
+  const permissions = readCapabilityPlan(raw, threshold, workload, repository); if (!permissions) return undefined;
   try {
     const tierAnswer = getChoiceAnswer(raw, 'execution_tier'); const relatedAnswer = getChoiceAnswer(raw, 'relatedness');
     if (![tierAnswer.confidence, relatedAnswer.confidence].every(value => Number.isFinite(value) && value >= threshold)) return undefined;
@@ -128,11 +131,11 @@ export function readRoutingPlan(raw: JevRawResponse | null | undefined, threshol
   } catch { return { permissions, relatedness: 'unknown' }; }
 }
 
-export function readCapabilityPlan(raw: JevRawResponse | null | undefined, threshold: number, workload: string): Permission[] | undefined {
+export function readCapabilityPlan(raw: JevRawResponse | null | undefined, threshold: number, workload: string, repository = true): Permission[] | undefined {
   if (!raw) return undefined;
   try {
     const required: Permission[] = [];
-    for (const key of Object.keys(questions)) {
+    for (const key of Object.keys(accessQuestions(repository))) {
       const answer = getChoiceAnswer(raw, key);
       if (!['yes', 'no'].includes(answer.choice) || !Number.isFinite(answer.confidence) || answer.confidence < threshold) return undefined;
       if (answer.choice === 'yes') required.push(key as Permission);

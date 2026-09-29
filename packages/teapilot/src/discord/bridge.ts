@@ -1,6 +1,7 @@
 import { casualLines, paceLines } from '../casual.js';
 import { runSession, type SessionExtension } from '../chat.js';
 import type { HostDependencies, HostRequest, HostResult } from '../host.js';
+import { repositoryOffered, repositoryPermissions } from '../execution/grants.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
@@ -195,6 +196,8 @@ export class Conversation {
     // With roles in force, a turn without a known sender holds nothing.
     base.authorization?.setCaller(access ? this.speaker ? access.callerFor(this.speaker) : () => ({ permissions: [] }) : undefined);
     const { play, files, sandbox, transport } = this.options;
+    // A conversation with a workspace is offered its repository only in Code mode in one; otherwise nothing asks for it.
+    base.authorization?.withhold(files && !await repositoryOffered(base.cwd, base.mode) ? repositoryPermissions : []);
     const conversation = play?.conversation ?? this.options.key;
     const workspace: ConversationWorkspace | undefined = files && { store: files, conversation, sandbox, delivery: 'post',
       send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) };

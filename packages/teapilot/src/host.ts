@@ -183,8 +183,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     if (playable && request.authorization!.allows('discord.play')) activePermissions.push('discord.play');
     // Apps outlive a conversation's history (a restart starts it over), so an app still running here keeps discord.play, even one another conversation started in this channel.
     else if (playable && request.play!.runtime.list(request.play!.conversation, request.play!.channelId).some(app => app.status === 'running')) await activate(['discord.play'], 'An app is still running here.');
+    // Where the repository is not on offer (a conversation's workspace is its only place for files) it is neither planned nor routed to.
+    const repositoryOnOffer = !request.authorization || request.authorization.available().includes('repository.read');
     const provider = config.routingMode === 'direct' ? undefined : budgetedJev(config, budget, telemetry, dependencies.provider, request.signal);
-    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, { ...conversationQuestions, ...(request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)), ...(playable ? playQuestion : {}) }) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
+    const router = provider ? new JevRouter(request.authorization ? capabilityPlanner(provider, { ...conversationQuestions, ...(request.teachatIdentities && teachatIdentityQuestion(request.teachatIdentities)), ...(playable ? playQuestion : {}) }, repositoryOnOffer) : provider, { ...defaultPolicy, ...config.policy.router, single_stage_max_candidates: 32, allow_unavailable_fallback: false }) : undefined;
     const physicalOnline = dependencies.localProbe
       ? { fast: await dependencies.localProbe(), capable: await dependencies.localProbe() }
       : { fast: await localAvailable(config, 'fast'), capable: await localAvailable(config, 'capable') };
@@ -197,6 +199,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (request.tier && request.tier !== 'auto') for (const candidate of candidates) if (!candidate.id.endsWith(`.${request.tier}`)) candidate.availability = { available: false, reason: 'Outside explicit tier preference' };
       if (request.workload) for (const candidate of candidates) {
         if (!candidate.id.startsWith(`${request.workload}.`)) candidate.availability = { available: false, reason: 'Outside requested workload' };
+      }
+      if (!repositoryOnOffer) for (const candidate of candidates) {
+        if (candidate.id.startsWith('coder.')) candidate.availability = { available: false, reason: 'Repository access is not offered here' };
       }
       if (!router && request.authorization && !scope) for (const candidate of candidates) {
         if (!candidate.id.startsWith('ask.')) candidate.availability = { available: false, reason: 'Start with dialogue; activate repository tools only when needed' };
@@ -231,7 +236,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       // An unconfident route falls back to the workload the session's mode already
       // states (coder in Code mode, ask in Ask/Chat) rather than always dialogue,
       // so Code-mode requests still reach the coder agent.
-      const fallbackWorkload = request.workload ?? scope?.workload ?? (decision?.status === 'no_decision' ? workloadFor(request.mode ?? 'chat') : undefined);
+      const fallbackWorkload = request.workload ?? scope?.workload ?? (decision?.status === 'no_decision' ? repositoryOnOffer ? workloadFor(request.mode ?? 'chat') : 'ask' : undefined);
       const fallbackSelection = fallbackWorkload
         // The router was unsure, so start at the default tier rather than the smallest model.
         ? [`${fallbackWorkload}.normal`, ...candidates.map(candidate => candidate.id)].find(id => id.startsWith(`${fallbackWorkload}.`) && candidates.some(candidate => candidate.id === id && assessCandidate(config, candidate).allowed))
@@ -267,7 +272,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const selectedWorkload = selected!.split('.')[0]!;
       // Only a confident access plan earns an upfront grant prompt. An unconfident one
       // continues with current access; the agent requests more mid-run if needed.
-      const plan = request.authorization && decision && !usedRoutingFallback && !casual ? readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload) : undefined;
+      const plan = request.authorization && decision && !usedRoutingFallback && !casual ? readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload, repositoryOnOffer) : undefined;
       if (plan) {
         if ((!request.tier || request.tier === 'auto') && plan.tier && plan.tier !== 'auto') {
           const preferred = candidates.find(candidate => candidate.id === `${selectedWorkload}.${plan.tier}`);

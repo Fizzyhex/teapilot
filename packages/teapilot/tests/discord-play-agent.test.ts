@@ -289,3 +289,47 @@ it('asks the router about discord.play only in Discord, activates it without a p
   expect(tools[2]).not.toContain('play_start');
   expect(approve).not.toHaveBeenCalled();
 });
+
+it('never asks the router about, routes to or prompts for the repository while it is withheld, and lists nothing to request', async () => {
+  const questions: any[] = [];
+  const bodies: any[] = [];
+  const f = await setup((body, req, res) => {
+    if (req.url === '/jev') {
+      questions.push(body.questions);
+      // A router that would say yes to the repository, if it were asked.
+      const end = res.end.bind(res);
+      res.end = ((chunk: string) => { const raw = JSON.parse(chunk); raw.answers['repository.read'] = { type: 'choice', choice: 'yes', probabilities: { yes: 1 }, confidence: 0.99 }; return end(JSON.stringify(raw)); }) as typeof res.end;
+      jev(res, 'coder.normal');
+    } else if (req.url?.endsWith('/models')) res.end('{}');
+    else { bodies.push(body); completion(res, { text: 'ok' }); }
+  });
+  f.config.router.endpoint = `${new URL(f.config.models.capable.baseUrl!).origin}/jev`;
+  f.config.models.fast.baseUrl = f.config.models.capable.baseUrl;
+  const grants = await SessionGrants.create(f.cwd, f.config, 'chat');
+  grants.setCaller(() => ({ permissions: ['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'discord.play'], preapproved: ['web.search', 'discord.play'] }));
+  grants.withhold(['repository.read', 'repository.write', 'repository.shell']);
+  const approve = vi.fn(async () => false);
+  const result = await runHost(f.config, { cwd: f.cwd, mode: 'chat', authorization: grants, prompt: 'fix the game', play: { runtime: f.runtime, channelId: 'c1', conversation: 'dm:1' } }, { approve, localProbe: async () => true });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(result.capability).toMatch(/^ask\./);
+  expect(Object.keys(questions[0]).filter(key => key.startsWith('repository.'))).toEqual([]);
+  expect(approve).not.toHaveBeenCalled();
+  const request = bodies[0].tools.find((tool: any) => tool.function.name === 'request_capabilities');
+  expect(JSON.stringify(request)).not.toContain('repository');
+  expect(JSON.stringify(request)).toContain('web.search');
+});
+
+it('names an app\'s file by path in a repository, by file in a workspace, and hides the workspace from the repository', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, { text: 'hi' }); });
+  await runAttempt({ ...f, ...f.base, prompt: 'hello', activePermissions: ['inference', 'discord.play'], ...f.turn() });
+  await runAttempt({ ...f, ...f.base, prompt: 'hello', activePermissions: ['inference', 'discord.play', 'repository.read'], ...f.turn() });
+  const properties = (body: any) => Object.keys(body.tools.find((tool: any) => tool.function.name === 'play_start').function.parameters.properties);
+  expect(properties(bodies[0])).toEqual(expect.arrayContaining(['file', 'title']));
+  expect(properties(bodies[0])).not.toEqual(expect.arrayContaining(['path']));
+  expect(properties(bodies[1])).toEqual(expect.arrayContaining(['path', 'title', 'trusted']));
+  expect(properties(bodies[1])).not.toEqual(expect.arrayContaining(['file']));
+  expect(JSON.stringify(bodies[1].messages)).not.toContain('.workspace');
+  expect(JSON.stringify(bodies[1].messages)).not.toContain('workspace folder');
+  expect(JSON.stringify(bodies[0].messages)).toContain('workspace folder');
+});

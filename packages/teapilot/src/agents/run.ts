@@ -101,8 +101,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   } };
   const workspaceFolder = input.workspace ? input.workspace.store.folder(input.workspace.conversation) : undefined;
   const reconcile = input.workspace ? () => input.workspace!.store.reconcile(input.workspace!.conversation) : undefined;
-  // With repository access the tools work in the repository, and the workspace is .workspace/ there.
-  const policy = new ExecutionPolicy(input.cwd, effectiveConfig, input.approve, input.beforeMutation, scratchFolder, false, workspaceFolder);
+  // With repository access the tools work in the repository alone: the conversation's workspace is not reachable from there.
+  const policy = new ExecutionPolicy(input.cwd, effectiveConfig, input.approve, input.beforeMutation, scratchFolder, false);
   // Without it the same tools work in the conversation's own folder, where relative paths are its own: its workspace
   // when it has one, or else the scratchpad. One root per session, so a name means the same file to every tool.
   const ownRoot = workspaceFolder ?? scratchFolder;
@@ -135,7 +135,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     if (repository && !repositorySetup) {
       input.onAgenticWork?.();
       input.onActivity?.({ kind: 'waiting', label: 'Inspecting repository...' });
-      repositorySetup = await coder(effectiveConfig, policy, reconcile);
+      repositorySetup = await coder(effectiveConfig, policy);
       repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${await inventory(policy)}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
       await telemetry.event('repository_inventory', { succeeded: true });
     }
@@ -155,7 +155,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     if (input.play && effectiveConfig.policy.permissions.includes('discord.play')) {
       // Server emoji people pasted reach apps through ctx.emoji whether or not the model passes them on.
       const emojis = { ...input.play.emojis, ...pastedEmoji(...(input.history ?? []).map(turn => turn.user), asked) };
-      const apps = play({ ...input.play, emojis, requested: Object.keys(pastedEmoji(asked)) }, effectiveConfig, policy, input.approve);
+      const apps = play({ ...input.play, ...repository ? { files: undefined } : {}, emojis, requested: Object.keys(pastedEmoji(asked)) }, effectiveConfig, policy, input.approve);
       setup.tools.push(...apps.tools);
       setup.systemPrompt += '\n' + apps.systemPrompt;
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
@@ -165,7 +165,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     ownFiles = !repository && ownRoot !== undefined && model.toolCalling;
     let shell: AgentTool | undefined;
     if (input.workspace) {
-      const shared = await workspace(input.workspace, input.approve, ownFiles);
+      const shared = await workspace(input.workspace, input.approve, ownFiles, repository ? policy : undefined);
       setup.tools.push(...shared.tools);
       shell = shared.shell;
       setup.systemPrompt += '\n' + shared.systemPrompt;
@@ -196,10 +196,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   });
   let toolsChanged = false;
   // discord.play means nothing outside Discord, so only Discord conversations can ask for it.
-  const requestable: Permission[] = ['repository.read', 'repository.write', 'repository.shell', 'web.search', ...(input.play ? ['discord.play' as const] : [])];
-  if (input.requestCapabilities && model.toolCalling && !input.casual) controlTools.push({
+  // What the session cannot grant this turn (a workspace conversation's repository) is not offered either.
+  const requestable = (['repository.read', 'repository.write', 'repository.shell', 'web.search', ...(input.play ? ['discord.play' as const] : [])] as Permission[])
+    .filter(permission => !input.authorization || input.authorization.available().includes(permission));
+  const repositoryRequestable = requestable.includes('repository.read');
+  if (input.requestCapabilities && model.toolCalling && !input.casual && requestable.length) controlTools.push({
     name: 'request_capabilities', label: 'Request access',
-    description: `Request narrowly scoped host-granted access when the user request requires repository reading, editing, shell commands, or live web research${input.play ? ', or interactive Discord apps (discord.play)' : ''}.`,
+    description: `Request narrowly scoped host-granted access when the user request requires ${repositoryRequestable ? 'repository reading, editing, shell commands, or ' : ''}live web research${input.play ? ', or interactive Discord apps (discord.play)' : ''}.`,
     parameters: Type.Object({ permissions: Type.Array(Type.Union(requestable.map(permission => Type.Literal(permission))), { minItems: 1, maxItems: requestable.length }) }),
     execute: async (_id, args, signal) => {
       const requested = (args as { permissions?: unknown }).permissions;

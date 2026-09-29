@@ -48,26 +48,21 @@ export class ExecutionPolicy {
    * writing them needs no repository permission or approval, and they never count as changes to the project.
    * `own` marks the root as the conversation's own workspace rather than a repository: its files, which workspace
    * commands change freely anyway, need no repository permission or approval either, and its shell is sandboxed.
-   * `workspace` is the conversation's workspace when the root is a repository: it is `.workspace/` there, and as
-   * much the session's own as the scratchpad.
    */
-  constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation, readonly scratch?: string, readonly own = false, readonly workspace?: string) {}
+  constructor(readonly root: string, private readonly config: Config, private readonly approve: Approve, private readonly beforeMutation?: BeforeMutation, readonly scratch?: string, readonly own = false) {}
   /**
    * `path` made absolute. Sandboxed commands see the scratchpad as `.scratch/`, so that name means the scratchpad
-   * here too, wherever the root is; from a repository, `.workspace/` is the conversation's workspace.
+   * here too, wherever the root is.
    */
   resolve(path: string): string {
     const [first, ...rest] = path.split(/[\\/]/);
     if (this.scratch !== undefined && first === '.scratch' && basename(this.scratch) === '.scratch') return resolve(this.scratch, ...rest);
-    if (this.workspace !== undefined && first === '.workspace' && this.workspace !== this.root) return resolve(this.workspace, ...rest);
     return resolve(this.root, path);
   }
   /** Whether `path` (relative to the root, or absolute) is in the scratchpad. */
   inScratch(path: string): boolean { return this.scratch !== undefined && within(this.scratch, this.resolve(path), true); }
-  /** Whether `path` is in the conversation's workspace reached from a repository. */
-  inWorkspace(path: string): boolean { return this.workspace !== undefined && this.workspace !== this.root && within(this.workspace, this.resolve(path), true); }
-  /** Whether `path` is the session's own to read and change: in its scratchpad or workspace, or anywhere in a workspace root. */
-  owns(path: string): boolean { return this.inScratch(path) || this.inWorkspace(path) || (this.own && within(this.root, this.resolve(path), true)); }
+  /** Whether `path` is the session's own to read and change: in its scratchpad, or anywhere in a workspace root. */
+  owns(path: string): boolean { return this.inScratch(path) || (this.own && within(this.root, this.resolve(path), true)); }
   requireRead(path?: string): void {
     if (path !== undefined && this.owns(path)) return;
     if (!this.config.policy.permissions.includes('repository.read')) { this.denied = true; throw new PolicyDenied('Missing repository.read permission'); }
@@ -77,15 +72,14 @@ export class ExecutionPolicy {
     if (!path || path.includes('\0') || path.startsWith('~')) throw new PolicyDenied('Use repository-relative paths');
     const target = this.resolve(path);
     const scratch = this.inScratch(target);
-    const area = !scratch && this.inWorkspace(target);
-    const base = scratch ? this.scratch! : area ? this.workspace! : this.root;
+    const base = scratch ? this.scratch! : this.root;
     const rel = relative(base, target);
-    const where = scratch ? 'the scratchpad' : area ? 'the workspace' : 'the working repository';
+    const where = scratch ? 'the scratchpad' : 'the working repository';
     // A working root the operator placed inside the state directory (a Discord workspace, say) is the
     // repository; the rest of the state directory, and any configuration inside the root, stays protected.
     const configDir = this.config.source?.directory;
     const workspace = (this.own || configDir !== undefined) && within(this.config.stateDir, this.root) && !(configDir !== undefined && within(this.root, configDir, true));
-    if (!scratch && !area && within(this.config.stateDir, target, true) && !(workspace && within(this.root, target, directory))) throw new PolicyDenied('Host state is protected');
+    if (!scratch && within(this.config.stateDir, target, true) && !(workspace && within(this.root, target, directory))) throw new PolicyDenied('Host state is protected');
     if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) || (!rel && !directory)) throw new PolicyDenied(`Path must be a file inside ${where}`);
     const parts = rel ? rel.split(sep) : [];
     if (parts.some(part => /[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new PolicyDenied('Ambiguous or reserved filesystem name');

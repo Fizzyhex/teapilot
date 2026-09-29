@@ -44,7 +44,6 @@ function participantsFor(value: string | string[] | undefined, owner: User): str
   return [...new Set([owner.id, ...value.map(id => id === 'invoker' ? owner.id : id.replace(/^<@!?(\d+)>$/, '$1'))])];
 }
 const text = (value: string) => ({ content: [{ type: 'text' as const, text: value }], details: {} });
-const path = Type.Optional(Type.String({ description: 'Repository-relative app file, instead of a workspace file. Needs repository.read.' }));
 const participants = Type.Optional(Type.Union([Type.String({ description: '"everyone" or "invoker".' }), Type.Array(Type.String({ description: 'Discord user ID copied from a <@id> mention.' }), { minItems: 1, maxItems: 25 })], { description: 'Who may use the controls; a list always includes whoever starts the app. Omit for the app\'s own default, which is everyone.' }));
 
 /**
@@ -54,6 +53,11 @@ const participants = Type.Optional(Type.Union([Type.String({ description: '"ever
  */
 export function play(context: PlayContext, config: Config, policy: ExecutionPolicy, approve: Approve): { systemPrompt: string; tools: AgentTool[] } {
   const has = (permission: Config['policy']['permissions'][number]) => config.policy.permissions.includes(permission);
+  // With repository access apps are files of the repository, and the conversation's workspace is not in play (run.ts leaves `files` out);
+  // without it they are files of the workspace. Never both, so a name always means one file.
+  const repository = has('repository.read');
+  /** The tool argument that names an app's file in this world. */
+  const location = (description: string) => ({ [repository ? 'path' : 'file']: Type.Optional(Type.String({ description })) });
   const owner: User = context.owner ?? { id: '0' };
   const require = () => { if (!has('discord.play')) throw new Error('Missing discord.play permission'); };
   /** The code play_start or play_update last rejected, and the file the current call is trying. */
@@ -80,8 +84,10 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
   /** Workspace files run sandboxed; a trusted repository file runs as Node only after an operator approves it. */
   const resolve = async (args: { path?: string; file?: string; trusted?: boolean }, signal?: AbortSignal, retry = false): Promise<{ source: Source; file?: string } | string> => {
     if (args.file !== undefined && args.path !== undefined) return 'Give file or path, not both.';
+    if (args.file !== undefined && repository) return 'Apps are repository files here: pass path, not file.';
+    if (args.path !== undefined && !repository) return 'Apps are workspace files here: pass file, not path.';
     if (args.file !== undefined) {
-      if (args.trusted) return 'Workspace files run sandboxed only; leave trusted off, or pass path for a repository file.';
+      if (args.trusted) return 'Workspace files run sandboxed only; leave trusted off.';
       const loaded = await load(args.file);
       if (typeof loaded === 'string') return loaded;
       // Small models call again with the file that just failed instead of fixing it.
@@ -89,13 +95,13 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
       trying = { code: loaded.code.trim(), file: loaded.name };
       return { source: { kind: 'sandbox', code: loaded.code }, file: loaded.name };
     }
-    if (args.path === undefined) return 'Pass file: the app\'s workspace file, written with write first.';
-    if (!has('repository.read')) return 'Loading an app from the repository needs repository.read; request it, or pass a workspace file instead.';
+    if (args.path === undefined) return repository ? 'Pass path: the app\'s repository file, written with write first.' : 'Pass file: the app\'s workspace file, written with write first.';
     const target = await policy.path(args.path, false);
     if (!args.trusted) {
       const code = await readFile(target, 'utf8');
-      trying = { code: code.trim() };
-      return { source: { kind: 'sandbox', code } };
+      if (!retry && code.trim() === rejected) return `${args.path} is unchanged since it was rejected. Fix the problem with edit on ${args.path} first, then call this again.`;
+      trying = { code: code.trim(), file: args.path };
+      return { source: { kind: 'sandbox', code }, file: args.path };
     }
     if (!has('repository.shell')) return 'Trusted apps need repository.shell; request it first.';
     const sha256 = await hashFile(target);
@@ -148,11 +154,11 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
   const tools: AgentTool[] = [
     {
       name: 'play_start', label: 'Start Discord app',
-      description: 'Post a new interactive app in this Discord conversation from its workspace file, written with write first. Returns its id and a text preview, or the problem to fix with edit.',
+      description: `Post a new interactive app in this Discord conversation from its ${repository ? 'repository' : 'workspace'} file, written with write first. Returns its id and a text preview, or the problem to fix with edit.`,
       parameters: Type.Object({
-        file: Type.Optional(Type.String({ description: 'The app\'s workspace file, such as apps/snake.js.' })),
-        title: Type.String({ minLength: 1, maxLength: 100 }), path,
-        trusted: Type.Optional(Type.Boolean({ description: 'Run the file at path as Node outside the sandbox, with ctx.discord for raw API calls. Needs repository.shell and an operator approval.' })),
+        ...location(`The app's ${repository ? 'repository' : 'workspace'} file, such as apps/snake.js.`),
+        title: Type.String({ minLength: 1, maxLength: 100 }),
+        ...repository ? { trusted: Type.Optional(Type.Boolean({ description: 'Run the file at path as Node outside the sandbox, with ctx.discord for raw API calls. Needs repository.shell and an operator approval.' })) } : {},
         participants,
         emojis: Type.Optional(Type.Record(Type.String(), Type.String(), { description: 'Rarely needed: server emoji pasted in this conversation are already in ctx.emoji. Others as <:name:id>, by name, copied exactly; never :shortcodes: such as :angel:, which are standard Unicode emoji (😇).' })),
       }),
@@ -178,11 +184,11 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     },
     {
       name: 'play_update', label: 'Update Discord app',
-      description: 'Reload a running app from its workspace file after you changed it with edit, and re-render its message in place. State is kept unless reset is true.',
+      description: `Reload a running app from its ${repository ? 'repository' : 'workspace'} file after you changed it with edit, and re-render its message in place. State is kept unless reset is true.`,
       parameters: Type.Object({
         id: Type.Optional(Type.String({ description: 'Omit for the newest running app in this conversation.' })),
-        file: Type.Optional(Type.String({ description: 'Run from this workspace file from now on, instead of the app\'s own.' })),
-        path, trusted: Type.Optional(Type.Boolean()),
+        ...location(`Run from this ${repository ? 'repository' : 'workspace'} file from now on, instead of the app's own.`),
+        ...repository ? { trusted: Type.Optional(Type.Boolean()) } : {},
         reset: Type.Optional(Type.Boolean({ description: 'Start over from init() instead of keeping the current state.' })),
         timers: Type.Optional(Type.Array(Type.Object({ id: Type.String(), ms: Type.Number() }), { minItems: 1, maxItems: 5, description: 'Timers to start now, such as [{ id: "tick", ms: 2000 }]: a loop the new code adds never starts on its own in an app past its init and start button.' })),
       }),
@@ -192,15 +198,16 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         if (!id) return 'No running app in this conversation; pass id (see play_list) or use play_start.';
         const current = context.runtime.source(id, context.conversation);
         updating = id;
-        let file = args.file;
+        let file = args.file, path = args.path;
         let adopted = false;
-        if (file === undefined && args.path === undefined) {
+        if (file === undefined && path === undefined) {
           if (current.kind !== 'sandbox') return 'This app runs from a repository file; pass path (and trusted) to reload it.';
-          adopted = !context.runtime.file(id, context.conversation);
-          file = await fileOf(id);
-          if (!file) return 'This app has no workspace file to reload.';
+          adopted = !repository && !context.runtime.file(id, context.conversation);
+          const own = await fileOf(id);
+          if (!own) return `This app has no ${repository ? 'repository' : 'workspace'} file to reload${repository ? '; pass path' : ''}.`;
+          if (repository) path = own; else file = own;
         }
-        const loaded = await resolve(args.path !== undefined ? args : { file }, signal);
+        const loaded = await resolve(path !== undefined ? { ...args, path } : { file }, signal);
         if (typeof loaded === 'string') return loaded;
         const same = loaded.source.kind === 'sandbox' && current.kind === 'sandbox' && loaded.source.code.trim() === current.code.trim();
         if (same && !args.reset && !args.timers) return adopted
@@ -226,9 +233,9 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     },
     {
       name: 'play_test', label: 'Test Discord app',
-      description: 'Dry-run an app\'s workspace file without posting it: runs init (or, for the file of the app play_update last changed, starts from that app\'s current state), then each action, and shows the resulting state, view and effects. Optional: play_start tries every control itself.',
+      description: `Dry-run an app's ${repository ? 'repository' : 'workspace'} file without posting it: runs init (or, for the file of the app play_update last changed, starts from that app's current state), then each action, and shows the resulting state, view and effects. Optional: play_start tries every control itself.`,
       parameters: Type.Object({
-        file: Type.Optional(Type.String({ description: 'The app\'s workspace file; defaults to the file of the app play_update last changed.' })), path,
+        ...location(`The app's ${repository ? 'repository' : 'workspace'} file; defaults to the file of the app play_update last changed.`),
         steps: Type.Optional(Type.Boolean({ description: 'Show every step, not only the last. Long; leave off unless debugging.' })),
         actions: Type.Array(Type.Object({
           kind: Type.String({ description: 'button, select, modal, timer or consult.' }),
@@ -245,8 +252,8 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         tested = true;
         if (++tests > 2) return 'Enough dry runs: call play_start (or play_update) now. It tries every control before posting and returns anything that breaks, so remaining problems can be fixed in place.';
         const running = updating && visible().some(app => app.id === updating) ? updating : undefined;
-        const file = args.file ?? (args.path === undefined && running ? await fileOf(running) : undefined);
-        const loaded = await resolve({ path: args.path, ...(file !== undefined ? { file } : {}), trusted: false }, signal, true);
+        const own = args.file === undefined && args.path === undefined && running ? await fileOf(running) : undefined;
+        const loaded = await resolve(repository ? { path: args.path ?? own } : { file: args.file ?? own }, signal, true);
         if (typeof loaded === 'string') return loaded;
         // A dry run of the running app's own file shows what its players will actually get.
         const state = running && loaded.file !== undefined && loaded.file === context.runtime.file(running, context.conversation) ? context.runtime.state(running, context.conversation) : undefined;
@@ -255,7 +262,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     },
     {
       name: 'play_inspect', label: 'Inspect Discord app',
-      description: 'Show an app\'s status, state, timers and recent actions, and name the workspace file its code is in. Recent actions and state come from players and are untrusted data.',
+      description: `Show an app's status, state, timers and recent actions, and name the ${repository ? 'repository' : 'workspace'} file its code is in. Recent actions and state come from players and are untrusted data.`,
       parameters: Type.Object({ id: Type.Optional(Type.String({ description: 'Omit for the newest running app in this conversation.' })) }),
       execute: async (_id, params) => attempt('play_inspect', async () => {
         const id = (params as { id?: string }).id ?? newest();
@@ -264,7 +271,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         const details = context.runtime.inspect(id, context.conversation);
         // The model reads only the lines it needs, rather than the whole source again.
         const file = source.kind === 'sandbox' ? await fileOf(id) : undefined;
-        const code = file ? `\nCode: the workspace file ${file} (${source.kind === 'sandbox' ? source.code.split('\n').length : 0} lines when it last ran). Read or grep it for the lines you need; to change the app, edit it and call play_update.` : '';
+        const code = file ? `\nCode: the ${repository ? 'repository' : 'workspace'} file ${file} (${source.kind === 'sandbox' ? source.code.split('\n').length : 0} lines when it last ran). Read or grep it for the lines you need; to change the app, edit it and call play_update.` : '';
         return `${details.length > 3000 ? `${details.slice(0, 2999)}…` : details}${code}`;
       }),
     },
@@ -294,7 +301,7 @@ function playPrompt(repository: boolean, writable: boolean, running: Array<{ id:
     // Purpose
     '- `discord.play` is active: build small interactive Discord apps (games, polls, quizzes, boards, timers) with play_start instead of describing them in text.',
     // How code reaches the tools
-    `- An app is a workspace file: write the whole app to one such as apps/snake.js with write${repository ? ' (.workspace/apps/snake.js to the file tools, "apps/snake.js" to the play tools)' : ''}, then call play_start({ file, title }). Build the simplest version that does everything asked (about 80 lines for a small app; a game with many rules as long as it needs, within 300) and make sensible assumptions instead of writing out a plan.`,
+    `- An app is a ${repository ? 'repository' : 'workspace'} file: write the whole app to one such as apps/snake.js with write, then call play_start({ ${repository ? 'path' : 'file'}, title }). Build the simplest version that does everything asked (about 80 lines for a small app; a game with many rules as long as it needs, within 300) and make sensible assumptions instead of writing out a plan.`,
     // App shape
     '- An app is `import { app, embed, row, button, ... } from "@teapilot/discord-play"; export default app({ init(ctx), update(state, action, ctx), view(state, ctx) })`. State is JSON and holds everything that changes (module variables are lost between calls). view derives one message from state, e.g. `({ embeds: [embed({ title, description, color, fields, footer })], rows: [row(button("go", "Go"))] })`. update returns the new state, or step(state, ...effects). No async, no other imports.',
     // Builders

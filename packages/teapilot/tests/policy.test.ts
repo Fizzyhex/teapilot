@@ -3,7 +3,7 @@ import { link, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/pro
 import { join } from 'node:path';
 import { createReadTool, createWriteTool } from '@earendil-works/pi-coding-agent';
 import { ExecutionPolicy, automaticCommand, cleanChildEnvironment } from '../src/execution/policy.js';
-import { SessionGrants, singleRepository } from '../src/execution/grants.js';
+import { SessionGrants, repositoryOffered, repositoryPermissions, singleRepository } from '../src/execution/grants.js';
 import { fixture } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -105,4 +105,23 @@ it('drops write and shell when the session root moves and asks again for the new
   await writeFile(join(repo, 'file.txt'), 'x');
   await expect(grants.reroot(join(repo, 'file.txt'), 'code')).rejects.toThrow('Not a directory');
   expect(grants.root).toBe(await realpath(repo));
+});
+
+it('withholds repository access for a turn: it is neither available nor asked for, whoever is speaking', async () => {
+  const f = await setup();
+  const repo = join(f.cwd, 'repo');
+  await mkdir(join(repo, '.git'), { recursive: true });
+  const grants = await SessionGrants.create(repo, f.config, 'code');
+  grants.withhold(repositoryPermissions);
+  expect(grants.available().filter(permission => permission.startsWith('repository.'))).toEqual([]);
+  expect(grants.allows('repository.read')).toBe(false);
+  let asked = false;
+  expect(await grants.request(['repository.write'], 'fix the game', async () => { asked = true; return true; })).toBe(false);
+  expect(asked).toBe(false);
+  grants.withhold([]);
+  expect(grants.allows('repository.write')).toBe(true);
+  // A workspace conversation is offered its repository only in Code mode, in one.
+  expect(await repositoryOffered(repo, 'code')).toBe(true);
+  expect(await repositoryOffered(repo, 'ask')).toBe(false);
+  expect(await repositoryOffered(f.cwd, 'code')).toBe(false);
 });

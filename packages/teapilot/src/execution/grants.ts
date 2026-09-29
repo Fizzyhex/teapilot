@@ -20,6 +20,14 @@ export function withPrerequisites(requested: readonly Permission[]): Permission[
   return permissions.filter(permission => result.has(permission));
 }
 
+/**
+ * Whether a conversation that has a workspace is offered its repository: only in Code mode, and only in one Git
+ * repository. Otherwise the workspace is the only place its file tools work, and repository access is not asked for.
+ */
+export async function repositoryOffered(root: string, mode: Mode | undefined): Promise<boolean> {
+  return mode === 'code' && await singleRepository(root);
+}
+
 const hasGit = (path: string) => stat(join(path, '.git')).then(() => true, () => false);
 /**
  * True only inside one Git work tree that is not itself a folder of repositories (two or more
@@ -51,6 +59,7 @@ export interface Caller {
 export class SessionGrants {
   private granted = new Set<Permission>();
   private caller?: () => Caller;
+  private withheld = new Set<Permission>();
   private constructor(private current: string, private readonly ceiling: readonly Permission[]) {}
   get root(): string { return this.current; }
   /** Code mode grants write and shell up front only in a single repository; elsewhere they are requested on first need. */
@@ -65,10 +74,15 @@ export class SessionGrants {
   }
   /** Narrow this session to whoever is speaking. Sessions without a caller are limited only by the policy ceiling. */
   setCaller(caller?: () => Caller): void { this.caller = caller; }
+  /**
+   * Takes permissions out of what this turn can hold or be asked for, whoever is speaking: they are neither planned,
+   * requested nor prompted for. Each turn sets it afresh; an empty list lifts it.
+   */
+  withhold(withheld: readonly Permission[]): void { this.withheld = new Set(withheld); }
   list(): Permission[] { return permissions.filter(permission => this.allows(permission)); }
   available(): Permission[] {
     const caller = this.caller?.();
-    return caller ? this.ceiling.filter(permission => caller.permissions.includes(permission)) : [...this.ceiling];
+    return (caller ? this.ceiling.filter(permission => caller.permissions.includes(permission)) : [...this.ceiling]).filter(permission => !this.withheld.has(permission));
   }
   allows(permission: Permission): boolean { return this.granted.has(permission) && this.available().includes(permission); }
   /** Whether the current caller holds `permission` already or would be granted it without an approval click. */

@@ -1,8 +1,11 @@
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { AccessStore } from '../src/discord/access-store.js';
 import { Conversation, TurnQueue, type CardButton, type CardControls, type ConversationOptions, type DiscordTransport } from '../src/discord/bridge.js';
 import { SessionGrants } from '../src/execution/grants.js';
 import type { HostResult } from '../src/host.js';
+import { WorkspaceStore } from '../src/workspace/store.js';
 import { fixture } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -273,4 +276,23 @@ it('sends only the answer to Discord for an answer-only turn and logs the rest',
   // The next turn is back to normal.
   chat.push('and again');
   await finished(cards);
+});
+
+it('offers a conversation with a workspace its repository only in Code mode inside one', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  const repo = join(f.cwd, 'repo');
+  await mkdir(join(repo, '.git'), { recursive: true });
+  const files = WorkspaceStore.at(join(f.cwd, 'workspaces'));
+  const seen: boolean[] = [];
+  for (const [cwd, mode] of [[f.cwd, 'ask'], [f.cwd, 'code'], [repo, 'ask'], [repo, 'code']] as const) {
+    const authorization = await SessionGrants.create(cwd, f.config, mode);
+    authorization.setCaller(() => ({ permissions: ['inference', 'repository.read', 'repository.write', 'repository.shell'] }));
+    const { transport } = discord();
+    const run = vi.fn(async () => { seen.push(authorization.available().includes('repository.read')); return result; }) as ConversationOptions['run'];
+    const { chat } = conversation({ transport, run, files, request: { prompt: '', cwd, mode, authorization } });
+    chat.push('fix the game');
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  expect(seen).toEqual([false, false, false, true]);
 });
