@@ -230,3 +230,29 @@ it('drives the simulator from the command line, one call at a time', async () =>
   expect((await discord(['stop', name])).code).toBe(0);
   expect(existsSync(join(tmpdir(), 'teapilot-discord', name))).toBe(false);
 }, 120_000);
+
+it('shows a plan as embeds, routes its buttons and change form to the conversation, and edits it in place', async () => {
+  const world = new World();
+  const press = vi.fn<(action: string, user: { id: string; name: string }, request?: string) => string | undefined>(() => undefined);
+  const controls = (actions: Array<'approve' | 'juniors' | 'change'>) => ({ actions, refusal: () => undefined, press });
+  const transport = world.transport(world.channel('channel'));
+  const embed = (title: string) => [{ title, description: 'steps', color: 0xbabbf1 }];
+  const ids = await transport.plan!([embed('Tea')], controls(['approve', 'juniors', 'change']));
+  expect(world.render(world.find(ids[0]!))).toContain('[lgtm!](approve, success) [♟️ assign juniors](juniors) [✍️ request change](change)');
+  expect(world.render(world.find(ids[0]!))).toContain('(#babbf1)');
+
+  await world.click('op', ids[0]!, 'juniors');
+  expect(press).toHaveBeenCalledWith('juniors', { id: people.op.id, name: 'op' });
+  expect(await world.click('op', ids[0]!, 'change')).toContain('request: What should change in the plan?');
+  await world.submit('op', { request: 'add a kettle' });
+  expect(press).toHaveBeenLastCalledWith('change', { id: people.op.id, name: 'op' }, 'add a kettle');
+
+  // A refined plan lands on the same message, and a shorter one deletes the extra messages.
+  const grown = await transport.plan!([embed('Tea v2'), embed('more')], controls([]), ids);
+  expect(grown[0]).toBe(ids[0]);
+  expect(world.find(ids[0]!).edits).toBe(1);
+  expect(world.render(world.find(grown[1]!))).not.toContain('lgtm');
+  const shrunk = await transport.plan!([embed('Tea v3')], controls([]), grown);
+  expect(shrunk).toEqual([grown[0]]);
+  expect(() => world.find(grown[1]!)).toThrow(SimError);
+});

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CardButton, CardControls, DiscordTransport } from '../../src/discord/bridge.js';
 import type { connect, GatewayHandlers } from '../../src/discord/gateway.js';
+import { planButtons, planModal, type PlanAction, type PlanControls } from '../../src/discord/plan.js';
 import { parseCustomId, type ModalPayload } from '../../src/discord/play/render.js';
 import type { PlayInteraction } from '../../src/discord/play/runtime.js';
 import type { DiscordSettings } from '../../src/discord/settings.js';
@@ -65,6 +66,8 @@ export class World {
   private counters = { message: 0, thread: 0, approval: 0 };
   /** Status cards by message id, as the gateway keeps them; a restart forgets them. */
   private cards = new Map<string, CardControls['press']>();
+  /** Plans by the id of their last message, as the gateway keeps them; a restart forgets them. */
+  private plans = new Map<string, PlanControls>();
   private recent?: Channel;
   /** The bot's custom status, as `teapilot discord start` last set it. */
   status?: string;
@@ -125,6 +128,7 @@ export class World {
       close: async () => {
         this.handlers = undefined;
         this.cards.clear();
+        this.plans.clear();
         // Like the real gateway: pending approvals resolve as denied, and their buttons stay behind.
         for (const message of this.messages) { const resolve = message.approval; message.approval = undefined; resolve?.(false); }
       },
@@ -207,6 +211,25 @@ export class World {
         if (id) this.update(message, payload);
         this.cards.set(message.id, controls.press);
         return message.id;
+      },
+      plan: async (messages, controls, ids = []) => {
+        const posted: string[] = [];
+        messages.forEach((embeds, index) => {
+          const last = index === messages.length - 1;
+          const components = last && controls.actions.length ? [{ type: 1, components: controls.actions.map(action => ({
+            type: 2, style: planButtons[action].style === 'success' ? 3 : 2, label: planButtons[action].label,
+            ...(planButtons[action].emoji ? { emoji: { name: planButtons[action].emoji } } : {}), custom_id: `teapilot-plan:${action}` })) }] : [];
+          const known = ids[index];
+          if (known) { this.update(this.find(known), { embeds: embeds as unknown as Json[], components }); posted.push(known); }
+          else posted.push(this.post(channel, bot.name, { embeds: embeds as unknown as Json[], components }, undefined, reply()).id);
+        });
+        for (const id of ids.slice(messages.length)) {
+          const at = this.messages.findIndex(message => message.id === id);
+          if (at >= 0) { this.messages.splice(at, 1); this.emit(`${bot.name} deleted ${id}`); }
+        }
+        if (ids.length) this.plans.delete(ids.at(-1)!);
+        this.plans.set(posted.at(-1)!, controls);
+        return posted;
       },
       typing: () => this.emit(`… ${bot.name} is typing in ${channel.name}`),
       askApproval: (text, signal) => {
@@ -294,6 +317,7 @@ export class World {
     if (typeof control.url === 'string') return `${person.name} opened ${control.url}; links never reach teapilot.`;
     const custom = String(control.custom_id);
     if (custom.startsWith('teapilot:')) return this.answerApproval(person, message, custom.endsWith(':approve'));
+    if (custom.startsWith('teapilot-plan:')) return this.pressPlan(person, message, custom.slice('teapilot-plan:'.length) as PlanAction);
     if (custom.startsWith('teapilot-card:')) return this.pressCard(person, message, custom.slice('teapilot-card:'.length) as CardButton);
     return this.interact(person, message, 'button', custom, `clicked [${this.label(control)}]`);
   }
@@ -308,6 +332,28 @@ export class World {
     this.update(message, { content: settle(message.content, `**${approved ? 'Approved' : 'Denied'}** by <@${person.id}>`), components: [] });
     resolve(approved);
     return `${person.name} ${approved ? 'approved' : 'denied'} ${message.id}.`;
+  }
+
+  /** Like the real gateway: the buttons edit the plan in place, and only a refusal is said, privately. Request change opens a form. */
+  private pressPlan(person: Person, message: Message, action: PlanAction): string {
+    const controls = this.plans.get(message.id);
+    const refusal = controls ? controls.refusal(person.id) : 'This plan is no longer available: teapilot restarted since, or it was replaced.';
+    const label = `${person.name} clicked [${planButtons[action].label}] on ${message.id}.`;
+    if (!controls || refusal) return `${label}
+${this.render(this.post(message.channel, bot.name, { content: refusal }, person.name))}`;
+    if (action === 'change') {
+      const payload: ModalPayload = { custom_id: `teapilot-plan-modal:${message.id}`, title: planModal.title, components: [{ type: 1, components: [
+        { type: 4, custom_id: planModal.field, label: planModal.label, style: 2, required: true, max_length: planModal.maxLength }] }] } as ModalPayload;
+      this.check(`the form on ${message.id}`, () => checkModal(payload));
+      this.forms.set(person.name, { message, payload });
+      this.emit(`${person.name} opened form "${payload.title}" from ${message.id}`);
+      return `${label}
+${person.name} sees a form:
+${this.renderForm(payload)}`;
+    }
+    const note = controls.press(action, { id: person.id, name: person.name });
+    return note ? `${label}
+${this.render(this.post(message.channel, bot.name, { content: note }, person.name))}` : label;
   }
 
   /** Like the real gateway: anyone may press, the conversation decides, and only the presser sees the answer. */
@@ -355,6 +401,12 @@ export class World {
       if (typeof input.min_length === 'number' && value && value.length < input.min_length) throw new SimError(`${String(input.custom_id)} needs at least ${input.min_length} characters.`);
     }
     this.forms.delete(person.name);
+    if (form.payload.custom_id.startsWith('teapilot-plan-modal:')) {
+      const controls = this.plans.get(form.message.id);
+      const note = controls ? controls.press('change', { id: person.id, name: person.name }, fields[planModal.field] ?? '') : 'This plan is no longer available: teapilot restarted since, or it was replaced.';
+      return `${person.name} submitted "${form.payload.title}" on ${form.message.id}.${note ? `
+${this.render(this.post(form.message.channel, bot.name, { content: note }, person.name))}` : ''}`;
+    }
     return this.interact(person, form.message, 'modal', form.payload.custom_id, `submitted "${form.payload.title}"`, undefined, Object.fromEntries(ids.map(key => [key, fields[key] ?? ''])));
   }
 

@@ -7,6 +7,7 @@ import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
 import { attachmentOption, collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
 import { isAside } from '../chat.js';
 import { InteractionFeed, type FeedLink } from './feed.js';
+import { planButtons, planModal, type PlanAction, type PlanControls } from './plan.js';
 import { chunk, MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
@@ -111,6 +112,10 @@ const choicePrefix = 'teapilot-choice:';
 const cardPrefix = 'teapilot-card:';
 /** Added to a status card once Discord stops its interaction's updates. */
 const pauseNote = '-# live updates frozen... discord stops them after 15 minutes. press **resume** to catch up!';
+/** Custom id prefix of a plan's buttons: `teapilot-plan:<action>`; the plan's last message id finds its controls. */
+const planPrefix = 'teapilot-plan:';
+/** Custom id prefix of the change request form: `teapilot-plan-modal:<message id>`. */
+const planModalPrefix = 'teapilot-plan-modal:';
 /** Custom id prefix of a side answer's share menu: `teapilot-btw:<nonce>`. */
 const sidePrefix = 'teapilot-btw:';
 /** Custom id prefix of a compactly posted side answer's button: `teapilot-btw-show:<id>`, the id in the aside store. */
@@ -189,6 +194,13 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       ...(controls.stop ? [new ButtonBuilder().setCustomId(`${cardPrefix}stop`).setLabel('Stop').setStyle(ButtonStyle.Secondary)] : []),
       new ButtonBuilder().setCustomId(`${cardPrefix}details`).setLabel('Details').setStyle(ButtonStyle.Secondary))],
   });
+  /** Plans whose buttons still answer, by the id of their last message; the oldest are forgotten first. */
+  const plans = new Map<string, PlanControls>();
+  const planRow = (controls: PlanControls) => controls.actions.length ? [new ActionRowBuilder<ButtonBuilder>().addComponents(controls.actions.map(action => {
+    const { label, emoji, style } = planButtons[action];
+    const button = new ButtonBuilder().setCustomId(`${planPrefix}${action}`).setLabel(label).setStyle(style === 'success' ? ButtonStyle.Success : ButtonStyle.Secondary);
+    return emoji ? button.setEmoji(emoji) : button;
+  }))] : [];
   const settle = (text: string, verdict: string) => `${text.slice(0, MESSAGE_LIMIT - verdict.length - 2)}\n\n${verdict}`;
 
   type Payload = { content: string; components: Array<ActionRowBuilder<ButtonBuilder>>; allowedMentions: { parse: [] } };
@@ -226,6 +238,20 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         const message = id ? await (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload) : await channel.send(payload);
         sent.set(message.id, message); remember(message.id, controls);
         return message.id;
+      },
+      async plan(messages, controls, ids = []) {
+        const posted: string[] = [];
+        for (const [index, embeds] of messages.entries()) {
+          const payload = { embeds, components: index === messages.length - 1 ? planRow(controls) : [], ...quiet };
+          const known = ids[index];
+          const message = known ? await (sent.get(known) ?? await channel.messages.fetch(known)).edit(payload) : await channel.send({ ...payload, ...reply() });
+          sent.set(message.id, message); posted.push(message.id);
+        }
+        for (const id of ids.slice(messages.length)) await (sent.get(id) ?? await channel.messages.fetch(id)).delete().catch(noop);
+        if (ids.length) plans.delete(ids.at(-1)!);
+        plans.set(posted.at(-1)!, controls);
+        if (plans.size > cardLimit) plans.delete(plans.keys().next().value!);
+        return posted;
       },
       typing() { void channel.sendTyping().catch(noop); },
       askApproval: (text, signal) => askApproval(text, signal, payload => channel.send(payload), async (id, payload) => (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload)),
@@ -562,6 +588,15 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       });
       return;
     }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(planModalPrefix)) {
+      const controls = plans.get(interaction.customId.slice(planModalPrefix.length));
+      const request = interaction.fields.getTextInputValue(planModal.field);
+      const note = controls ? controls.press('change', { id: interaction.user.id, name: interaction.user.username }, request) : 'This plan is no longer available: teapilot restarted since, or it was replaced.';
+      // The plan's own message shows the outcome; only a refusal needs saying.
+      if (interaction.isFromMessage()) await interaction.deferUpdate().catch(noop);
+      if (note) await (interaction.isFromMessage() ? interaction.followUp({ content: note, flags: MessageFlags.Ephemeral, ...quiet }) : interaction.reply({ content: note, flags: MessageFlags.Ephemeral, ...quiet })).catch(noop);
+      return;
+    }
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith(sidePrefix)) {
       await share(interaction, interaction.customId.slice(sidePrefix.length));
       return;
@@ -611,6 +646,22 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         log(`Discord: side answer summary not posted: ${failure(error)}`);
         await interaction.followUp({ content: 'That summary could not be posted here.', flags: MessageFlags.Ephemeral }).catch(noop);
       }
+      return;
+    }
+    if (interaction.customId.startsWith(planPrefix)) {
+      const action = interaction.customId.slice(planPrefix.length) as PlanAction;
+      const controls = plans.get(interaction.message.id);
+      const refused = controls ? controls.refusal(interaction.user.id) : 'This plan is no longer available: teapilot restarted since, or it was replaced.';
+      if (!controls || refused || !(action in planButtons)) { await interaction.reply({ content: refused ?? 'Unknown plan button.', flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
+      if (action === 'change') {
+        await interaction.showModal({ custom_id: `${planModalPrefix}${interaction.message.id}`, title: planModal.title, components: [{ type: 1, components: [
+          { type: 4, custom_id: planModal.field, label: planModal.label, style: 2, required: true, max_length: planModal.maxLength }] }] } as unknown as APIModalInteractionResponseCallbackData).catch(noop);
+        return;
+      }
+      // The plan's message is edited by the conversation; nothing new is posted for the click.
+      await interaction.deferUpdate().catch(noop);
+      const note = controls.press(action, { id: interaction.user.id, name: interaction.user.username });
+      if (note) await interaction.followUp({ content: note, flags: MessageFlags.Ephemeral, ...quiet }).catch(noop);
       return;
     }
     if (interaction.customId === `${cardPrefix}resume`) {

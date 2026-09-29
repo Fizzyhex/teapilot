@@ -10,6 +10,7 @@ import type { WorkspaceSandbox } from '../workspace/sandbox.js';
 import type { WorkspaceStore } from '../workspace/store.js';
 import type { MessagePayload } from './play/render.js';
 import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
+import { approvePrompt, changePrompt, extractPlan, juniorsPrompt, planMessages, type PlanAction, type PlanControls, type PlanEmbed } from './plan.js';
 import { chunk, StatusCard, throttle, type CardReply } from './render.js';
 
 export type CardButton = 'stop' | 'details';
@@ -29,7 +30,15 @@ export interface DiscordTransport {
   sendFiles?(text: string, files: Array<{ name: string; data: Buffer }>): Promise<string>;
   /** Where teapilot answers through an interaction: posts a discord.play app as a reply to it. */
   postApp?(payload: MessagePayload): Promise<HostedMessage>;
+  /**
+   * Posts a plan as embeds, one array per message, with its buttons on the last message. With `ids` it edits those
+   * messages in place instead: posting more if the plan grew, deleting the extra ones if it shrank. Resolves with the ids.
+   */
+  plan?(messages: PlanEmbed[][], controls: PlanControls, ids?: string[]): Promise<string[]>;
 }
+
+/** A plan on Discord: its messages, and where it is in being refined. */
+interface PlanState { text: string; ids: string[]; /** A prompt from its buttons is being worked on. */ revising: boolean; done: boolean }
 
 /** runHost holds the state lock, so turns from every conversation run one at a time. */
 export class TurnQueue {
@@ -100,6 +109,10 @@ export class Conversation {
   private live?: { card: StatusCard; refresh(): void };
   private ended = false;
   private answerOnly = false;
+  /** The newest plan shown as embeds; a refined plan replaces it in place. */
+  private plan?: PlanState;
+  /** A plan button sent the next turn's prompt, so a plan in its answer refines `plan` rather than posting a new one. */
+  private refining = false;
   readonly done: Promise<void>;
 
   constructor(private readonly options: ConversationOptions) {
@@ -175,6 +188,49 @@ export class Conversation {
     return approved;
   };
 
+  /** Paints a plan's messages; its buttons are `actions`, none once it is settled or being worked on. */
+  private async paint(state: PlanState, actions: PlanAction[], footer?: string): Promise<void> {
+    try { state.ids = await this.options.transport.plan!(planMessages(state.text, footer), this.planControls(state, actions), state.ids); }
+    catch (error) { this.options.log(`${this.options.key}: plan embed failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  private planControls(state: PlanState, actions: PlanAction[]): PlanControls {
+    const { access } = this.options;
+    const refusal = (userId: string) => access && access.roleOf(userId) === undefined ? 'You are not allowed to use teapilot.'
+      : this.plan !== state || state.done ? 'This plan has been replaced or settled.'
+      : state.revising ? 'teapilot is already working on this plan.' : undefined;
+    return { actions, refusal, press: (action, user, request) => {
+      const refused = refusal(user.id);
+      if (refused) return refused;
+      const sender = { sender: user.id, senderName: user.name };
+      if (action === 'approve') {
+        state.done = true;
+        this.push(approvePrompt, sender);
+        void this.paint(state, [], `✅ Approved by ${user.name}`);
+        return undefined;
+      }
+      if (action === 'change' && !request?.trim()) return 'Say what should change.';
+      const note = action === 'juniors' ? '♟️ Assigning juniors…' : `✍️ Revising: ${request!.replace(/\s+/g, ' ').trim().slice(0, 100)}`;
+      state.revising = true; this.refining = true;
+      this.push(action === 'juniors' ? juniorsPrompt : changePrompt(request!.trim()), sender);
+      void this.paint(state, [], note);
+      return undefined;
+    } };
+  }
+
+  /** Shows an answer's plan as embeds; when `refining`, it edits the plan whose button was pressed instead of posting another. */
+  private async showPlan(plan: string, refining: boolean): Promise<void> {
+    const previous = this.plan;
+    const reuse = refining && previous && !previous.done ? previous : undefined;
+    // A plan that is not refined replaces an older one, which keeps its text but loses its buttons.
+    if (previous && !reuse && !previous.done) { previous.done = true; await this.paint(previous, [], 'superseded by a newer plan'); }
+    const state: PlanState = reuse ?? { text: plan, ids: [], revising: false, done: false };
+    state.text = plan; state.revising = false;
+    this.plan = state;
+    await this.paint(state, ['approve', 'juniors', 'change']);
+    if (!state.ids.length) await this.say(plan, true);
+  }
+
   private onEvent: EventSink = event => this.sink?.(event);
   private onReasoning = (text: string) => this.reasoning?.(text);
 
@@ -205,6 +261,7 @@ export class Conversation {
     const side = base.side === true;
     const request: HostRequest = { ...base, access: admin, workspace, ...(files && !side ? { scratch: files.scratch(conversation) } : {}),
       play: play && !side ? { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined, files: workspace } : undefined };
+    const refining = this.refining; this.refining = false;
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
     // A side answer shows no card either: it is one message, like a quick reply.
@@ -282,7 +339,18 @@ export class Conversation {
       const { transport } = this.options;
       await paceLines(lines, line => transport.send(line).catch(error => this.options.log(`${this.options.key}: send failed: ${error instanceof Error ? error.message : error}`)),
         { typing: () => transport.typing(), delayMs: this.options.lineDelayMs, signal: this.options.request.signal });
-    } else await this.say(`${result.text || '(no answer)'}${side ? '\n-# this is an aside - not part of the main convo.' : ''}`, true);
+    } else {
+      const found = !side && result.success && this.options.transport.plan ? extractPlan(this.options.redact(result.text)) : undefined;
+      if (found) {
+        if (found.before) await this.say(found.before, true);
+        await this.showPlan(found.plan, refining);
+        if (found.after) await this.say(found.after, true);
+      } else {
+        await this.say(`${result.text || '(no answer)'}${side ? '\n-# this is an aside - not part of the main convo.' : ''}`, true);
+        // The turn a button started ended without a plan: give the plan its buttons back.
+        if (refining && this.plan?.revising) { this.plan.revising = false; await this.paint(this.plan, ['approve', 'juniors', 'change']); }
+      }
+    }
     // The terminal log below already records the result of an answer-only turn. Otherwise the card collapses to
     // its result once the answer is up, so the result stays the turn's last word and Details stays under it.
     if (!answerOnly && !(result.casual && result.success && cardState !== 'shown')) {
