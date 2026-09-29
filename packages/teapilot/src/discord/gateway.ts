@@ -6,6 +6,7 @@ import type { SideAnswer } from './aside-store.js';
 import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
 import { attachmentOption, collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
 import { isAside } from '../chat.js';
+import { InteractionFeed, type FeedLink } from './feed.js';
 import { chunk, MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
@@ -108,6 +109,8 @@ const noop = () => undefined;
 const choicePrefix = 'teapilot-choice:';
 /** Custom id prefix of status card buttons: `teapilot-card:<button>`; the card's message id finds its turn. */
 const cardPrefix = 'teapilot-card:';
+/** Added to a status card once Discord stops its interaction's updates. */
+const pauseNote = '-# live updates frozen... discord stops them after 15 minutes. press **resume** to catch up!';
 /** Custom id prefix of a side answer's share menu: `teapilot-btw:<nonce>`. */
 const sidePrefix = 'teapilot-btw:';
 /** Custom id prefix of a compactly posted side answer's button: `teapilot-btw-show:<id>`, the id in the aside store. */
@@ -169,16 +172,20 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     allowedMentions: { parse: [] },
     rest: { agent: restAgent() },
   });
+  type CardMessage = BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds };
   const pending = new Map<string, { text: string; resolve(approved: boolean): void }>();
   const cards = new Map<string, CardControls['press']>();
   const remember = (id: string, controls: CardControls) => {
     cards.delete(id); cards.set(id, controls.press);
     if (cards.size > cardLimit) cards.delete(cards.keys().next().value!);
   };
-  /** A status card: links in its previews stay text rather than growing embeds. */
-  const cardPayload = (text: string, controls: CardControls): BaseMessageOptions & { flags: typeof MessageFlags.SuppressEmbeds } => ({
-    content: text, flags: MessageFlags.SuppressEmbeds, ...quiet,
+  /** Status cards posted through interactions, whose Resume button carries their turn's updates on through a new one. */
+  const resumers = new Map<string, (click: ButtonInteraction) => Promise<void>>();
+  /** A status card: links in its previews stay text rather than growing embeds. `paused` adds the note and button to resume its updates. */
+  const cardPayload = (text: string, controls: CardControls, paused = false): CardMessage => ({
+    content: paused ? `${text.slice(0, MESSAGE_LIMIT - pauseNote.length - 2)}\n\n${pauseNote}` : text, flags: MessageFlags.SuppressEmbeds, ...quiet,
     components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      ...(paused ? [new ButtonBuilder().setCustomId(`${cardPrefix}resume`).setLabel('Resume').setStyle(ButtonStyle.Primary)] : []),
       ...(controls.stop ? [new ButtonBuilder().setCustomId(`${cardPrefix}stop`).setLabel('Stop').setStyle(ButtonStyle.Secondary)] : []),
       new ButtonBuilder().setCustomId(`${cardPrefix}details`).setLabel('Details').setStyle(ButtonStyle.Secondary))],
   });
@@ -225,39 +232,58 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     };
   };
 
+  /** Posts and edits through `interaction`'s webhook; a click's own message is edited through its reply. */
+  const webhookLink = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction, hidden: boolean): FeedLink<CardMessage> => {
+    const expires = interaction.createdTimestamp + interactionLifetimeMs;
+    // A click has no deferred message of its own: its reply is the message it was pressed on, so everything is a follow-up.
+    let first = !interaction.isButton();
+    const live = () => { if (Date.now() > expires) throw new Error('This Discord interaction expired after 15 minutes. Run /reply again.'); };
+    return {
+      expires,
+      async post(payload) {
+        live();
+        // The deferred "thinking" message becomes the first message, private if it was deferred so; later ones are follow-ups.
+        if (first) { first = false; return (await interaction.editReply(payload)).id; }
+        return (await interaction.followUp(hidden ? { ...payload, flags: (payload.flags ?? 0) | MessageFlags.Ephemeral } : payload)).id;
+      },
+      async revise(id, payload) {
+        live();
+        if (interaction.isButton() && id === interaction.message.id) await interaction.editReply(payload);
+        else await interaction.webhook.editMessage(id, payload);
+      },
+    };
+  };
+
   /**
    * Where the bot cannot post, answer through the interaction webhook, which needs no channel permission.
    * Discord keeps that webhook valid for 15 minutes, and there is no typing indicator or thread.
    */
   const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction,
     { hidden = false, buttons = () => [] }: { hidden?: boolean; buttons?: () => Array<ActionRowBuilder<MessageActionRowComponentBuilder>> } = {}): DiscordTransport => {
-    const expires = Date.now() + interactionLifetimeMs;
-    // A click has no deferred message of its own: its reply is the note it was pressed on, so everything is a follow-up.
-    let first = !interaction.isButton();
-    const live = () => { if (Date.now() > expires) throw new Error('This Discord interaction expired after 15 minutes. Run /reply again.'); };
-    const post = async (payload: BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds }) => {
-      live();
-      // The deferred "thinking" message becomes the first message, private if it was deferred so; later ones are follow-ups.
-      if (first) { first = false; return await interaction.editReply(payload); }
-      return await interaction.followUp(hidden ? { ...payload, flags: (payload.flags ?? 0) | MessageFlags.Ephemeral } : payload);
-    };
-    const revise = async (id: string, payload: BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds }) => { live(); await interaction.webhook.editMessage(id, payload); };
+    let controls: CardControls | undefined;
+    const feed: InteractionFeed<CardMessage> = new InteractionFeed(webhookLink(interaction, hidden), {
+      log: text => log(`Discord: ${text}`),
+      onCard: id => {
+        if (controls) remember(id, controls);
+        resumers.delete(id); resumers.set(id, click => feed.resume(webhookLink(click, hidden)));
+        if (resumers.size > cardLimit) resumers.delete(resumers.keys().next().value!);
+      },
+    });
     return {
-      async send(text) { return (await post({ content: text, components: buttons(), ...quiet })).id; },
-      async sendFiles(text, files) { return (await post({ content: text, files: attachments(files), components: buttons(), ...quiet })).id; },
-      edit: (id, text) => revise(id, { content: text, ...quiet }),
-      async card(text, controls, id) {
-        const payload = cardPayload(text, controls);
-        if (id) await revise(id, payload); else id = (await post(payload)).id;
-        remember(id, controls);
-        return id;
+      send: text => feed.post({ content: text, components: buttons(), ...quiet }),
+      sendFiles: (text, files) => feed.post({ content: text, files: attachments(files), components: buttons(), ...quiet }),
+      edit: (id, text) => feed.revise(id, { content: text, ...quiet }),
+      card(text, given, id) {
+        controls = given;
+        return feed.showCard(cardPayload(text, given), given.stop ? cardPayload(text, given, true) : undefined, id);
       },
       typing: noop,
-      askApproval: (text, signal) => askApproval(text, signal, post, revise),
+      askApproval: (text, signal) => askApproval(text, signal, async payload => ({ id: await feed.post(payload) }), (id, payload) => feed.revise(id, payload)),
       // The runtime stops editing through this interaction once it expires, and uses the app's clicks after that.
       async postApp(payload) {
-        const message = await post(raw(payload));
-        return { id: message.id, edit: next => revise(message.id, raw(next, true)) };
+        if (!feed.live) throw new Error('Discord has stopped the updates of this reply; press Resume on its status card first.');
+        const id = await feed.post(raw(payload));
+        return { id, edit: next => feed.revise(id, raw(next, true)) };
       },
     };
   };
@@ -585,6 +611,13 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         log(`Discord: side answer summary not posted: ${failure(error)}`);
         await interaction.followUp({ content: 'That summary could not be posted here.', flags: MessageFlags.Ephemeral }).catch(noop);
       }
+      return;
+    }
+    if (interaction.customId === `${cardPrefix}resume`) {
+      const resume = resumers.get(interaction.message.id);
+      if (!resume) { await interaction.reply({ content: 'This turn is no longer available: teapilot restarted since, or the turn is too old.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+      await interaction.deferUpdate().catch(noop);
+      await resume(interaction).catch(error => log(`Discord: could not resume a status card: ${failure(error)}`));
       return;
     }
     if (interaction.customId.startsWith(cardPrefix)) {

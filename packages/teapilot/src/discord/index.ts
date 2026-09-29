@@ -150,17 +150,17 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   /**
    * `channelId` is where discord.play apps run; a one-shot posts them through its interaction. `setup` only shapes a new
    * conversation; access still starts from the configured mode, so a chosen Code mode asks for it when needed.
-   * `historyKey` is where turns are kept, the conversation's own key unless a one-shot shares a history.
+   * `historyKey` is where turns are kept, the conversation's own key unless a one-shot shares a history. `timeLimited` ends
+   * the turn when its interaction expires, for one-shots without a status card to resume their updates from.
    */
-  const open = async (key: string, transport: DiscordTransport, { channelId, oneShot = false, setup = {}, historyKey = key }: { channelId?: string; oneShot?: boolean; setup?: PromptSetup; historyKey?: string } = {}): Promise<Conversation> => {
+  const open = async (key: string, transport: DiscordTransport, { channelId, oneShot = false, timeLimited = false, setup = {}, historyKey = key }: { channelId?: string; oneShot?: boolean; timeLimited?: boolean; setup?: PromptSetup; historyKey?: string } = {}): Promise<Conversation> => {
     const existing = conversations.get(key);
     if (existing?.active) return existing;
     const authorization = await SessionGrants.create(root, config, settings.startMode);
     const conversation = new Conversation({
       key, transport, queue, redact, log, access, files, sandbox,
-      // A one-shot answers through a Discord interaction, which stops working after 15 minutes.
       once: oneShot,
-      request: { prompt: '', cwd: root, mode: setup.mode ?? settings.startMode, tier: setup.tier, authorization, signal: oneShot ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
+      request: { prompt: '', cwd: root, mode: setup.mode ?? settings.startMode, tier: setup.tier, authorization, signal: timeLimited ? AbortSignal.any([signal, AbortSignal.timeout(interactionLifetimeMs)]) : signal,
         // A conversation picks up where it was before a restart, or where the last one-shot in its history left off.
         history: histories.load(historyKey) },
       onHistory: history => { if (!history.length) clearScratch(historyKey); try { histories.save(historyKey, history); } catch (error) { log(`${historyKey}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
@@ -190,7 +190,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   const side = async (historyKey: string | undefined, prompt: string, transport: DiscordTransport, channelId: string, from: { sender: string; senderName: string }): Promise<void> => {
     const key = `btw:${randomUUID()}`;
     log(`${historyKey ?? key} @${from.senderName} (btw): ${prompt.split('\n')[0]!.slice(0, 80)}`);
-    const conversation = await open(key, transport, { channelId, oneShot: true, historyKey: historyKey ?? key });
+    const conversation = await open(key, transport, { channelId, oneShot: true, timeLimited: true, historyKey: historyKey ?? key });
     conversation.push(prompt, from);
     try { await conversation.done; }
     finally { conversations.delete(key); }
