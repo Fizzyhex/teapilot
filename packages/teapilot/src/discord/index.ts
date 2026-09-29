@@ -308,7 +308,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   setStatus = gateway.setStatus;
   presence.start();
   const recovered = await play.recover();
-  if (recovered) log(`Resumed ${recovered} discord.play app(s).`);
+  if (recovered) log(`Loaded ${recovered} discord.play app(s); each one starts again at the next click.`);
   if (!config.policy.permissions.includes('discord.play')) log('discord.play is off: add "discord.play" to "permissions" in this profile\'s policy.json to let teapilot build interactive Discord apps.');
 
   access.lookup = gateway.username;

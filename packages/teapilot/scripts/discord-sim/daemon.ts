@@ -129,7 +129,7 @@ function app(id: string): string {
   return [
     `${record.id}: ${record.title} (${record.status}${record.note ? `: ${record.note}` : ''})`,
     `owner ${record.owner.name ?? record.owner.id}; participants ${participants}; message ${record.messageId ?? '-'} in #${world.channel(record.channelId).name}`,
-    `timers: ${record.timers.map(timer => `${timer.id} ${timer.dueAt === undefined ? 'waiting for someone to play' : ago(timer.dueAt - clock.now())}`).join(', ') || 'none'}`,
+    `timers: ${record.timers.length ? `${record.timers.some(timer => timer.dueAt !== undefined) ? 'counting down' : 'hibernating until the next click'}; ${record.timers.map(timer => `${timer.id} ${ago((timer.dueAt ?? clock.now() + (timer.ms ?? 0)) - clock.now())} left`).join(', ')}` : 'none'}`,
     `consults in the last hour: ${record.consults.filter(at => at > clock.now() - 3_600_000).length}`,
     '## state', JSON.stringify(record.state, null, 2),
     '## view', describe(record.view),

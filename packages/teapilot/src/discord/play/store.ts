@@ -18,10 +18,8 @@ const recordSchema = z.object({
   ]),
   state: z.unknown(), seed: z.number(), view: z.custom<View>(value => typeof value === 'object' && value !== null),
   emojis: z.record(z.string(), z.string()),
-  /** `ms` is how long the timer runs for; `dueAt` is set once it is counting, so a pending one costs nothing. */
+  /** `ms` is how much longer the timer must wait; `dueAt` is set only while the app is awake, so a hibernating one costs nothing. */
   timers: z.array(z.object({ id: z.string(), ms: z.number().optional(), dueAt: z.number().optional() })),
-  /** Whether anyone has used a control yet; game clocks wait for that instead of running from the post. */
-  interacted: z.boolean().default(true),
   /** When each recent consult started, for the hourly cap. */
   consults: z.array(z.number()),
   status: z.enum(['running', 'finished', 'paused']),

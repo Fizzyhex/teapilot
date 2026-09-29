@@ -62,7 +62,7 @@ export const systemClock: Clock = {
 };
 
 export const playLimits = {
-  perChannel: 5, total: 50, idleMs: 24 * 60 * 60_000, keepFinishedMs: 7 * 24 * 60 * 60_000,
+  perChannel: 5, total: 50, hibernateMs: 10 * 60_000, idleMs: 24 * 60 * 60_000, keepFinishedMs: 7 * 24 * 60 * 60_000,
   timers: 10, minTimerMs: 2000, maxTimerMs: 24 * 60 * 60_000, consultsPerHour: 20, consultPromptChars: 4000,
   stateChars: 64_000, log: 20,
 };
@@ -76,8 +76,10 @@ interface Live {
   chain: Promise<unknown>;
   /** For an app posted through an interaction: the newest interaction that can still edit its message. */
   reach?: { edit(payload: MessagePayload): Promise<void>; until: number };
-  /** When its clocks stopped because nobody could see the message; the wait is given back when they resume. */
-  pausedAt?: number;
+  /** While someone is playing: when the app hibernates unless something happens first. Never stored, so a restart leaves every app asleep. */
+  awakeUntil?: number;
+  /** Cancels the hibernation that `awakeUntil` is waiting for. */
+  sleeper?: () => void;
 }
 interface Advance { state: unknown; seed: number; view: View; payload: MessagePayload; effects: Effect[]; timers: PlayRecord['timers']; finished?: { summary?: string } }
 
@@ -186,8 +188,8 @@ export class PlayRuntime {
     this.checkPictures(record, payload);
     const timers = new Map(record.timers.map(({ id, ...pending }) => [id, pending]));
     for (const effect of checked) {
-      // A clock gets its deadline only once someone is playing; before that the app keeps the duration alone.
-      if (effect.type === 'after') timers.set(effect.id, { ms: effect.ms, ...(record.interacted ? { dueAt: input.ctx.now + effect.ms } : {}) });
+      // A timer is only ever asked for a duration here; arm() is what turns that into a deadline, and only while the app is awake.
+      if (effect.type === 'after') timers.set(effect.id, { ms: effect.ms });
       else if (effect.type === 'cancel') timers.delete(effect.id);
     }
     if (finish) timers.clear();
@@ -210,7 +212,7 @@ export class PlayRuntime {
     const scheduled = new Set(from.timers.map(timer => timer.id));
     // A probe stands in for someone playing, so clocks still waiting for that are counted from here.
     const at = this.now();
-    const base: PlayRecord = { ...record, state: from.state, seed: from.seed, interacted: true, timers: from.timers.map(timer => timer.dueAt === undefined ? { ...timer, dueAt: at + (timer.ms ?? 0) } : timer) };
+    const base: PlayRecord = { ...record, state: from.state, seed: from.seed, timers: from.timers.map(timer => timer.dueAt === undefined ? { ...timer, dueAt: at + (timer.ms ?? 0) } : timer) };
     const before = JSON.stringify(from.state) + describe(from.view);
     const tried: string[] = [], inert: string[] = [];
     // Emoji that reach Discord as plain text: :shortcodes:, and server emoji inside backticks.
@@ -347,39 +349,56 @@ export class PlayRuntime {
     await live.reach!.edit(ready);
   }
 
+  /** Whether the app is playing now: posted, used or resent within the last ten minutes. */
+  private awake(live: Live): boolean {
+    return live.awakeUntil !== undefined && live.awakeUntil > this.now();
+  }
+
   /**
-   * Starts the clocks an app is waiting on, and only those it can spend anything on: one nobody has
-   * played with yet, or whose message nothing can edit, holds its wait instead of counting it down.
+   * Someone is playing, so the app runs for the next ten minutes: its clocks start from here, and the
+   * ones it was holding pick up with exactly the wait they had left.
    */
+  private wake(live: Live): void {
+    live.sleeper?.();
+    const until = this.now() + playLimits.hibernateMs;
+    // An app posted through an interaction can only be edited for as long as that interaction lasts.
+    const reach = live.record.viaInteraction ? live.reach?.until : undefined;
+    live.awakeUntil = reach !== undefined && reach < until ? reach : until;
+    live.sleeper = this.clock.after(Math.max(0, live.awakeUntil - this.now()), () => this.hibernate(live));
+    this.arm(live);
+  }
+
+  /**
+   * Nobody has played for ten minutes, so the app stops costing anything: its clocks put away what
+   * they have left to wait, which is what the next click starts them from. Its message is left alone.
+   */
+  private hibernate(live: Live): void {
+    live.sleeper?.();
+    live.sleeper = undefined;
+    live.awakeUntil = undefined;
+    for (const cancel of live.timers.values()) cancel();
+    live.timers.clear();
+    const { record } = live;
+    if (!record.timers.some(timer => timer.dueAt !== undefined)) return;
+    const now = this.now();
+    record.timers = record.timers.map(({ id, ms, dueAt }) => ({ id, ms: dueAt === undefined ? ms ?? 0 : Math.max(0, dueAt - now) }));
+    this.options.store.save(record);
+  }
+
+  /** Starts the clocks a playing app is waiting on; one that is hibernating keeps holding its wait. */
   private arm(live: Live): void {
     for (const cancel of live.timers.values()) cancel();
     live.timers.clear();
     const { record } = live;
-    if (record.status !== 'running' || !record.interacted) return;
-    if (!this.reachable(live)) { live.pausedAt ??= this.now(); return; }
+    if (record.status !== 'running' || !this.awake(live)) return;
     const now = this.now();
-    let changed = false;
-    // Time nobody could have seen does not count, so every deadline moves on by however long that was.
-    if (live.pausedAt !== undefined) {
-      const paused = now - live.pausedAt;
-      record.timers = record.timers.map(timer => timer.dueAt === undefined ? timer : { ...timer, dueAt: timer.dueAt + paused });
-      live.pausedAt = undefined;
-      changed = true;
-    }
     if (record.timers.some(timer => timer.dueAt === undefined)) {
       record.timers = record.timers.map(timer => timer.dueAt === undefined ? { ...timer, dueAt: now + (timer.ms ?? 0) } : timer);
-      changed = true;
+      this.options.store.save(record);
     }
-    if (changed) this.options.store.save(record);
-    // An app reachable only through an interaction loses that at a known moment; its clocks stop there.
-    const reachUntil = record.viaInteraction ? live.reach?.until : undefined;
     for (const { id, dueAt } of record.timers) {
-      const stops = reachUntil !== undefined && reachUntil < dueAt!;
-      live.timers.set(id, this.clock.after(Math.max(0, (stops ? reachUntil! : dueAt!) - now), () => {
+      live.timers.set(id, this.clock.after(Math.max(0, dueAt! - now), () => {
         live.timers.delete(id);
-        if (stops) { this.arm(live); return; }
-        // Nobody would see the tick, so it waits in the record for the next click, which re-arms it.
-        if (!this.reachable(live)) return;
         live.record.timers = live.record.timers.filter(entry => entry.id !== id);
         void this.background(live, { kind: 'timer', id }, `timer ${id}`);
       }));
@@ -406,6 +425,9 @@ export class PlayRuntime {
   }
 
   private release(live: Live): void {
+    live.sleeper?.();
+    live.sleeper = undefined;
+    live.awakeUntil = undefined;
     for (const cancel of live.timers.values()) cancel();
     live.timers.clear();
     live.engine?.dispose();
@@ -456,7 +478,7 @@ export class PlayRuntime {
       const record: PlayRecord = {
         id: randomBytes(8).toString('hex').slice(0, 10), title: clip(options.title, 100), owner: options.owner, channelId: options.channelId, conversation: options.conversation,
         participants: 'everyone', source: options.source, state: null, seed: randomBytes(4).readUInt32LE(), view: {}, emojis: options.emojis ?? {},
-        timers: [], consults: [], status: 'running', log: [], interacted: false, createdAt: now, updatedAt: now,
+        timers: [], consults: [], status: 'running', log: [], createdAt: now, updatedAt: now,
         ...(options.post ? { viaInteraction: true } : {}), ...(options.file ? { file: options.file } : {}),
       };
       const meta = (await engine.call('meta', { ctx: this.context(record) })).value as { participants?: unknown } | null;
@@ -471,6 +493,8 @@ export class PlayRuntime {
         live.reach = { edit: posted.edit, until: this.now() + interactionLifetimeMs };
       } else record.messageId = await this.options.surface.post(record.channelId, ready);
       this.live.set(record.id, live);
+      // Posting is activity, so a game with its own clock runs from here until ten minutes with nobody playing.
+      this.wake(live);
       this.commit(live, step, 'start');
       return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
     } catch (error) { engine.dispose(); throw error; }
@@ -483,7 +507,7 @@ export class PlayRuntime {
     return this.serial(live, async () => {
       const engine = source ? await this.build(source) : await this.engine(live);
       // Starting a timer by hand is deliberate, so it runs without waiting for anyone to play.
-      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(start.length ? { interacted: true } : {}), ...(reset ? { state: null, timers: [] } : {}) };
+      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
       const added: string[] = [];
       try {
         // Kept state lacks what the new version's init() adds (a leaderboard, a weather field); fill those in.
@@ -502,13 +526,15 @@ export class PlayRuntime {
           return { state: record.state, seed: shown.seed, view: view as View, payload, effects: [], timers: record.timers } satisfies Advance;
         })();
         const started = checkEffects(start.map(timer => ({ type: 'after', ...timer }))) as Array<Extract<Effect, { type: 'after' }>>;
-        step.timers = [...step.timers.filter(timer => !started.some(entry => entry.id === timer.id)), ...started.map(timer => ({ id: timer.id, ms: timer.ms, dueAt: this.now() + timer.ms }))];
+        step.timers = [...step.timers.filter(timer => !started.some(entry => entry.id === timer.id)), ...started.map(timer => ({ id: timer.id, ms: timer.ms }))];
         if (step.timers.length > playLimits.timers) throw new PlayError(`An app may have ${playLimits.timers} timers pending.`);
         const notes = await this.probe(engine, record, step, !reset);
         if (live.engine !== engine) live.engine?.dispose();
         live.engine = engine;
         live.record = record;
         this.commit(live, step, reset ? 'restart' : 'update');
+        // Starting a timer by hand is deliberate, so it runs without waiting for anyone to play.
+        if (start.length) this.wake(live);
         // The change lands even where the message cannot show it yet; the next click does.
         if (this.reachable(live)) await this.show(live, step.payload);
         else notes.push('No one has used the app for 15 minutes, so Discord shows this change at the next click.');
@@ -521,7 +547,7 @@ export class PlayRuntime {
   /** A dry run with no message, persistence or timers, so the model can check an app before posting it. */
   async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean; state?: unknown; conversation?: string } = {}): Promise<string> {
     const engine = await this.build(source);
-    const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: options.conversation ?? '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], interacted: true, createdAt: 0, updatedAt: 0 };
+    const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: options.conversation ?? '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], createdAt: 0, updatedAt: 0 };
     const lines: string[] = [];
     let last: string[] = [];
     // Actions that change nothing (a move into a wall, a turn out of order) are easy to miss in the final state alone.
@@ -604,8 +630,8 @@ export class PlayRuntime {
       record.channelId = target.channelId; record.updatedAt = this.now();
       this.remember(record, 'resend');
       this.options.store.save(record);
-      // Timers held back while nothing could edit the message run again now that something can.
-      this.arm(live);
+      // Timers a hibernating app was holding run again now that it has been brought back.
+      this.wake(live);
       if (old.messageId) {
         const stub: MessagePayload = { content: `-# ${moved}`, embeds: [], components: [], allowedMentions: { parse: [] } };
         await (old.viaInteraction ? old.reach?.edit(stub) : this.options.surface.edit(old.channelId, old.messageId, stub))
@@ -643,13 +669,13 @@ export class PlayRuntime {
       return Boolean(control && !control.disabled && (control.type === 'select') === (interaction.kind === 'select'));
     };
     if (!current()) { await interaction.reply('That control is no longer available.'); return; }
-    // Someone is playing now, so any clock the app has been holding starts from here.
-    record.interacted = true;
     const control = interaction.kind === 'button' ? findControl(record.view, interaction.controlId) : undefined;
-    if (control?.type === 'button' && control.opens) { await interaction.openModal(renderModal(record.id, control.opens)); return; }
+    if (control?.type === 'button' && control.opens) { this.wake(live); await interaction.openModal(renderModal(record.id, control.opens)); return; }
     await interaction.defer();
     // Each click can edit the message for its own 15 minutes, which keeps an app posted through an interaction alive.
     if (record.viaInteraction) live.reach = { edit: payload => interaction.update(payload), until: this.now() + interactionLifetimeMs };
+    // Someone is playing now, so the app runs again, and any clock it was holding starts from here.
+    this.wake(live);
     await this.serial(live, async () => {
       if (live.record.status !== 'running') { await interaction.followUp('This app has ended.'); return; }
       if (!current()) { await interaction.followUp('That control changed before your action arrived.'); return; }
@@ -665,7 +691,11 @@ export class PlayRuntime {
     });
   }
 
-  /** Reloads running apps after a restart. Engines load on first use; trusted apps are re-checked then. */
+  /**
+   * Reloads running apps after a restart. They come back hibernating, whatever they were doing before, so a
+   * restart never sets abandoned games ticking again; the next click starts their clocks with the wait they
+   * had left. Engines load on first use; trusted apps are re-checked then.
+   */
   async recover(): Promise<number> {
     let count = 0;
     for (const record of this.options.store.all()) {
@@ -675,13 +705,14 @@ export class PlayRuntime {
         else if (record.status === 'paused') this.live.set(record.id, { record, timers: new Map(), consulting: false, chain: Promise.resolve() });
         continue;
       }
+      // A crash can leave a deadline behind, and how much of it was spent is not knowable, so the wait starts whole.
+      record.timers = record.timers.map(({ id, ms }) => ({ id, ms: ms ?? 0 }));
       const live: Live = { record, timers: new Map(), consulting: false, chain: Promise.resolve() };
       this.live.set(record.id, live);
       if (record.source.kind === 'trusted' && await hashFile(record.source.path).catch(() => undefined) !== record.source.sha256) {
         await this.halt(live, 'paused', 'Paused: the trusted app file changed while teapilot was stopped. Ask teapilot to update it to re-approve.');
         continue;
       }
-      this.arm(live);
       count++;
     }
     this.report();
@@ -710,7 +741,8 @@ export class PlayRuntime {
   close(): void {
     this.sweeper?.();
     this.sweeper = undefined;
-    for (const live of this.live.values()) this.release(live);
+    // Whatever each clock had left is put away first, so the next start picks it up where it stood.
+    for (const live of this.live.values()) { this.hibernate(live); this.release(live); }
   }
 }
 

@@ -179,7 +179,7 @@ it('runs teapilot discord start against the simulator: a model builds an app, pe
 
   await server.stop();
   server = serve();
-  await vi.waitFor(() => expect(world.logs).toContain('Resumed 1 discord.play app(s).'));
+  await vi.waitFor(() => expect(world.logs).toContain('Loaded 1 discord.play app(s); each one starts again at the next click.'));
   expect(await world.click('op', app.id, 'add')).toContain('Count 2');
 }, 60_000);
 
