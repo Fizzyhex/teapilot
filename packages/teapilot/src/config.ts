@@ -67,7 +67,9 @@ export const policySchema = z.object({
   permissions: z.array(z.enum(['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'discord.play'])),
   disabledCapabilities: z.array(z.string()),
   budget: z.object({ requestUsd: money, dailyUsd: money, approvalThresholdUsd: money }).strict(),
-  limits: z.object({ maxTurns: z.number().int().min(1).max(100), maxToolCalls: z.number().int().min(1).max(300), attemptTimeoutMs: z.number().int().min(1000).max(3_600_000), requestTimeoutMs: z.number().int().min(1000).max(120_000), commandTimeoutSeconds: z.number().int().min(1).max(600), maxPromptChars: z.number().int().min(1).max(20_000) }).strict(),
+  limits: z.object({ maxTurns: z.number().int().min(1).max(100), maxToolCalls: z.number().int().min(1).max(300), attemptTimeoutMs: z.number().int().min(1000).max(3_600_000), requestTimeoutMs: z.number().int().min(1000).max(120_000), commandTimeoutSeconds: z.number().int().min(1).max(600), maxPromptChars: z.number().int().min(1).max(20_000),
+    /** delegate_task messages one attempt may send to its juniors (agents/delegate.ts); 6 when unset. */
+    maxJuniorTurns: z.number().int().min(0).max(30).optional() }).strict(),
   escalation: z.object({ maxEscalations: z.number().int().min(0).max(3), consecutiveFailures: z.number().int().min(1).max(10), repeatedToolCalls: z.number().int().min(2).max(10) }).strict(),
   execution: z.object({ trustedCommands: z.array(z.string().min(1)), largeOverwriteBytes: z.number().int().min(1) }).strict(),
   /** deepEffort: the reasoning level the deep tier runs (medium unless xhigh is opted into). */
@@ -89,6 +91,8 @@ export interface Config {
   scratchpad?: { enabled: boolean };
   /** Summarising earlier context when it nears the model's limit (agents/compaction.ts); TEAPILOT_COMPACTION=off turns it off. */
   compaction?: { enabled: boolean };
+  /** Handing parts of a large request to juniors (agents/delegate.ts); TEAPILOT_DELEGATION=off turns it off. */
+  delegation?: { enabled: boolean };
   /** Hooks for evaluating teapilot (see readTestHooks); each is off unless its variable is set. */
   test?: TestHooks;
   secrets: Record<PhysicalModel, string | undefined>;
@@ -180,7 +184,7 @@ export async function loadConfig(root?: string, env = process.env): Promise<Conf
   if (env.DAILY_BUDGET_USD) policy.budget.dailyUsd = money.parse(Number(env.DAILY_BUDGET_USD));
   const provider = z.enum(['typesafe', 'openrouter']).parse(env.JEV_PROVIDER || 'typesafe');
   const secrets = Object.fromEntries(physicalModels.map(key => [key, env[models[key].apiKeyEnv] || undefined])) as Config['secrets'];
-  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, webReader: { mode: z.enum(readerModes).parse(env.WEB_READER || 'auto'), agentBrowserBin: env.AGENT_BROWSER_BIN || undefined }, teachat: readTeachatSettings(env, root), workspace: readWorkspaceSettings(env), scratchpad: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_SCRATCHPAD || 'on') === 'on' }, compaction: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_COMPACTION || 'on') === 'on' }, test: readTestHooks(env, root), secrets };
+  return { source: { directory: root, reason: explicit ? '--config-dir / explicit selection' : root === process.cwd() ? 'launch directory contains teapilot configuration' : 'personal profile', overrides, warnings: migrated.warnings }, routingMode: z.enum(['hosted', 'direct']).parse(env.TEAPILOT_ROUTING_MODE || 'hosted'), models, policy, stateDir: resolve(root, env.TEAPILOT_STATE_DIR || resolve(homedir(), '.teapilot')), router: { provider, model: env.JEV_MODEL || undefined, apiKey: provider === 'typesafe' ? env.TYPESAFE_API_KEY || env.JEV_API_KEY : env.OPENROUTER_API_KEY, endpoint: env.JEV_API_URL ? endpoint.parse(env.JEV_API_URL) : undefined, maxCallUsd: money.positive().parse(Number(env.JEV_MAX_CALL_USD || '0.01')), usdPerMillionTokens: env.JEV_USD_PER_MILLION_TOKENS ? money.parse(Number(env.JEV_USD_PER_MILLION_TOKENS)) : undefined }, searchUrl: env.SEARCH_BASE_URL ? endpoint.parse(env.SEARCH_BASE_URL) : undefined, webReader: { mode: z.enum(readerModes).parse(env.WEB_READER || 'auto'), agentBrowserBin: env.AGENT_BROWSER_BIN || undefined }, teachat: readTeachatSettings(env, root), workspace: readWorkspaceSettings(env), scratchpad: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_SCRATCHPAD || 'on') === 'on' }, compaction: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_COMPACTION || 'on') === 'on' }, delegation: { enabled: z.enum(['on', 'off']).parse(env.TEAPILOT_DELEGATION || 'on') === 'on' }, test: readTestHooks(env, root), secrets };
 }
 const hosts = (value: string | undefined) => (value ?? '').split(',').map(host => host.trim().toLowerCase()).filter(Boolean);
 function readWorkspaceSettings(env: NodeJS.ProcessEnv): WorkspaceSettings {

@@ -14,8 +14,12 @@ export function terminalColour(tty: boolean | undefined, env = process.env): boo
 }
 const paint = (text: string, code: string, enabled: boolean) => enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
 
-/** One line summarising a completed tool call, for a per-call progress trail. */
+/** One line summarising a completed tool call, for a per-call progress trail; a junior's calls carry its name. */
 export function describeTool(event: HostEvent): string {
+  return (typeof event.junior === 'string' ? `${event.junior}: ` : '') + describeCall(event);
+}
+
+function describeCall(event: HostEvent): string {
   const tool = String(event.tool ?? '');
   const suffix = event.refused ? ' — refused' : event.isError ? ' — failed' : '';
   const path = typeof event.path === 'string' ? event.path : undefined;
@@ -26,6 +30,7 @@ export function describeTool(event: HostEvent): string {
   if (tool === 'read' && path) return `read ${path}${suffix}`;
   if (typeof event.command === 'string') return `shell: ${event.command}${suffix}`;
   if (tool === 'web_read' && typeof event.url === 'string') return `web_read ${event.url}${suffix}`;
+  if (tool === 'delegate_task' && typeof event.to === 'string') return `delegate_task → ${event.to}${suffix}`;
   return `${tool}${suffix}`;
 }
 
@@ -443,7 +448,7 @@ export class TerminalPresentation implements ActivityUI {
       else { this.markdown.push(event.text); this.showPreview(); this.draw(); }
     } else if (event.type === 'route') this.casual = event.casual === true;
     else if (event.type === 'message_end') { this.clear(); this.endMessage(); this.draw(); }
-    else if (event.type === 'tool_execution_start') this.setActivity({ kind: 'waiting', label: `Running ${String(event.tool)}...` });
+    else if (event.type === 'tool_execution_start') this.setActivity({ kind: 'waiting', label: `${typeof event.junior === 'string' ? `${event.junior}: ` : ''}Running ${String(event.tool)}...` });
     else if (event.type === 'tool_execution_end') this.write(`${paint(describeTool(event), '2', this.colour)}\n`);
     else if (event.type === 'compaction' || event.type === 'compaction_failed') this.write(`${paint(describeCompaction(event), '2', this.colour)}\n`);
     else if (event.type === 'request_end' || event.type === 'request_error') this.pause();
