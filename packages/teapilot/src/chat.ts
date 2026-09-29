@@ -9,12 +9,58 @@ import type { EventSink } from './integration/events.js';
 import type { SessionWorkspace } from './workspace/terminal.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
-const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /btw <question>, /exit, /quit`;
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /btw <question>, /plan <idea>, /exit, /quit`;
 
 const keptSteps = 6;
 
 /** A side question: `/btw` and what follows, answered from the conversation without joining it. */
 export const isAside = (text: string): boolean => /^\/btw(?:\s|$)/i.test(text.trim());
+
+/** A request for a proposal: `/plan` and what follows, sent as an ordinary turn that asks for a plan and no changes yet. */
+export const isPlan = (text: string): boolean => /^\/plan(?:\s|$)/i.test(text.trim());
+
+const planTemplate = `Hi, your job is to plan out this feature:
+
+---
+
+%prompt%
+
+---
+
+CRITICAL: DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"! Your reply MUST use the template below, starting with the "<plan>" tag - with NOTHING else extra.
+
+\`\`\`template
+<plan>
+# Proposal name
+
+## Summary
+
+Briefly explain the proposal, its purpose, and intended outcome.
+
+## Motivation
+
+Describe the problem or opportunity, relevant use cases, and why this is worth doing.
+
+## Design
+
+Explain the proposed approach in enough detail to understand how it would work. Cover key decisions, constraints, dependencies, responsibilities, and practical examples where useful.
+
+## Drawbacks
+
+Identify the main risks, costs, trade-offs, and reasons not to proceed.
+
+## Alternatives
+
+Describe other approaches considered, including doing nothing, and their likely impact.
+
+## Prior Art
+
+Reference similar approaches used elsewhere or internally. Compare relevant patterns, supporting practices, and constraints, and note how this proposal aligns or differs.
+</plan>
+\`\`\``;
+
+/** The idea wrapped in the planning template. */
+export const planPrompt = (idea: string): string => planTemplate.replace('%prompt%', () => idea);
 
 /** Optional behaviour layered on a session, such as teachat. Every hook is awaited in turn order. */
 export interface SessionExtension {
@@ -92,6 +138,17 @@ export async function runSession(options: {
       prompt = '';
       if (options.once) break;
       continue;
+    }
+    // A plan request is an ordinary turn, so the proposal stays in the conversation for the talk that follows.
+    if (isPlan(prompt)) {
+      const idea = prompt.slice(5).trim();
+      if (!idea) {
+        options.log?.('/plan <idea> asks for a proposal to discuss before any changes are made.');
+        prompt = '';
+        if (options.once) break;
+        continue;
+      }
+      prompt = planPrompt(idea);
     }
     if (prompt.startsWith('/')) {
       const [command, value, extra] = prompt.split(/\s+/);

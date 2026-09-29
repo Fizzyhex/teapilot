@@ -71,7 +71,7 @@ async function playWorld() {
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   let runtime!: PlayRuntime;
   const gateway = await world.connect({ token: 't', allowedUserIds: [people.op.id], channelIds: [channelId], root: directory, startMode: 'ask' },
-    { message: vi.fn(), command: vi.fn(), reply: vi.fn(), component: interaction => void runtime.interact(interaction) }, vi.fn());
+    { message: vi.fn(), command: vi.fn(), reply: vi.fn(), component: interaction => void runtime.interact(interaction), asides: { keep: vi.fn(), find: vi.fn(), summarise: vi.fn() } }, vi.fn());
   runtime = new PlayRuntime({ store: new PlayStore(directory), surface: gateway.play, log: world.log, clock });
   cleanups.push(() => runtime.close());
   const { record } = await runtime.start({ title: 'Counter', channelId, conversation: 'dm:x', owner: { id: people.op.id, name: 'op' }, source: { kind: 'sandbox', code: counter } });

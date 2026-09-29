@@ -54,11 +54,14 @@ async function oneShots() {
     authorId, authorIsBot: false, authorName: authorId, channelId: `dm-${authorId}`, ownThread: false, mentionsBot: false, content: text, attachments: [],
     transport: () => transport, replyTransport: () => { replies.push(text); return transport; },
     startThread: () => Promise.reject(new Error('no threads')), replyChain: async () => ({ messages: [], truncated: false }),
+    react: async emoji => { reactions.push(`${text} ${emoji}`); },
   });
+  /** Reactions teapilot added, each with the message text it went on. */
+  const reactions: string[] = [];
   /** Messages answered as replies to them. */
   const replies: string[] = [];
   const asides = (count: number) => vi.waitFor(() => expect(sent.filter(text => /-# this is an aside/.test(text))).toHaveLength(count), { timeout: 20_000 });
-  return { typed: () => typed, prompts, tools, sent, replies, reply, message, results, asides, command, notes, press: (index: number) => { pick = index; } };
+  return { typed: () => typed, prompts, tools, sent, replies, reply, message, reactions, results, asides, command, notes, press: (index: number) => { pick = index; } };
 }
 
 it('continues one history per person per channel across one-shot replies, and /clear ends it', async () => {
@@ -138,6 +141,27 @@ it('answers /btw from the conversation, with read-only tools, and keeps it out o
   expect(prompts[2]).toContain('oolong');
   expect(prompts[2]).not.toContain('what is my name');
   expect(prompts[2]).not.toContain('answer 2');
+}, 60_000);
+
+it('sends a /plan message to the conversation as a planning request', async () => {
+  const { prompts, sent, message } = await oneShots();
+  message('op', '/plan a tea timer');
+  await vi.waitFor(() => expect(sent).toContain('answer 1'), { timeout: 20_000 });
+  expect(prompts[0]).toContain('a tea timer');
+  expect(prompts[0]).toContain('DO NOT MAKE ANY CHANGES');
+  message('op', 'go ahead');
+  await vi.waitFor(() => expect(prompts).toHaveLength(2), { timeout: 20_000 });
+  expect(prompts[1]).toContain('a tea timer');
+}, 60_000);
+
+it('reacts with a light bulb to a /plan message that has an idea, and to nothing else', async () => {
+  const { sent, message, reactions } = await oneShots();
+  message('op', '/plan');
+  message('op', 'hello');
+  await vi.waitFor(() => expect(sent).toContain('answer 1'), { timeout: 20_000 });
+  expect(reactions).toEqual([]);
+  message('op', '/plan a tea timer');
+  await vi.waitFor(() => expect(reactions).toEqual(['/plan a tea timer 💡']));
 }, 60_000);
 
 it('answers a /btw message in a DM publicly without adding it to the conversation', async () => {

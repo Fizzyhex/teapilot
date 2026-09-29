@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, Attachment, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, ClientOptions, Message, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels } from 'discord.js';
+import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, Attachment, BaseMessageOptions, ButtonBuilder, ButtonInteraction, ChatInputCommandInteraction, ClientOptions, Message, MessageActionRowComponentBuilder, MessageContextMenuCommandInteraction, RequestMethod, RouteLike, SendableChannels, StringSelectMenuInteraction } from 'discord.js';
 import type { IncomingMessage } from './access.js';
+import type { SideAnswer } from './aside-store.js';
 import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
 import { attachmentOption, collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
 import { isAside } from '../chat.js';
@@ -30,6 +31,8 @@ export interface GatewayMessage extends IncomingMessage {
   startThread(name: string): Promise<{ id: string; transport: DiscordTransport }>;
   /** The messages this one replies to; fetched on demand, so only routed messages pay for it. */
   replyChain(): Promise<ReplyChain>;
+  /** Adds an emoji reaction to this message, as quiet feedback that it was understood. */
+  react(emoji: string): Promise<void>;
 }
 /** A slash command from an allowlisted-or-not user; `text` is the equivalent session command. */
 export interface GatewayCommand extends IncomingMessage {
@@ -38,7 +41,7 @@ export interface GatewayCommand extends IncomingMessage {
   respond(text?: string): Promise<void>;
 }
 /** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
-export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'replyTransport'> {
+export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'replyTransport' | 'react'> {
   title: string;
   /** Interaction id, unique per invocation. */
   id: string;
@@ -80,6 +83,14 @@ export interface GatewayHandlers {
   reply(reply: GatewayReply): void;
   /** A click, selection or form on a discord.play app, from anyone; the runtime decides who may act. */
   component(interaction: PlayInteraction): void;
+  /** Side answers (/btw) posted compactly or summarised. */
+  asides: {
+    /** Saves an answer posted compactly, and returns the id its button carries. */
+    keep(answer: SideAnswer): string;
+    find(id: string): SideAnswer | undefined;
+    /** A shorter answer with its sources inline, for everyone in the channel. */
+    summarise(answer: SideAnswer): Promise<string>;
+  };
 }
 export interface Gateway {
   botName: string;
@@ -97,10 +108,22 @@ const noop = () => undefined;
 const choicePrefix = 'teapilot-choice:';
 /** Custom id prefix of status card buttons: `teapilot-card:<button>`; the card's message id finds its turn. */
 const cardPrefix = 'teapilot-card:';
-/** Custom id prefix of a side answer's Post to channel button: `teapilot-btw:<nonce>`. */
+/** Custom id prefix of a side answer's share menu: `teapilot-btw:<nonce>`. */
 const sidePrefix = 'teapilot-btw:';
-/** A private side answer (/btw), kept so its asker can post it for everyone. */
-interface SideAnswer { userId: string; question: string; parts: Array<{ text: string; files: Array<{ name: string; data: Buffer }> }> }
+/** Custom id prefix of a compactly posted side answer's button: `teapilot-btw-show:<id>`, the id in the aside store. */
+const showPrefix = 'teapilot-btw-show:';
+/** Custom id prefix of a side answer's summary preview buttons: `teapilot-btw-summary:<nonce>:post|cancel`. */
+const summaryPrefix = 'teapilot-btw-summary:';
+/** A private side answer (/btw), kept so its asker can post it for everyone; `summary` is the preview waiting to be posted. */
+interface PendingAside extends SideAnswer { summary?: string; summarising?: boolean }
+/** How a side answer can be shared, in its menu. */
+const shareOptions = [
+  { value: 'full', label: 'Post as is', description: 'Just send the full message.' },
+  { value: 'compact', label: 'Post compactly', description: 'Post a button that expands to show the full message.' },
+  { value: 'summary', label: 'Summarise further', description: 'Cut down the message before sending it.' },
+];
+/** The line above a side answer posted for everyone: who asked, and what. */
+const askedBy = (answer: SideAnswer) => `-# <@${answer.userId}> asked: ${answer.question.replace(/^\/btw\s*/i, '').replace(/\s+/g, ' ').slice(0, 300)}`;
 /** Status cards whose buttons still answer; the oldest are forgotten first. */
 const cardLimit = 500;
 /** Discord's limit on a custom status. */
@@ -139,7 +162,7 @@ function restAgent(): NonNullable<NonNullable<ClientOptions['rest']>['agent']> {
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
 export async function connect(settings: DiscordSettings, handlers: GatewayHandlers, log: (text: string) => void): Promise<Gateway> {
-  const { ActionRowBuilder, ActivityType, ApplicationIntegrationType, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, InteractionContextType, MessageFlags, MessageReferenceType, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
+  const { ActionRowBuilder, ActivityType, ApplicationIntegrationType, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, InteractionContextType, MessageFlags, MessageReferenceType, Partials, PermissionFlagsBits, StringSelectMenuBuilder, ThreadAutoArchiveDuration } = await import('discord.js');
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Channel],
@@ -207,7 +230,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
    * Discord keeps that webhook valid for 15 minutes, and there is no typing indicator or thread.
    */
   const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction,
-    { hidden = false, buttons = () => [] }: { hidden?: boolean; buttons?: () => Array<ActionRowBuilder<ButtonBuilder>> } = {}): DiscordTransport => {
+    { hidden = false, buttons = () => [] }: { hidden?: boolean; buttons?: () => Array<ActionRowBuilder<MessageActionRowComponentBuilder>> } = {}): DiscordTransport => {
     const expires = Date.now() + interactionLifetimeMs;
     // A click has no deferred message of its own: its reply is the note it was pressed on, so everything is a follow-up.
     let first = !interaction.isButton();
@@ -240,16 +263,17 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   };
 
   /**
-   * A side answer (/btw) through an interaction: only the asker sees it, and each message carries a button that posts
-   * everything answered so far, with the question, for the whole channel.
+   * A side answer (/btw) through an interaction: only the asker sees it, and each message carries a menu that shares
+   * everything answered so far, with the question, with the whole channel: as it is, behind a button, or summarised.
    */
   const sideTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction, question: string): DiscordTransport => {
     const nonce = randomUUID();
-    const answer: SideAnswer = { userId: interaction.user.id, question, parts: [] };
+    const answer: PendingAside = { userId: interaction.user.id, question, parts: [] };
     sideAnswers.set(nonce, answer);
     setTimeout(() => sideAnswers.delete(nonce), interactionLifetimeMs).unref?.();
-    const button = () => [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`${sidePrefix}${nonce}`).setLabel('Post to channel').setStyle(ButtonStyle.Secondary))];
-    const base = interactionTransport(interaction, { hidden: true, buttons: button });
+    const menu = () => [new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new StringSelectMenuBuilder().setCustomId(`${sidePrefix}${nonce}`).setPlaceholder('Post to channel?').addOptions(shareOptions))];
+    const base = interactionTransport(interaction, { hidden: true, buttons: menu });
     return {
       ...base,
       async send(text) { answer.parts.push({ text, files: [] }); return await base.send(text); },
@@ -269,9 +293,68 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
    */
   const interactionReplies = new Map<string, RawMessage>();
   /** Side answers that can still be posted to their channel, by nonce. */
-  const sideAnswers = new Map<string, SideAnswer>();
+  const sideAnswers = new Map<string, PendingAside>();
   /** Open `choose()` notes by nonce: who may press them, and what the press resolves. */
   const choices = new Map<string, { userId: string; resolve(click: GatewayChoice | undefined): void }>();
+
+  /** The side answer behind a menu or preview, if it is still the clicker's to post; otherwise a private note says why not. */
+  const pendingAside = async (interaction: ButtonInteraction | StringSelectMenuInteraction, nonce: string): Promise<PendingAside | undefined> => {
+    const answer = sideAnswers.get(nonce);
+    if (!answer) { await interaction.reply({ content: 'This answer can no longer be posted: it was posted already, is too old, or teapilot restarted since.', flags: MessageFlags.Ephemeral }).catch(noop); return undefined; }
+    if (answer.userId !== interaction.user.id) { await interaction.reply({ content: 'Only the person who asked can post this answer.', flags: MessageFlags.Ephemeral }).catch(noop); return undefined; }
+    return answer;
+  };
+  /** A side answer's messages, `askedBy` above the first, each part's files after its last piece. */
+  const sendAside = async (answer: SideAnswer, send: (content: string, files: ReturnType<typeof attachments>) => Promise<unknown>) => {
+    for (const [index, part] of answer.parts.entries()) {
+      const pieces = chunk(index ? part.text : `${askedBy(answer)}\n${part.text}`);
+      for (const [at, piece] of pieces.entries()) await send(piece, at === pieces.length - 1 ? attachments(part.files) : []);
+    }
+  };
+  const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+  /** The asker picked how to share a side answer from its menu. */
+  const share = async (interaction: StringSelectMenuInteraction, nonce: string) => {
+    const answer = await pendingAside(interaction, nonce);
+    if (!answer) return;
+    const choice = interaction.values[0];
+    if (choice === 'summary') {
+      if (answer.summarising) { await interaction.reply({ content: 'This answer is already being summarised.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+      answer.summarising = true;
+      // The menu stays, so the asker can still post it another way; the preview is a note of its own.
+      await interaction.deferUpdate().catch(noop);
+      try {
+        // Without embeds the preview looks as the post will: sources stay links rather than previews.
+        const note = await interaction.followUp({ content: '-# Summarising…', flags: MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, ...quiet });
+        try {
+          const summary = await handlers.asides.summarise(answer);
+          if (!summary) throw new Error('The model sent back nothing.');
+          answer.summary = summary;
+          const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`${summaryPrefix}${nonce}:post`).setLabel('Post').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`${summaryPrefix}${nonce}:cancel`).setLabel('Cancel').setStyle(ButtonStyle.Secondary));
+          await interaction.webhook.editMessage(note.id, { content: chunk(`${askedBy(answer)}\n${summary}`)[0]!, components: [row], ...quiet });
+        } catch (error) {
+          log(`Discord: side answer not summarised: ${failure(error)}`);
+          await interaction.webhook.editMessage(note.id, { content: `Could not summarise it: ${failure(error)}`.slice(0, MESSAGE_LIMIT), ...quiet }).catch(noop);
+        }
+      } finally { answer.summarising = false; }
+      return;
+    }
+    sideAnswers.delete(nonce);
+    // Take the menu off the private answer, then post publicly as follow-ups to the pick.
+    await interaction.update({ components: [] }).catch(noop);
+    try {
+      if (choice === 'compact') {
+        const id = handlers.asides.keep(answer);
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`${showPrefix}${id}`).setLabel('Show answer').setStyle(ButtonStyle.Secondary));
+        await interaction.followUp({ content: askedBy(answer), components: [row], ...quiet });
+      } else await sendAside(answer, (content, files) => interaction.followUp({ content, files, ...quiet }));
+    } catch (error) {
+      log(`Discord: side answer not posted: ${failure(error)}`);
+      await interaction.followUp({ content: 'That answer could not be posted here.', flags: MessageFlags.Ephemeral }).catch(noop);
+    }
+  };
 
   /**
    * The messages `message` replies to, oldest first, for mentions and the Reply menu. Discord drops an
@@ -453,6 +536,10 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       });
       return;
     }
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith(sidePrefix)) {
+      await share(interaction, interaction.customId.slice(sidePrefix.length));
+      return;
+    }
     if (!interaction.isButton()) return;
     if (interaction.customId.startsWith(choicePrefix)) {
       const [nonce, index] = interaction.customId.slice(choicePrefix.length).split(':');
@@ -469,25 +556,34 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       });
       return;
     }
-    if (interaction.customId.startsWith(sidePrefix)) {
-      const nonce = interaction.customId.slice(sidePrefix.length);
-      const answer = sideAnswers.get(nonce);
-      if (!answer) { await interaction.reply({ content: 'This answer can no longer be posted: it was posted already, is too old, or teapilot restarted since.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
-      if (answer.userId !== interaction.user.id) { await interaction.reply({ content: 'Only the person who asked can post this answer.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
-      sideAnswers.delete(nonce);
-      // Take the button off the private answer, then post the question and answer publicly as follow-ups to the click.
-      await interaction.update({ components: [] }).catch(noop);
-      const heading = `-# <@${answer.userId}> asked: ${answer.question.replace(/^\/btw\s*/i, '').replace(/\s+/g, ' ').slice(0, 300)}`;
+    if (interaction.customId.startsWith(showPrefix)) {
+      // Anyone in the channel may look; the answer shows to them alone, so the button keeps working for everyone else.
+      const answer = handlers.asides.find(interaction.customId.slice(showPrefix.length));
+      if (!answer) { await interaction.reply({ content: 'This answer is no longer available.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
       try {
-        for (const [index, part] of answer.parts.entries()) {
-          const pieces = chunk(index ? part.text : `${heading}\n${part.text}`);
-          for (const [at, piece] of pieces.entries()) {
-            await interaction.followUp({ content: piece, files: at === pieces.length - 1 ? attachments(part.files) : [], ...quiet });
-          }
-        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        let first = true;
+        await sendAside(answer, (content, files) => {
+          if (!first) return interaction.followUp({ content, files, flags: MessageFlags.Ephemeral, ...quiet });
+          first = false;
+          return interaction.editReply({ content, files, ...quiet });
+        });
+      } catch (error) { log(`Discord: side answer not shown: ${failure(error)}`); }
+      return;
+    }
+    if (interaction.customId.startsWith(summaryPrefix)) {
+      const [nonce, action] = interaction.customId.slice(summaryPrefix.length).split(':');
+      const answer = await pendingAside(interaction, nonce ?? '');
+      if (!answer) return;
+      if (action !== 'post' || !answer.summary) { await interaction.update({ content: '-# Summary not posted.', components: [] }).catch(noop); return; }
+      sideAnswers.delete(nonce!);
+      await interaction.update({ components: [] }).catch(noop);
+      try {
+        // Sources are inline links; without embeds they stay links instead of cluttering the channel with previews.
+        await sendAside({ ...answer, parts: [{ text: answer.summary, files: [] }] }, content => interaction.followUp({ content, flags: MessageFlags.SuppressEmbeds, ...quiet }));
       } catch (error) {
-        log(`Discord: side answer not posted: ${error instanceof Error ? error.message : String(error)}`);
-        await interaction.followUp({ content: 'That answer could not be posted here.', flags: MessageFlags.Ephemeral }).catch(noop);
+        log(`Discord: side answer summary not posted: ${failure(error)}`);
+        await interaction.followUp({ content: 'That summary could not be posted here.', flags: MessageFlags.Ephemeral }).catch(noop);
       }
       return;
     }
@@ -532,6 +628,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       replyChain: () => replyChain(message, self.id),
       transport: () => transport(channel),
       replyTransport: () => transport(channel, message),
+      react: async emoji => { await message.react(emoji); },
       async startThread(name) {
         const created = await message.startThread({ name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay });
         return { id: created.id, transport: transport(created) };

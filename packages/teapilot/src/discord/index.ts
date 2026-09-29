@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpath, rm } from 'node:fs/promises';
-import { isAside } from '../chat.js';
+import { isAside, isPlan } from '../chat.js';
 import { loadConfig, type Config } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
 import { runHost, type HostRequest } from '../host.js';
@@ -8,6 +8,7 @@ import { headlessTeachat, openHeadlessTeachat } from '../teachat/session.js';
 import type { SetupUI } from '../setup/terminal.js';
 import { route, routeReply } from './access.js';
 import { AccessStore } from './access-store.js';
+import { AsideStore } from './aside-store.js';
 import { HistoryStore } from './history-store.js';
 import { SeatStore, type Seat } from './seat-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
@@ -16,6 +17,7 @@ import { receiveFiles } from '../workspace/attach.js';
 import { SrtSandbox } from '../workspace/sandbox.js';
 import { WorkspaceStore } from '../workspace/store.js';
 import { consultant } from './play/consult.js';
+import { summariser } from './summarise.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
 import { PlayStore } from './play/store.js';
 import type { connect, Gateway, GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
@@ -75,6 +77,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
   const histories = HistoryStore.at(stateDir);
+  /** Side answers posted compactly, which their buttons show for as long as the post stays up. */
+  const asides = AsideStore.at(stateDir);
   /**
    * The bot's custom status: the games running, the requests answered and the rounds gossipped, this session only.
    * It is bound to the gateway once connected, and each count feeds it from where that count changes.
@@ -197,6 +201,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     if (!target) return;
     access.rememberName(message.authorId, message.authorName);
     if (!message.content && !message.attachments.length) { await message.transport().send('teapilot reads text messages and attachments only.'); return; }
+    // A plan request with an idea gets a light bulb, so it is clear the message was taken as one; a missing reaction permission is not worth failing over.
+    if (isPlan(message.content) && message.content.trim().slice(5).trim()) await message.react('💡').catch(error => log(`Discord: could not react: ${error instanceof Error ? error.message : String(error)}`));
     if (isAside(message.content)) {
       // A message cannot be answered privately, so the answer is public, as a reply to it; a mention in a channel is answered in place, without a thread.
       const historyKey = target.kind === 'new-thread' ? undefined : target.key;
@@ -334,6 +340,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     command: command => void handleCommand(command).catch(failed('Command handling')),
     reply: reply => void handleReply(reply).catch(failed('Reply handling')),
     component: interaction => void (surface ? play.interact(interaction) : interaction.reply('teapilot is still starting; try again in a moment.')).catch(failed('App interaction')),
+    asides: { keep: answer => asides.keep(answer), find: id => asides.find(id), summarise: summariser({ config, root, access, queue, run, signal }) },
   }, log);
   surface = gateway.play;
   setStatus = gateway.setStatus;

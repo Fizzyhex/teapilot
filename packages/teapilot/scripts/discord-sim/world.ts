@@ -39,6 +39,8 @@ export interface Message {
   /** The message this one replies to; teapilot's replies never ping. */
   replyTo?: string;
   edits: number;
+  /** Emoji teapilot reacted with. */
+  reactions: string[];
   /** Set while approve/deny buttons on this message are waiting. */
   approval?: (approved: boolean) => void;
 }
@@ -170,7 +172,7 @@ export class World {
   private post(channel: Channel, author: string, payload: Payload, only?: string, replyTo?: Message): Message {
     if (author === bot.name) this.check(`a message in #${channel.name}`, () => { checkMessage(payload); checkFiles(payload); });
     const id = `m${++this.counters.message}`;
-    const message: Message = { id, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], files: this.store(id, payload.files ?? []), only, replyTo: replyTo?.id, edits: 0 };
+    const message: Message = { id, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], files: this.store(id, payload.files ?? []), only, replyTo: replyTo?.id, edits: 0, reactions: [] };
     this.messages.push(message);
     this.recent = channel;
     this.emit(this.render(message));
@@ -249,6 +251,10 @@ export class World {
       replyChain: async () => ({ messages: [], truncated: false }),
       transport: () => this.transport(channel),
       replyTransport: () => this.transport(channel, message),
+      react: async emoji => {
+        if (!message.reactions.includes(emoji)) message.reactions.push(emoji);
+        this.emit(`${bot.name} reacted ${emoji} to ${message.id}`);
+      },
       startThread: async title => {
         const name = `thread-${++this.counters.thread}`;
         const created: Channel = { id: name, name, kind: 'thread', parent: channel.id };
@@ -458,6 +464,7 @@ export class World {
       ...message.embeds.flatMap(embed => this.renderEmbed(embed)),
       ...message.components.map(row => row.components.map(control => this.renderControl(control)).join(' ')),
       ...message.files.map(file => `📎 ${file.name} (${kilobytes(file.size)}) → ${file.path}`),
+      ...(message.reactions.length ? [`reactions: ${message.reactions.join(' ')}`] : []),
     ];
     return [header, ...lines.map(line => `  ${line}`)].join('\n');
   }
