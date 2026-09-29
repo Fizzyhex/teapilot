@@ -57,3 +57,15 @@ node packages/teapilot/scripts/agent-discord.mjs stop d
 - `start --frozen` stops the clock, so timers fire only when `advance` reaches them; use it for games that tick.
 - Only operators can answer approvals, as on Discord: read each one, and deny it unless the action is part of your task.
 - Always `stop` sessions you start.
+
+## Reading logs
+
+To find out what a real request did, read the state directory: `~/.teapilot`, or `TEAPILOT_STATE_DIR` when set. Start from telemetry, then open the transcript.
+
+- `outcomes.jsonl`: one JSON event per line, keyed by `requestId`. Take the last `request_start`, then read that request's `attempt_end` (capability, `reason`, `turns`, `toolCalls`) and `request_end` (`success`, `status`). `teachat-*` request ids are background chatter, not user requests.
+- `workspaces/<id>/.scratch/sessions/<id>.jsonl`: the conversation's full transcript as a pi session: every message, tool call and result, and host notice, with `teapilot.attempt` entries naming each request and tier. This shows what the model actually saw and did.
+- `discord-history/<key>.json`: the turns a Discord conversation replays to the model on its next message.
+- `.jevrouter/decisions/<id>.json`: why the router picked a capability (`decisionId` in telemetry).
+- `spend.jsonl`: budget reservations and charges.
+
+The files are large and grow without limit: read their tails, never the whole file. They hold real conversations: quote only what the task needs, and never edit or delete them to tidy up a result.

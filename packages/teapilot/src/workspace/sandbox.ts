@@ -240,9 +240,12 @@ export class SrtSandbox implements WorkspaceSandbox {
     // workspace, and runs other programs from its own location. Set-Location to the workspace is refused, since
     // PowerShell reads every folder above it to spell the path, so it moves to a drive rooted at the workspace.
     const quoted = (value: string) => `'${value.replace(/'/g, "''")}'`;
+    // srt names its proxy for http and https only. Clients that look a proxy up by URL scheme, such as aiohttp
+    // for wss://, then connect directly, which the sandbox drops without asking, so the command hangs.
     const script = windows
-      ? [`$null = New-PSDrive -Name W -PSProvider FileSystem -Root ${quoted(folder)}`, 'Set-Location W:\\', ...Object.entries(own).map(([key, value]) => `$env:${key}=${quoted(value)}`), ...this.toolPath.length ? [`$env:PATH=${quoted(`${this.toolPath.join(';')};`)}+$env:PATH`] : [], command].join('; ')
-      : command;
+      ? [`$null = New-PSDrive -Name W -PSProvider FileSystem -Root ${quoted(folder)}`, 'Set-Location W:\\', ...Object.entries(own).map(([key, value]) => `$env:${key}=${quoted(value)}`), ...this.toolPath.length ? [`$env:PATH=${quoted(`${this.toolPath.join(';')};`)}+$env:PATH`] : [],
+        'if ($env:HTTPS_PROXY) { $env:WSS_PROXY=$env:HTTPS_PROXY }', 'if ($env:HTTP_PROXY) { $env:WS_PROXY=$env:HTTP_PROXY }', command].join('; ')
+      : `[ -n "\${HTTPS_PROXY:-}" ] && export WSS_PROXY="$HTTPS_PROXY"\n[ -n "\${HTTP_PROXY:-}" ] && export WS_PROXY="$HTTP_PROXY"\n${command}`;
     const commandId = randomUUID();
     // srt hands POSIX commands its own TMPDIR, /tmp/claude unless this names another; one shared by every
     // conversation would let them pass files, so each run gets its workspace's own.

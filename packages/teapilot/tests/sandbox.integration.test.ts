@@ -84,6 +84,16 @@ describe.skipIf(!status.available)('sandboxed workspace commands', () => {
     expect(version.exitCode, version.output).toBe(0);
   }, 60_000);
 
+  it('names the proxy for websockets too, so clients that look it up by scheme still go through it', async () => {
+    const result = await sandbox.run(mine, shell
+      ? 'Write-Output "https=$env:HTTPS_PROXY"; Write-Output "wss=$env:WSS_PROXY"; Write-Output "http=$env:HTTP_PROXY"; Write-Output "ws=$env:WS_PROXY"'
+      : 'echo "https=$HTTPS_PROXY"; echo "wss=$WSS_PROXY"; echo "http=$HTTP_PROXY"; echo "ws=$WS_PROXY"', offline);
+    const value = (name: string) => result.output.match(new RegExp(`^${name}=(.*)$`, 'm'))?.[1]?.trim();
+    expect(value('https'), result.output).toMatch(/^http:\/\//);
+    expect(value('wss')).toBe(value('https'));
+    expect(value('ws')).toBe(value('http'));
+  }, 60_000);
+
   it.skipIf(!tool('python'))('asks before reaching the network, and connects only when approved', async () => {
     const fetch = `${tool('python')} -c "import urllib.request as u; print(u.urlopen('https://pypi.org/simple/six/', timeout=20).status)"`;
     const asked: string[] = [];
