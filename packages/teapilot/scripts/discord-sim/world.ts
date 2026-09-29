@@ -36,6 +36,8 @@ export interface Message {
   id: string; channel: Channel; author: string; content: string; embeds: Json[]; components: Row[]; files: Attachment[];
   /** Ephemeral: only this person sees it. */
   only?: string;
+  /** The message this one replies to; teapilot's replies never ping. */
+  replyTo?: string;
   edits: number;
   /** Set while approve/deny buttons on this message are waiting. */
   approval?: (approved: boolean) => void;
@@ -165,10 +167,10 @@ export class World {
     }
   }
 
-  private post(channel: Channel, author: string, payload: Payload, only?: string): Message {
+  private post(channel: Channel, author: string, payload: Payload, only?: string, replyTo?: Message): Message {
     if (author === bot.name) this.check(`a message in #${channel.name}`, () => { checkMessage(payload); checkFiles(payload); });
     const id = `m${++this.counters.message}`;
-    const message: Message = { id, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], files: this.store(id, payload.files ?? []), only, edits: 0 };
+    const message: Message = { id, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], files: this.store(id, payload.files ?? []), only, replyTo: replyTo?.id, edits: 0 };
     this.messages.push(message);
     this.recent = channel;
     this.emit(this.render(message));
@@ -187,10 +189,12 @@ export class World {
     this.emit(this.render(message));
   }
 
-  transport(channel: Channel): DiscordTransport {
+  /** With `replyTo`, the first message replies to it, as the gateway's reply transport does. */
+  transport(channel: Channel, replyTo?: Message): DiscordTransport {
+    const reply = () => { const to = replyTo; replyTo = undefined; return to; };
     return {
-      send: async text => this.post(channel, bot.name, { content: text }).id,
-      sendFiles: async (text, files) => this.post(channel, bot.name, { content: text, files }).id,
+      send: async text => this.post(channel, bot.name, { content: text }, undefined, reply()).id,
+      sendFiles: async (text, files) => this.post(channel, bot.name, { content: text, files }, undefined, reply()).id,
       edit: async (id, text) => this.update(this.find(id), { content: text }),
       card: async (text, controls, id) => {
         const payload = { content: text, components: [{ type: 1, components: [
@@ -244,6 +248,7 @@ export class World {
       attachments: uploads.map(upload => ({ name: upload.name, size: upload.data.length, contentType: upload.contentType, download: async () => upload.data })),
       replyChain: async () => ({ messages: [], truncated: false }),
       transport: () => this.transport(channel),
+      replyTransport: () => this.transport(channel, message),
       startThread: async title => {
         const name = `thread-${++this.counters.thread}`;
         const created: Channel = { id: name, name, kind: 'thread', parent: channel.id };
@@ -447,7 +452,7 @@ export class World {
   }
 
   render(message: Message): string {
-    const header = `${message.id} ${message.author}${message.only ? ` (only ${message.only} sees this)` : ''}${message.edits ? ' (edited)' : ''} in #${message.channel.name}:`;
+    const header = `${message.id} ${message.author}${message.replyTo ? ` (replying to ${message.replyTo}, no ping)` : ''}${message.only ? ` (only ${message.only} sees this)` : ''}${message.edits ? ' (edited)' : ''} in #${message.channel.name}:`;
     const lines = [
       ...(message.content ? this.display(message.content).split('\n') : []),
       ...message.embeds.flatMap(embed => this.renderEmbed(embed)),

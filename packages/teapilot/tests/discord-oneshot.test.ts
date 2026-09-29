@@ -12,10 +12,11 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 async function oneShots() {
   const f = await fixture(); cleanups.push(f.cleanup);
   const prompts: string[] = [];
+  const tools: string[][] = [];
   const server = await mockServer((body, request, response) => {
     if (request.url === '/jev') jev(response, 'ask.normal');
     else if (request.url?.endsWith('/models')) response.end(JSON.stringify({ data: [{ id: 'fast-test' }, { id: 'capable-test' }] }));
-    else { prompts.push(JSON.stringify(body.messages)); completion(response, { text: `answer ${prompts.length}` }); }
+    else { prompts.push(JSON.stringify(body.messages)); tools.push(((body.tools ?? []) as Array<{ function?: { name?: string }; name?: string }>).map(tool => tool.function?.name ?? tool.name ?? '')); completion(response, { text: `answer ${prompts.length}` }); }
   });
   cleanups.push(server.close);
   f.config.router.endpoint = `${server.url}/jev`;
@@ -32,15 +33,15 @@ async function oneShots() {
   cleanups.push(async () => { controller.abort(); await done; });
   await vi.waitFor(() => expect(handlers).toBeDefined());
 
-  let invocations = 0;
+  let invocations = 0, typed = 0;
   const sent: string[] = [];
-  const transport: DiscordTransport = { send: async text => { sent.push(text); return String(sent.length); }, edit: async () => undefined, card: async text => { sent.push(text); return 'card'; }, typing: () => undefined, askApproval: async () => false };
+  const transport: DiscordTransport = { send: async text => { sent.push(text); return String(sent.length); }, edit: async () => undefined, card: async text => { sent.push(text); return 'card'; }, typing: () => { typed++; }, askApproval: async () => false };
   /** Switch notes shown so far; `pick` is the button pressed on the next one. */
   const notes: string[] = [];
   let pick = 0;
   const reply = (authorId: string, text: string, collab = false, attachments: GatewayReply['attachments'] = []) => handlers!.reply({
     authorId, authorIsBot: false, authorName: authorId, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false,
-    content: text, title: text, id: `interaction-${++invocations}`, oneShot: true, answerOnly: false, setup: {}, yolo: false, attachments, collab,
+    content: text, title: text, id: `interaction-${++invocations}`, oneShot: true, answerOnly: false, setup: {}, yolo: false, attachments, collab, side: text.startsWith('/btw'),
     transport: () => transport, startThread: () => Promise.reject(new Error('no threads')), respond: async () => undefined,
     choose: async note => { notes.push(note); return { choice: pick, settle: async settled => { notes.push(settled); }, transport: () => transport }; },
   } satisfies GatewayReply);
@@ -48,7 +49,16 @@ async function oneShots() {
   const command = (authorId: string, text: string) => new Promise<string | undefined>(resolve => handlers!.command({
     authorId, authorIsBot: false, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false, text, respond: async note => resolve(note),
   }));
-  return { prompts, reply, results, command, notes, press: (index: number) => { pick = index; } };
+  /** A direct message, which is its own conversation and answers in the channel. */
+  const message = (authorId: string, text: string) => handlers!.message({
+    authorId, authorIsBot: false, authorName: authorId, channelId: `dm-${authorId}`, ownThread: false, mentionsBot: false, content: text, attachments: [],
+    transport: () => transport, replyTransport: () => { replies.push(text); return transport; },
+    startThread: () => Promise.reject(new Error('no threads')), replyChain: async () => ({ messages: [], truncated: false }),
+  });
+  /** Messages answered as replies to them. */
+  const replies: string[] = [];
+  const asides = (count: number) => vi.waitFor(() => expect(sent.filter(text => /-# this is an aside/.test(text))).toHaveLength(count), { timeout: 20_000 });
+  return { typed: () => typed, prompts, tools, sent, replies, reply, message, results, asides, command, notes, press: (index: number) => { pick = index; } };
 }
 
 it('continues one history per person per channel across one-shot replies, and /clear ends it', async () => {
@@ -104,3 +114,43 @@ it('keeps files attached to /prompt and tells teapilot about them', async () => 
   await results(1);
   expect(prompts[0]).toContain('notes.txt');
 }, 30_000);
+
+it('answers /btw from the conversation, with read-only tools, and keeps it out of the conversation', async () => {
+  const { prompts, tools, sent, reply, results, asides } = await oneShots();
+  reply('op', 'my name is oolong');
+  await results(1);
+
+  const before = sent.length;
+  reply('op', '/btw what is my name?');
+  await asides(1);
+  expect(prompts[1]).toContain('oolong');
+  expect(prompts[1]).toContain('Side question (/btw)');
+  expect(tools[0]).toEqual(expect.arrayContaining(['write', 'file_send']));
+  expect(tools[1]).toEqual(expect.arrayContaining(['read', 'file_send']));
+  expect(tools[1]!.filter(name => ['write', 'edit', 'bash', 'powershell'].includes(name) || /^(play|access)_/.test(name))).toEqual([]);
+  // One quiet answer: no status card or result line.
+  expect(sent.slice(before)).toHaveLength(1);
+  expect(sent.at(-1)).toMatch(/^answer 2\n-# this is an aside/);
+  expect(sent.filter(text => text.includes('Result: completed'))).toHaveLength(1);
+
+  reply('op', 'what did I ask last?');
+  await results(2);
+  expect(prompts[2]).toContain('oolong');
+  expect(prompts[2]).not.toContain('what is my name');
+  expect(prompts[2]).not.toContain('answer 2');
+}, 60_000);
+
+it('answers a /btw message in a DM publicly without adding it to the conversation', async () => {
+  const { typed, prompts, sent, replies, message, asides } = await oneShots();
+  message('op', 'the secret word is matcha');
+  await vi.waitFor(() => expect(sent.some(text => text === 'answer 1')).toBe(true), { timeout: 20_000 });
+  message('op', '/btw what is the secret word?');
+  await asides(1);
+  expect(prompts[1]).toContain('matcha');
+  expect(replies).toEqual(['/btw what is the secret word?']);
+  // Typed like any reply, though it shows no card.
+  expect(typed()).toBeGreaterThanOrEqual(2);
+  message('op', 'what did I just ask?');
+  await vi.waitFor(() => expect(prompts).toHaveLength(3), { timeout: 20_000 });
+  expect(prompts[2]).not.toContain('what is the secret word');
+}, 60_000);

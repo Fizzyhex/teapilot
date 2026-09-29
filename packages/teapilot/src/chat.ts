@@ -9,9 +9,12 @@ import type { EventSink } from './integration/events.js';
 import type { SessionWorkspace } from './workspace/terminal.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
-const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /exit, /quit`;
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /btw <question>, /exit, /quit`;
 
 const keptSteps = 6;
+
+/** A side question: `/btw` and what follows, answered from the conversation without joining it. */
+export const isAside = (text: string): boolean => /^\/btw(?:\s|$)/i.test(text.trim());
 
 /** Optional behaviour layered on a session, such as teachat. Every hook is awaited in turn order. */
 export interface SessionExtension {
@@ -72,6 +75,24 @@ export async function runSession(options: {
     if (['/exit', '/quit'].includes(prompt)) { options.onHistory?.([]); break; }
     if (!prompt) continue;
     await extension?.busy?.();
+    // A side question sees the conversation but stays out of it: no history, no correction, and extensions never learn of it.
+    const aside = isAside(prompt) ? prompt.slice(4).trim() : undefined;
+    if (aside !== undefined) {
+      if (!aside) options.log?.('/btw <question> asks an aside about this conversation without adding it to the conversation.');
+      else {
+        const workspace = mode !== 'code' ? options.workspace : undefined;
+        const question = workspace ? await workspace.attach(aside, cwd, options.maxPromptChars - aside.length - 1500) : aside;
+        // No scratchpad either: that is where the session's transcript is kept.
+        const result = await options.run({ ...options.request, ...extension?.request?.(), cwd, prompt: question, correction: undefined, tier, relatedTier, history,
+          mode, conversational: !options.once, side: true, scratch: undefined, workload: grants ? undefined : workloadFor(mode), ...(workspace ? { workspace: workspace.context(cwd) } : {}) });
+        spentUsd += result.spentUsd;
+        lastModel = result.models?.at(-1) ?? lastModel;
+        if (!result.success) exitCode = 2;
+      }
+      prompt = '';
+      if (options.once) break;
+      continue;
+    }
     if (prompt.startsWith('/')) {
       const [command, value, extra] = prompt.split(/\s+/);
       if (command === '/cd') {

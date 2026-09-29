@@ -138,3 +138,20 @@ it('runs extension hooks around commands and turns', async () => {
   expect(extension.turnEnd.mock.calls[1]![0]).toEqual({ user: 'Next', assistant: result.text });
   expect(log.mock.calls.map(call => call[0])).toEqual([expect.stringMatching(/^Commands: .*\/new.*, \/teachat \[who\]$/), expect.stringContaining('Started a new task')]);
 });
+
+it('/btw asks from the conversation without joining it', async () => {
+  const onHistory = vi.fn(), log = vi.fn();
+  const extension = { turnEnd: vi.fn(async () => undefined) };
+  const input = vi.fn().mockResolvedValueOnce('/btw what is chebyshev distance?').mockResolvedValueOnce('/btw').mockResolvedValueOnce('Next').mockResolvedValueOnce('/exit');
+  const run = vi.fn(async (_request: HostRequest) => ({ ...result, spentUsd: 0.1, models: ['aside'] }));
+  await runChat({ request: { prompt: 'First', correction: 'Shorter', cwd: '.', scratch: 'scratch' }, maxPromptChars: 2000, input, run, log, onHistory, extension });
+  const first = [{ user: 'First\nUser correction:\nShorter', assistant: result.text }];
+  expect(run).toHaveBeenCalledTimes(3);
+  expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'what is chebyshev distance?', side: true, history: first, correction: undefined, scratch: undefined });
+  expect(run.mock.calls[2]![0]).toMatchObject({ prompt: 'Next', history: first });
+  expect(run.mock.calls[2]![0].side).toBeUndefined();
+  expect(onHistory.mock.calls.map(call => call[0].length)).toEqual([1, 2, 0]);
+  expect(extension.turnEnd).toHaveBeenCalledTimes(2);
+  expect(input.mock.calls[1]![0]).toMatchObject({ spentUsd: 0.2, lastModel: 'aside' });
+  expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/btw <question>/));
+});

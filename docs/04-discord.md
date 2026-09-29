@@ -61,6 +61,7 @@ All the [session commands](02-commands.md#interactive-use) work, except:
 - `/stop` cancels the running turn. Edits already made remain on disk.
 - `/clear` ends the conversation and its history. Your next message starts a new session.
 - `/cd` is unavailable. Change the root with `teapilot discord setup`.
+- `/btw` at the start of a message asks a side question. The answer is public in a message, and only visible to you through `/prompt` or `/reply`, with a **Post to channel** button.
 
 Messages sent during a turn are queued as your next message. Long answers are split across messages.
 

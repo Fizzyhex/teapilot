@@ -4,7 +4,8 @@ import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, Attachm
 import type { IncomingMessage } from './access.js';
 import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
 import { attachmentOption, collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
-import { MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
+import { isAside } from '../chat.js';
+import { chunk, MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
 import type { DiscordSettings } from './settings.js';
@@ -24,6 +25,8 @@ export interface GatewayMessage extends IncomingMessage {
   attachments: IncomingFile[];
   authorName: string;
   transport(): DiscordTransport;
+  /** Like `transport()`, but the first message replies to this one, without pinging its author. */
+  replyTransport(): DiscordTransport;
   startThread(name: string): Promise<{ id: string; transport: DiscordTransport }>;
   /** The messages this one replies to; fetched on demand, so only routed messages pay for it. */
   replyChain(): Promise<ReplyChain>;
@@ -35,7 +38,7 @@ export interface GatewayCommand extends IncomingMessage {
   respond(text?: string): Promise<void>;
 }
 /** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
-export interface GatewayReply extends Omit<GatewayMessage, 'replyChain'> {
+export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'replyTransport'> {
   title: string;
   /** Interaction id, unique per invocation. */
   id: string;
@@ -53,6 +56,8 @@ export interface GatewayReply extends Omit<GatewayMessage, 'replyChain'> {
   yolo: boolean;
   /** From /collab: where the answer comes through the interaction, everyone in the channel shares the conversation. */
   collab: boolean;
+  /** A side question (/btw): `respond()` keeps a private reply open, and `transport()` answers there, for the asker alone. */
+  side: boolean;
   respond(text?: string): Promise<void>;
   /**
    * Instead of `respond()`: a private note with a button per label, the first one primary. Resolves with the
@@ -92,6 +97,10 @@ const noop = () => undefined;
 const choicePrefix = 'teapilot-choice:';
 /** Custom id prefix of status card buttons: `teapilot-card:<button>`; the card's message id finds its turn. */
 const cardPrefix = 'teapilot-card:';
+/** Custom id prefix of a side answer's Post to channel button: `teapilot-btw:<nonce>`. */
+const sidePrefix = 'teapilot-btw:';
+/** A private side answer (/btw), kept so its asker can post it for everyone. */
+interface SideAnswer { userId: string; question: string; parts: Array<{ text: string; files: Array<{ name: string; data: Buffer }> }> }
 /** Status cards whose buttons still answer; the oldest are forgotten first. */
 const cardLimit = 500;
 /** Discord's limit on a custom status. */
@@ -171,11 +180,16 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     }));
   };
 
-  const transport = (channel: SendableChannels): DiscordTransport => {
+  /** Posts in `channel`; with `replyTo`, the first message replies to it, without pinging its author. */
+  const transport = (channel: SendableChannels, replyTo?: Message): DiscordTransport => {
     const sent = new Map<string, Message>();
+    const reply = () => {
+      const to = replyTo; replyTo = undefined;
+      return to ? { reply: { messageReference: to, failIfNotExists: false }, allowedMentions: { parse: [] as [], repliedUser: false } } : quiet;
+    };
     return {
-      async send(text) { const message = await channel.send({ content: text, ...quiet }); sent.set(message.id, message); return message.id; },
-      async sendFiles(text, files) { return (await channel.send({ content: text, files: attachments(files), ...quiet })).id; },
+      async send(text) { const message = await channel.send({ content: text, ...reply() }); sent.set(message.id, message); return message.id; },
+      async sendFiles(text, files) { return (await channel.send({ content: text, files: attachments(files), ...reply() })).id; },
       async edit(id, text) { const message = sent.get(id) ?? await channel.messages.fetch(id); await message.edit({ content: text, ...quiet }); },
       async card(text, controls, id) {
         const payload = cardPayload(text, controls);
@@ -192,21 +206,22 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
    * Where the bot cannot post, answer through the interaction webhook, which needs no channel permission.
    * Discord keeps that webhook valid for 15 minutes, and there is no typing indicator or thread.
    */
-  const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction): DiscordTransport => {
+  const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction,
+    { hidden = false, buttons = () => [] }: { hidden?: boolean; buttons?: () => Array<ActionRowBuilder<ButtonBuilder>> } = {}): DiscordTransport => {
     const expires = Date.now() + interactionLifetimeMs;
     // A click has no deferred message of its own: its reply is the note it was pressed on, so everything is a follow-up.
     let first = !interaction.isButton();
     const live = () => { if (Date.now() > expires) throw new Error('This Discord interaction expired after 15 minutes. Run /reply again.'); };
     const post = async (payload: BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds }) => {
       live();
-      // The deferred "thinking" message becomes the first message; later ones are follow-ups.
+      // The deferred "thinking" message becomes the first message, private if it was deferred so; later ones are follow-ups.
       if (first) { first = false; return await interaction.editReply(payload); }
-      return await interaction.followUp(payload);
+      return await interaction.followUp(hidden ? { ...payload, flags: (payload.flags ?? 0) | MessageFlags.Ephemeral } : payload);
     };
     const revise = async (id: string, payload: BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds }) => { live(); await interaction.webhook.editMessage(id, payload); };
     return {
-      async send(text) { return (await post({ content: text, components: [], ...quiet })).id; },
-      async sendFiles(text, files) { return (await post({ content: text, files: attachments(files), components: [], ...quiet })).id; },
+      async send(text) { return (await post({ content: text, components: buttons(), ...quiet })).id; },
+      async sendFiles(text, files) { return (await post({ content: text, files: attachments(files), components: buttons(), ...quiet })).id; },
       edit: (id, text) => revise(id, { content: text, ...quiet }),
       async card(text, controls, id) {
         const payload = cardPayload(text, controls);
@@ -224,6 +239,25 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     };
   };
 
+  /**
+   * A side answer (/btw) through an interaction: only the asker sees it, and each message carries a button that posts
+   * everything answered so far, with the question, for the whole channel.
+   */
+  const sideTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction, question: string): DiscordTransport => {
+    const nonce = randomUUID();
+    const answer: SideAnswer = { userId: interaction.user.id, question, parts: [] };
+    sideAnswers.set(nonce, answer);
+    setTimeout(() => sideAnswers.delete(nonce), interactionLifetimeMs).unref?.();
+    const button = () => [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(`${sidePrefix}${nonce}`).setLabel('Post to channel').setStyle(ButtonStyle.Secondary))];
+    const base = interactionTransport(interaction, { hidden: true, buttons: button });
+    return {
+      ...base,
+      async send(text) { answer.parts.push({ text, files: [] }); return await base.send(text); },
+      async sendFiles(text, files) { answer.parts.push({ text, files }); return await base.sendFiles!(text, files); },
+      postApp: undefined,
+    };
+  };
+
   const sendable = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction) => {
     const channel = interaction.channel ?? await client.channels.fetch(interaction.channelId).catch(() => null);
     return channel?.isSendable() ? channel : undefined;
@@ -234,6 +268,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
    * keeps it only in the channel's cache, which does not exist where teapilot cannot view the channel.
    */
   const interactionReplies = new Map<string, RawMessage>();
+  /** Side answers that can still be posted to their channel, by nonce. */
+  const sideAnswers = new Map<string, SideAnswer>();
   /** Open `choose()` notes by nonce: who may press them, and what the press resolves. */
   const choices = new Map<string, { userId: string; resolve(click: GatewayChoice | undefined): void }>();
 
@@ -281,10 +317,17 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       ? !guildInstalled || !interaction.appPermissions?.has([PermissionFlagsBits.ViewChannel, thread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages])
       : interaction.context === InteractionContextType.PrivateChannel;
     const oneShot = !channel || cannotPost;
+    const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
+    const collab = interaction.isChatInputCommand() && interaction.commandName === collabCommand;
+    const isPrompt = interaction.isChatInputCommand() && (interaction.commandName === promptCommand || collab);
+    const text = interaction.isChatInputCommand() ? interaction.options.getString(isPrompt ? 'prompt' : 'message', true).trim() : strip(target?.content ?? '', self.id);
+    // The Reply menu quotes someone's message; only a person's own /btw is a side question.
+    const side = !target && isAside(text);
     const respond = async (note?: string) => {
       if (answered) { if (note) await interaction.followUp({ content: note, flags: MessageFlags.Ephemeral }); return; }
       answered = true;
       if (note) await interaction.reply({ content: note, flags: MessageFlags.Ephemeral });
+      else if (side) await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       else if (oneShot) await interaction.deferReply();
       else { await interaction.deferReply({ flags: MessageFlags.Ephemeral }); await interaction.deleteReply(); }
     };
@@ -312,10 +355,6 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         choices.set(nonce, { userId: interaction.user.id, resolve: click => { clearTimeout(timer); resolve(click); } });
       });
     };
-    const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
-    const collab = interaction.isChatInputCommand() && interaction.commandName === collabCommand;
-    const isPrompt = interaction.isChatInputCommand() && (interaction.commandName === promptCommand || collab);
-    const text = interaction.isChatInputCommand() ? interaction.options.getString(isPrompt ? 'prompt' : 'message', true).trim() : strip(target?.content ?? '', self.id);
     const setup = interaction.isChatInputCommand() && isPrompt ? promptSetup(interaction.options.getString('mode'), interaction.options.getString('reasoning')) : {};
     const yolo = interaction.isChatInputCommand() && isPrompt && interaction.options.getBoolean('yolo') === true;
     const files = interaction.isChatInputCommand() && isPrompt
@@ -342,7 +381,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       yolo,
       attachments: files,
       collab,
-      transport: () => channel && !oneShot ? transport(channel) : interactionTransport(interaction),
+      side,
+      transport: () => side ? sideTransport(interaction, text) : channel && !oneShot ? transport(channel) : interactionTransport(interaction),
       startThread: name => spawn(async () => {
         const options = { name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay };
         if (target) return await target.startThread(options);
@@ -429,6 +469,28 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       });
       return;
     }
+    if (interaction.customId.startsWith(sidePrefix)) {
+      const nonce = interaction.customId.slice(sidePrefix.length);
+      const answer = sideAnswers.get(nonce);
+      if (!answer) { await interaction.reply({ content: 'This answer can no longer be posted: it was posted already, is too old, or teapilot restarted since.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+      if (answer.userId !== interaction.user.id) { await interaction.reply({ content: 'Only the person who asked can post this answer.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+      sideAnswers.delete(nonce);
+      // Take the button off the private answer, then post the question and answer publicly as follow-ups to the click.
+      await interaction.update({ components: [] }).catch(noop);
+      const heading = `-# <@${answer.userId}> asked: ${answer.question.replace(/^\/btw\s*/i, '').replace(/\s+/g, ' ').slice(0, 300)}`;
+      try {
+        for (const [index, part] of answer.parts.entries()) {
+          const pieces = chunk(index ? part.text : `${heading}\n${part.text}`);
+          for (const [at, piece] of pieces.entries()) {
+            await interaction.followUp({ content: piece, files: at === pieces.length - 1 ? attachments(part.files) : [], ...quiet });
+          }
+        }
+      } catch (error) {
+        log(`Discord: side answer not posted: ${error instanceof Error ? error.message : String(error)}`);
+        await interaction.followUp({ content: 'That answer could not be posted here.', flags: MessageFlags.Ephemeral }).catch(noop);
+      }
+      return;
+    }
     if (interaction.customId.startsWith(cardPrefix)) {
       const press = cards.get(interaction.message.id);
       let reply: { text: string; file?: { name: string; content: string } };
@@ -469,6 +531,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       attachments: [...message.attachments.values()].map(incoming),
       replyChain: () => replyChain(message, self.id),
       transport: () => transport(channel),
+      replyTransport: () => transport(channel, message),
       async startThread(name) {
         const created = await message.startThread({ name: name.slice(0, 90) || 'teapilot', autoArchiveDuration: ThreadAutoArchiveDuration.OneDay });
         return { id: created.id, transport: transport(created) };

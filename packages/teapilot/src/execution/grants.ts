@@ -13,6 +13,9 @@ export const modeFor = (workload?: Workload): Mode => workload === 'coder' ? 'co
 export type Permission = Config['policy']['permissions'][number];
 export const permissions: Permission[] = ['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'discord.play'];
 export const repositoryPermissions: Permission[] = ['repository.read', 'repository.write', 'repository.shell'];
+/** What a side question (/btw) may use: it answers and reads, and changes nothing. */
+export const sidePermissions: Permission[] = ['inference', 'repository.read', 'web.search'];
+export const sideReadable = (permission: Permission): boolean => sidePermissions.includes(permission);
 
 export function withPrerequisites(requested: readonly Permission[]): Permission[] {
   const result = new Set(requested);

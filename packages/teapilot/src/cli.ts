@@ -176,6 +176,7 @@ async function main(): Promise<void> {
       if (values.json) console.log(JSON.stringify(result, null, 2));
       else if (lines) await paceLines(lines, line => presentation.answer(line), { signal: controller.signal });
       else presentation.answer(result.text);
+      if (!values.json && request.side) presentation.log('\nSide answer; not kept in this conversation.');
       if (!values.json && !lines) presentation.log(`\nResult: ${result.status}; accounted $${result.spentUsd.toFixed(6)}; request ${result.requestId}${result.receipts.length ? `\nReceipts: ${result.receipts.join(', ')}` : ''}`);
       return result;
     };

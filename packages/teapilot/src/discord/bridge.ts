@@ -82,7 +82,7 @@ export interface ConversationOptions {
   lineDelayMs?: () => number;
 }
 
-const discordHelp = 'Discord: /stop cancels the running turn; /clear ends this conversation and clears its history. The repository root is fixed; change it with teapilot discord setup.';
+const discordHelp = '`/stop` - cancel the running turn\n`/clear` - end the conversation and clear the context window\n`/btw` - ask a question without polluting the context window.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
@@ -201,11 +201,16 @@ export class Conversation {
     const conversation = play?.conversation ?? this.options.key;
     const workspace: ConversationWorkspace | undefined = files && { store: files, conversation, sandbox, delivery: 'post',
       send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) };
-    const request: HostRequest = { ...base, access: admin, workspace, ...(files ? { scratch: files.scratch(conversation) } : {}),
-      play: play && { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined, files: workspace } };
+    // A side question (/btw) only reads: it keeps no scratchpad, the session's transcript, and starts no apps.
+    const side = base.side === true;
+    const request: HostRequest = { ...base, access: admin, workspace, ...(files && !side ? { scratch: files.scratch(conversation) } : {}),
+      play: play && !side ? { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined, files: workspace } : undefined };
     const turn = this.turn = new AbortController();
     const signal = AbortSignal.any([turn.signal, ...(this.options.request.signal ? [this.options.request.signal] : [])]);
-    const answerOnly = this.answerOnly;
+    // A side answer shows no card either: it is one message, like a quick reply.
+    const answerOnly = this.answerOnly || side;
+    // It is still typed like a reply; a transport that answers a slash command has no typing to show.
+    const typed = !this.answerOnly;
     const speaker = this.speaker;
     const card = new StatusCard(this.options.redact);
     /** The turn's status once it has ended; from then on the card no longer changes. */
@@ -240,19 +245,20 @@ export class Conversation {
     if (!answerOnly) this.live = { card, refresh: () => refresh() };
     this.sink = event => {
       if (typeof event.result === 'string') this.options.log(`${this.options.key}: ${String(event.tool)} -> ${this.options.redact(event.result)}`);
-      if (event.type === 'route' && cardState === 'pending') {
+      if (event.type === 'route' && cardState === 'pending' && !answerOnly) {
         if (event.casual === true) { cardState = 'hidden'; clearTimeout(pending); } else refresh();
       }
       if (!answerOnly && card.push(event)) refresh(cardState !== 'hidden');
     };
     this.reasoning = answerOnly ? undefined : text => { if (card.reason(text)) refresh(false); };
-    const typing = answerOnly ? undefined : setInterval(() => this.options.transport.typing(), 8000);
+    const typing = !typed ? undefined : setInterval(() => this.options.transport.typing(), 8000);
     const heartbeat = answerOnly ? undefined : setInterval(() => { card.tick(); refresh(false); }, this.options.heartbeatMs ?? 5000);
     let result: HostResult;
     try {
       result = await this.options.queue.run(async () => {
         signal.throwIfAborted();
-        if (!answerOnly) { this.options.transport.typing(); if (card.set('thinking') === 'queued') refresh(); }
+        if (typed) this.options.transport.typing();
+        if (!answerOnly && card.set('thinking') === 'queued') refresh();
         return await this.options.run({ ...request, signal }, { approve: this.approve, onEvent: this.onEvent, onReasoning: this.onReasoning });
       }, () => { if (answerOnly) void this.say('Queued behind another task.'); else { card.set('queued'); refresh(); } });
     } catch (error) {
@@ -276,7 +282,7 @@ export class Conversation {
       const { transport } = this.options;
       await paceLines(lines, line => transport.send(line).catch(error => this.options.log(`${this.options.key}: send failed: ${error instanceof Error ? error.message : error}`)),
         { typing: () => transport.typing(), delayMs: this.options.lineDelayMs, signal: this.options.request.signal });
-    } else await this.say(result.text || '(no answer)', true);
+    } else await this.say(`${result.text || '(no answer)'}${side ? '\n-# this is an aside - not part of the main convo.' : ''}`, true);
     // The terminal log below already records the result of an answer-only turn. Otherwise the card collapses to
     // its result once the answer is up, so the result stays the turn's last word and Details stays under it.
     if (!answerOnly && !(result.casual && result.success && cardState !== 'shown')) {

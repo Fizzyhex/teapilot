@@ -17,13 +17,15 @@ import { capabilities } from './routing/capabilities.js';
 import { Telemetry } from './telemetry/outcome.js';
 import { assessCandidate } from './routing/selection.js';
 import { checkSearch, searchRepair } from './search.js';
-import { withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
+import { sideReadable, withPrerequisites, workloadFor, type Mode, type SessionGrants, type Permission } from './execution/grants.js';
 import { capabilityPlanner, conversationQuestions, playQuestion, readCasual, readPlayGrant, readRoutingPlan, readWebAutoGrant, teachatIdentityQuestion, readTeachatIdentity, type TeachatIdentityAnswer, type WebBasis } from './routing/intent.js';
 import { markWork } from './teachat/busy.js';
 import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
+  /** A side question (/btw): it sees the conversation but only reads, and its turn is not kept. */
+  side?: boolean;
   /** The session's scratchpad folder, from the surface that owns the session. */
   scratch?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
@@ -106,6 +108,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   const activate = async (required: Permission[], reason: string, signal = request.signal, optional = false): Promise<boolean> => {
     if (!request.authorization) return true;
     if (accessFailure) return false;
+    if (request.side && !required.every(sideReadable)) return false;
     if (required.some(permission => !config.policy.permissions.includes(permission))) {
       accessFailure = `Required access is disabled by configuration: ${required.filter(permission => !config.policy.permissions.includes(permission)).join(', ')}.`;
       return false;
@@ -230,7 +233,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (router) webAutoBasis = request.web ? ['explicit'] : readWebAutoGrant(decision?.raw_jev);
       if (request.teachatIdentities) teachatIdentity ??= readTeachatIdentity(decision?.raw_jev);
       if (playable && !activePermissions.includes('discord.play') && readPlayGrant(decision?.raw_jev, config.policy.router.min_confidence)) await activate(['discord.play'], 'Planned for your request before starting.');
-      if (!scope && request.authorization) casual = readCasual(decision?.raw_jev, config.policy.router.min_confidence);
+      // A side question may need to read or send a file, which a conversational reply has no tools for.
+      if (!scope && request.authorization && !request.side) casual = readCasual(decision?.raw_jev, config.policy.router.min_confidence);
 
       const routedSelection = decision?.status !== 'no_decision' ? decision?.decision.selected ?? undefined : undefined;
       // An unconfident route falls back to the workload the session's mode already
@@ -281,7 +285,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         }
         // web.search may be auto-approved on its own; the rest of the plan is still asked of the user.
         const web = plan.permissions.filter(permission => permission === 'web.search');
-        const rest = plan.permissions.filter(permission => permission !== 'web.search');
+        // A side question only reads, so it never asks for write or shell access up front.
+        const rest = plan.permissions.filter(permission => permission !== 'web.search' && (!request.side || sideReadable(permission)));
         if (web.length && !await activate(web, 'Planned for your request before starting.')) return await finish(false, 'approval_denied', accessFailure!);
         if (rest.length && !await activate(rest, 'Planned for your request before starting.')) return await finish(false, 'approval_denied', accessFailure!);
       }
@@ -312,7 +317,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const resume = previous?.resume && previousTier && profileFor(previousTier).model === profileFor(tier).model ? previous.resume : undefined;
       previous = await runAttempt({
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
-        mode: request.mode, conversational: request.conversational, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
+        mode: request.mode, conversational: request.conversational, side: request.side, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {

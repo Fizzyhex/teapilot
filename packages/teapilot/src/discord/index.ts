@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { realpath, rm } from 'node:fs/promises';
+import { isAside } from '../chat.js';
 import { loadConfig, type Config } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
 import { runHost, type HostRequest } from '../host.js';
@@ -176,11 +178,32 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     return notes;
   };
 
+  /**
+   * A side question (/btw) is answered by a one-shot that reads `historyKey`'s saved turns, workspace and all, and
+   * never writes them back: it never enters the running conversation, so it cannot steer or lengthen it. Without a
+   * history it answers on its own. It still waits its turn in the queue, since every request takes the state lock.
+   */
+  const side = async (historyKey: string | undefined, prompt: string, transport: DiscordTransport, channelId: string, from: { sender: string; senderName: string }): Promise<void> => {
+    const key = `btw:${randomUUID()}`;
+    log(`${historyKey ?? key} @${from.senderName} (btw): ${prompt.split('\n')[0]!.slice(0, 80)}`);
+    const conversation = await open(key, transport, { channelId, oneShot: true, historyKey: historyKey ?? key });
+    conversation.push(prompt, from);
+    try { await conversation.done; }
+    finally { conversations.delete(key); }
+  };
+
   const handle = async (message: GatewayMessage): Promise<void> => {
     const target = route(message, settings, allowed);
     if (!target) return;
     access.rememberName(message.authorId, message.authorName);
     if (!message.content && !message.attachments.length) { await message.transport().send('teapilot reads text messages and attachments only.'); return; }
+    if (isAside(message.content)) {
+      // A message cannot be answered privately, so the answer is public, as a reply to it; a mention in a channel is answered in place, without a thread.
+      const historyKey = target.kind === 'new-thread' ? undefined : target.key;
+      const notes = message.attachments.length && historyKey ? await receive(historyKey, message, config.policy.limits.maxPromptChars - message.content.length - 1500) : '';
+      await side(historyKey, [message.content, notes].filter(Boolean).join('\n\n'), message.replyTransport(), message.channelId, { sender: message.authorId, senderName: message.authorName });
+      return;
+    }
     // A running conversation already holds its earlier turns, so only a new one needs the reply chain.
     const chain = target.kind === 'new-thread' || !conversations.get(target.key)?.active ? await message.replyChain() : undefined;
     let prompt = chain && (chain.messages.length || chain.truncated) ? quoteMessage({ author: message.authorName, text: message.content }, chain) : message.content;
@@ -242,6 +265,14 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       ? [reply.content, await receive(workspace, reply, config.policy.limits.maxPromptChars - reply.content.length - 1500)].filter(Boolean).join('\n\n')
       : reply.content;
     const from = { answerOnly: reply.answerOnly, sender: reply.authorId, senderName: reply.authorName, yolo: reply.yolo };
+    if (reply.side) {
+      // Answered privately through the interaction, from whichever conversation the asker is in here; seats stay as they are.
+      const seat = reply.oneShot ? seats.seat(reply.channelId, reply.authorId) : undefined;
+      const historyKey = reply.oneShot ? seat && historyKeyOf(reply.channelId, reply.authorId, seat) : target.kind === 'new-thread' ? undefined : target.key;
+      await reply.respond();
+      await side(historyKey, historyKey ? await prompt(historyKey) : reply.content, reply.transport(), reply.channelId, { sender: reply.authorId, senderName: reply.authorName });
+      return;
+    }
     if (reply.oneShot) {
       const seat: Seat = reply.collab ? 'collab' : 'solo';
       const current = seats.seat(reply.channelId, reply.authorId);
