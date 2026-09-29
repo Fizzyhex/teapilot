@@ -149,9 +149,19 @@ it('sends a /plan message to the conversation as a planning request', async () =
   await vi.waitFor(() => expect(sent).toContain('answer 1'), { timeout: 20_000 });
   expect(prompts[0]).toContain('a tea timer');
   expect(prompts[0]).toContain('DO NOT MAKE ANY CHANGES');
+  expect(prompts[0]).toContain('<plan>');
   message('op', 'go ahead');
   await vi.waitFor(() => expect(prompts).toHaveLength(2), { timeout: 20_000 });
   expect(prompts[1]).toContain('a tea timer');
+}, 60_000);
+
+it('sends an /rfc message to the conversation as a design proposal request', async () => {
+  const { prompts, sent, message, reactions } = await oneShots();
+  message('op', '/rfc a tea timer');
+  await vi.waitFor(() => expect(sent).toContain('answer 1'), { timeout: 20_000 });
+  expect(prompts[0]).toContain('<rfc>');
+  expect(prompts[0]).not.toContain('<plan>');
+  expect(reactions).toEqual(['/rfc a tea timer 💡']);
 }, 60_000);
 
 it('reacts with a light bulb to a /plan message that has an idea, and to nothing else', async () => {

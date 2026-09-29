@@ -82,7 +82,7 @@ export interface ConversationOptions {
   lineDelayMs?: () => number;
 }
 
-const discordHelp = '`/stop` - cancel the running turn\n`/clear` - end the conversation and clear the context window\n`/btw` - ask a question without polluting the context window.\n`/plan` - get a proposal to discuss before anything is changed.';
+const discordHelp = '`/stop` - cancel the running turn\n`/clear` - end the conversation and clear the context window\n`/btw` - ask a question without polluting the context window.\n`/plan` - get an implementation plan to discuss before anything is changed.\n`/rfc` - get a design proposal to discuss before anything is changed.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {

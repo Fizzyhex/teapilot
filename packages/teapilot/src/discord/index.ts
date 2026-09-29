@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpath, rm } from 'node:fs/promises';
-import { isAside, isPlan } from '../chat.js';
+import { isAside, proposalRequest } from '../chat.js';
 import { loadConfig, type Config } from '../config.js';
 import { SessionGrants } from '../execution/grants.js';
 import { runHost, type HostRequest } from '../host.js';
@@ -201,8 +201,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     if (!target) return;
     access.rememberName(message.authorId, message.authorName);
     if (!message.content && !message.attachments.length) { await message.transport().send('teapilot reads text messages and attachments only.'); return; }
-    // A plan request with an idea gets a light bulb, so it is clear the message was taken as one; a missing reaction permission is not worth failing over.
-    if (isPlan(message.content) && message.content.trim().slice(5).trim()) await message.react('💡').catch(error => log(`Discord: could not react: ${error instanceof Error ? error.message : String(error)}`));
+    // A plan or RFC request with an idea gets a light bulb, so it is clear the message was taken as one; a missing reaction permission is not worth failing over.
+    if (proposalRequest(message.content)?.idea) await message.react('💡').catch(error => log(`Discord: could not react: ${error instanceof Error ? error.message : String(error)}`));
     if (isAside(message.content)) {
       // A message cannot be answered privately, so the answer is public, as a reply to it; a mention in a channel is answered in place, without a thread.
       const historyKey = target.kind === 'new-thread' ? undefined : target.key;

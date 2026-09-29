@@ -156,7 +156,7 @@ it('/btw asks from the conversation without joining it', async () => {
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/btw <question>/));
 });
 
-it('/plan asks for a proposal as an ordinary turn that stays in the conversation', async () => {
+it('/plan asks for a researched implementation plan as an ordinary turn that stays in the conversation', async () => {
   const onHistory = vi.fn(), log = vi.fn();
   const input = vi.fn().mockResolvedValueOnce('/plan').mockResolvedValueOnce('/planet').mockResolvedValueOnce('go ahead').mockResolvedValueOnce('/exit');
   const run = vi.fn(async (_request: HostRequest) => result);
@@ -165,10 +165,27 @@ it('/plan asks for a proposal as an ordinary turn that stays in the conversation
   const planned = run.mock.calls[0]![0].prompt;
   expect(planned).toContain('\n\nadd a $& cache\n\n');
   expect(planned).toMatch(/DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"/);
+  expect(planned).toContain('lightweight open-source alternatives');
   expect(planned).toContain('<plan>');
+  expect(planned).not.toContain('<rfc>');
   expect(run.mock.calls[0]![0].side).toBeUndefined();
   expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'go ahead', history: [{ user: planned, assistant: result.text }] });
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/plan <idea>/));
   // /planet is not /plan: it falls through to the command help.
-  expect(log).toHaveBeenCalledWith(expect.stringMatching(/^Commands: .*\/plan <idea>/));
+  expect(log).toHaveBeenCalledWith(expect.stringMatching(/^Commands: .*\/plan <idea>, \/rfc <idea>/));
+});
+
+it('/rfc asks for a design proposal in the RFC format', async () => {
+  const log = vi.fn();
+  const input = vi.fn().mockResolvedValueOnce('/rfc').mockResolvedValueOnce('/exit');
+  const run = vi.fn(async (_request: HostRequest) => result);
+  await runChat({ request: { prompt: '/rfc add a cache', cwd: '.' }, maxPromptChars: 20_000, input, run, log });
+  expect(run).toHaveBeenCalledTimes(1);
+  const proposed = run.mock.calls[0]![0].prompt;
+  expect(proposed).toContain('\n\nadd a cache\n\n');
+  expect(proposed).toMatch(/DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"/);
+  expect(proposed).toContain('<rfc>');
+  expect(proposed).toContain('## Prior Art');
+  expect(proposed).not.toContain('<plan>');
+  expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/rfc <idea>/));
 });

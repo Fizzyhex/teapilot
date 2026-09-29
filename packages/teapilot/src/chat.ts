@@ -9,17 +9,23 @@ import type { EventSink } from './integration/events.js';
 import type { SessionWorkspace } from './workspace/terminal.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
-const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /btw <question>, /plan <idea>, /exit, /quit`;
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /btw <question>, /plan <idea>, /rfc <idea>, /exit, /quit`;
 
 const keptSteps = 6;
 
 /** A side question: `/btw` and what follows, answered from the conversation without joining it. */
 export const isAside = (text: string): boolean => /^\/btw(?:\s|$)/i.test(text.trim());
 
-/** A request for a proposal: `/plan` and what follows, sent as an ordinary turn that asks for a plan and no changes yet. */
-export const isPlan = (text: string): boolean => /^\/plan(?:\s|$)/i.test(text.trim());
+/** The two ways to ask for a proposal: `plan` is an implementation plan, `rfc` a design proposal. */
+export type ProposalKind = 'plan' | 'rfc';
 
-const planTemplate = `Hi, your job is to plan out this feature:
+/** A request for a proposal: `/plan` or `/rfc` and the idea after it, sent as an ordinary turn that asks for a proposal and no changes yet. */
+export const proposalRequest = (text: string): { kind: ProposalKind; idea: string } | undefined => {
+  const match = /^\/(plan|rfc)(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  return match ? { kind: match[1]!.toLowerCase() as ProposalKind, idea: (match[2] ?? '').trim() } : undefined;
+};
+
+const proposalHead = `Hi, your job is to plan out this feature:
 
 ---
 
@@ -27,10 +33,42 @@ const planTemplate = `Hi, your job is to plan out this feature:
 
 ---
 
-CRITICAL: DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"! Your reply MUST use the template below, starting with the "<plan>" tag - with NOTHING else extra.
+CRITICAL: DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"!`;
+
+const planTemplate = `${proposalHead} Your reply MUST be a plan that follows the structure below, starting with the "<plan>" tag - with NOTHING else extra.
+
+First, research before you propose anything: look through the repository for what already exists, and look for successful, lightweight open-source alternatives (small, well-maintained libraries or tools that already do part or all of this). Prefer reusing or adopting one over building from scratch, and say why if you still build it.
 
 \`\`\`template
 <plan>
+# Plan name
+
+## Goal
+
+One or two sentences: what will exist when this is done, and what is out of scope.
+
+## Findings
+
+What you found in the repository, and the lightweight open-source alternatives you found (name, what it does, why it is or is not a fit).
+
+## Approach
+
+The chosen approach and the key decisions behind it, including whether to adopt an existing project or build.
+
+## Steps
+
+A short, ordered checklist. Each step names the files or components it touches and can be verified on its own.
+
+## Risks and open questions
+
+Anything that could go wrong, and anything you need me to decide before starting.
+</plan>
+\`\`\``;
+
+const rfcTemplate = `${proposalHead} Your reply MUST use the template below, starting with the "<rfc>" tag - with NOTHING else extra.
+
+\`\`\`template
+<rfc>
 # Proposal name
 
 ## Summary
@@ -56,11 +94,11 @@ Describe other approaches considered, including doing nothing, and their likely 
 ## Prior Art
 
 Reference similar approaches used elsewhere or internally. Compare relevant patterns, supporting practices, and constraints, and note how this proposal aligns or differs.
-</plan>
+</rfc>
 \`\`\``;
 
-/** The idea wrapped in the planning template. */
-export const planPrompt = (idea: string): string => planTemplate.replace('%prompt%', () => idea);
+/** The idea wrapped in the template for its kind. */
+export const proposalPrompt = (kind: ProposalKind, idea: string): string => (kind === 'rfc' ? rfcTemplate : planTemplate).replace('%prompt%', () => idea);
 
 /** Optional behaviour layered on a session, such as teachat. Every hook is awaited in turn order. */
 export interface SessionExtension {
@@ -139,16 +177,18 @@ export async function runSession(options: {
       if (options.once) break;
       continue;
     }
-    // A plan request is an ordinary turn, so the proposal stays in the conversation for the talk that follows.
-    if (isPlan(prompt)) {
-      const idea = prompt.slice(5).trim();
-      if (!idea) {
-        options.log?.('/plan <idea> asks for a proposal to discuss before any changes are made.');
+    // A proposal request is an ordinary turn, so the proposal stays in the conversation for the talk that follows.
+    const proposal = proposalRequest(prompt);
+    if (proposal) {
+      if (!proposal.idea) {
+        options.log?.(proposal.kind === 'rfc'
+          ? '/rfc <idea> asks for a design proposal to discuss before any changes are made.'
+          : '/plan <idea> asks for an implementation plan to discuss before any changes are made.');
         prompt = '';
         if (options.once) break;
         continue;
       }
-      prompt = planPrompt(idea);
+      prompt = proposalPrompt(proposal.kind, proposal.idea);
     }
     if (prompt.startsWith('/')) {
       const [command, value, extra] = prompt.split(/\s+/);
