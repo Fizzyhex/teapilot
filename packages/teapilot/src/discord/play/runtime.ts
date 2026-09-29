@@ -48,7 +48,7 @@ export type Consultant = (play: { title: string; owner: User; channelId: string 
 export type Source = PlayRecord['source'];
 export interface StartOptions {
   title: string; channelId: string; conversation: string; owner: User; source: Source; participants?: Participants; emojis?: Record<string, string>;
-  /** The attached file the code came from. */
+  /** The workspace file the code came from, which play_update reloads. */
   file?: string;
   /** Posts the app through an interaction instead of in the channel. */
   post?: (payload: MessagePayload) => Promise<HostedMessage>;
@@ -76,6 +76,8 @@ interface Live {
   chain: Promise<unknown>;
   /** For an app posted through an interaction: the newest interaction that can still edit its message. */
   reach?: { edit(payload: MessagePayload): Promise<void>; until: number };
+  /** When its clocks stopped because nobody could see the message; the wait is given back when they resume. */
+  pausedAt?: number;
 }
 interface Advance { state: unknown; seed: number; view: View; payload: MessagePayload; effects: Effect[]; timers: PlayRecord['timers']; finished?: { summary?: string } }
 
@@ -139,7 +141,12 @@ export class PlayRuntime {
     consult?: Consultant; clock?: Clock; pictures?: Pictures;
     /** Try every control before an app is posted or replaced (default true). */
     probe?: boolean;
+    /** How many apps are running, whenever that changes; for the bot's Discord status. */
+    onRunning?: (count: number) => void;
   }) {}
+
+  /** The last count `onRunning` was told, so it only hears about real changes. */
+  private reported = 0;
 
   private get clock(): Clock { return this.options.clock ?? systemClock; }
   private now(): number { return this.clock.now(); }
@@ -177,14 +184,15 @@ export class PlayRuntime {
     const view = normalizeView(shown.value);
     const payload = renderView(record.id, view, Boolean(finish));
     this.checkPictures(record, payload);
-    const timers = new Map(record.timers.map(timer => [timer.id, timer.dueAt]));
+    const timers = new Map(record.timers.map(({ id, ...pending }) => [id, pending]));
     for (const effect of checked) {
-      if (effect.type === 'after') timers.set(effect.id, input.ctx.now + effect.ms);
+      // A clock gets its deadline only once someone is playing; before that the app keeps the duration alone.
+      if (effect.type === 'after') timers.set(effect.id, { ms: effect.ms, ...(record.interacted ? { dueAt: input.ctx.now + effect.ms } : {}) });
       else if (effect.type === 'cancel') timers.delete(effect.id);
     }
     if (finish) timers.clear();
     if (timers.size > playLimits.timers) throw new PlayError(`An app may have ${playLimits.timers} timers pending.`);
-    return { state, seed: shown.seed, view: view as View, payload: withNote(payload, finish?.summary), effects: checked, timers: [...timers].map(([id, dueAt]) => ({ id, dueAt })), finished: finish ? { summary: finish.summary } : undefined };
+    return { state, seed: shown.seed, view: view as View, payload: withNote(payload, finish?.summary), effects: checked, timers: [...timers].map(([id, pending]) => ({ id, ...pending })), finished: finish ? { summary: finish.summary } : undefined };
   }
 
   /**
@@ -200,7 +208,9 @@ export class PlayRuntime {
     let budget = 60;
     let timed = from.timers.length > 0;
     const scheduled = new Set(from.timers.map(timer => timer.id));
-    const base: PlayRecord = { ...record, state: from.state, seed: from.seed, timers: from.timers };
+    // A probe stands in for someone playing, so clocks still waiting for that are counted from here.
+    const at = this.now();
+    const base: PlayRecord = { ...record, state: from.state, seed: from.seed, interacted: true, timers: from.timers.map(timer => timer.dueAt === undefined ? { ...timer, dueAt: at + (timer.ms ?? 0) } : timer) };
     const before = JSON.stringify(from.state) + describe(from.view);
     const tried: string[] = [], inert: string[] = [];
     // Emoji that reach Discord as plain text: :shortcodes:, and server emoji inside backticks.
@@ -239,7 +249,7 @@ export class PlayRuntime {
           break;
         }
         const consult = step.effects.find(effect => effect.type === 'consult');
-        const timer = [...step.timers].sort((a, b) => a.dueAt - b.dueAt)[0];
+        const timer = [...step.timers].sort((a, b) => (a.dueAt ?? 0) - (b.dueAt ?? 0))[0];
         current = { ...current, state: step.state, seed: step.seed, timers: step.timers.filter(entry => entry !== timer) };
         pending = consult ? [{ kind: 'consult', id: consult.id, text: 'Sorry, I cannot help with that.' }] : timer ? [{ kind: 'timer', id: timer.id }] : [];
       }
@@ -288,6 +298,7 @@ export class PlayRuntime {
     this.arm(live);
     if (step.finished) this.release(live);
     else for (const effect of step.effects) if (effect.type === 'consult') this.consult(live, effect);
+    this.report();
     return step.effects.filter((effect): effect is Extract<Effect, { type: 'ephemeral' }> => effect.type === 'ephemeral');
   }
 
@@ -336,13 +347,37 @@ export class PlayRuntime {
     await live.reach!.edit(ready);
   }
 
+  /**
+   * Starts the clocks an app is waiting on, and only those it can spend anything on: one nobody has
+   * played with yet, or whose message nothing can edit, holds its wait instead of counting it down.
+   */
   private arm(live: Live): void {
     for (const cancel of live.timers.values()) cancel();
     live.timers.clear();
-    if (live.record.status !== 'running') return;
-    for (const { id, dueAt } of live.record.timers) {
-      live.timers.set(id, this.clock.after(Math.max(0, dueAt - this.now()), () => {
+    const { record } = live;
+    if (record.status !== 'running' || !record.interacted) return;
+    if (!this.reachable(live)) { live.pausedAt ??= this.now(); return; }
+    const now = this.now();
+    let changed = false;
+    // Time nobody could have seen does not count, so every deadline moves on by however long that was.
+    if (live.pausedAt !== undefined) {
+      const paused = now - live.pausedAt;
+      record.timers = record.timers.map(timer => timer.dueAt === undefined ? timer : { ...timer, dueAt: timer.dueAt + paused });
+      live.pausedAt = undefined;
+      changed = true;
+    }
+    if (record.timers.some(timer => timer.dueAt === undefined)) {
+      record.timers = record.timers.map(timer => timer.dueAt === undefined ? { ...timer, dueAt: now + (timer.ms ?? 0) } : timer);
+      changed = true;
+    }
+    if (changed) this.options.store.save(record);
+    // An app reachable only through an interaction loses that at a known moment; its clocks stop there.
+    const reachUntil = record.viaInteraction ? live.reach?.until : undefined;
+    for (const { id, dueAt } of record.timers) {
+      const stops = reachUntil !== undefined && reachUntil < dueAt!;
+      live.timers.set(id, this.clock.after(Math.max(0, (stops ? reachUntil! : dueAt!) - now), () => {
         live.timers.delete(id);
+        if (stops) { this.arm(live); return; }
         // Nobody would see the tick, so it waits in the record for the next click, which re-arms it.
         if (!this.reachable(live)) return;
         live.record.timers = live.record.timers.filter(entry => entry.id !== id);
@@ -384,6 +419,7 @@ export class PlayRuntime {
     this.remember(record, status === 'finished' ? 'stop' : 'pause');
     this.release(live);
     this.options.store.save(record);
+    this.report();
     if (!record.messageId) return;
     let payload: MessagePayload;
     try { payload = renderView(record.id, record.view, true); } catch { payload = { content: '', embeds: [], components: [], allowedMentions: { parse: [] } }; }
@@ -399,6 +435,17 @@ export class PlayRuntime {
     return [...this.live.values()].map(live => live.record).filter(record => record.status === 'running' && (!channelId || record.channelId === channelId));
   }
 
+  /** Apps running now, across every channel. */
+  runningCount(): number { return this.running().length; }
+
+  /** Called wherever an app may have started, finished, paused or been swept. */
+  private report(): void {
+    const count = this.running().length;
+    if (count === this.reported) return;
+    this.reported = count;
+    this.options.onRunning?.(count);
+  }
+
   /** Loads the app, checks its first state and view, posts it, and starts its timers. */
   async start(options: StartOptions): Promise<{ record: PlayRecord; preview: string }> {
     if (this.running(options.channelId).length >= playLimits.perChannel) throw new PlayError(`This channel already has ${playLimits.perChannel} apps running; stop one first.`);
@@ -409,7 +456,7 @@ export class PlayRuntime {
       const record: PlayRecord = {
         id: randomBytes(8).toString('hex').slice(0, 10), title: clip(options.title, 100), owner: options.owner, channelId: options.channelId, conversation: options.conversation,
         participants: 'everyone', source: options.source, state: null, seed: randomBytes(4).readUInt32LE(), view: {}, emojis: options.emojis ?? {},
-        timers: [], consults: [], status: 'running', log: [], createdAt: now, updatedAt: now,
+        timers: [], consults: [], status: 'running', log: [], interacted: false, createdAt: now, updatedAt: now,
         ...(options.post ? { viaInteraction: true } : {}), ...(options.file ? { file: options.file } : {}),
       };
       const meta = (await engine.call('meta', { ctx: this.context(record) })).value as { participants?: unknown } | null;
@@ -435,7 +482,8 @@ export class PlayRuntime {
     const live = this.owned(id, conversation);
     return this.serial(live, async () => {
       const engine = source ? await this.build(source) : await this.engine(live);
-      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
+      // Starting a timer by hand is deliberate, so it runs without waiting for anyone to play.
+      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(start.length ? { interacted: true } : {}), ...(reset ? { state: null, timers: [] } : {}) };
       const added: string[] = [];
       try {
         // Kept state lacks what the new version's init() adds (a leaderboard, a weather field); fill those in.
@@ -454,7 +502,7 @@ export class PlayRuntime {
           return { state: record.state, seed: shown.seed, view: view as View, payload, effects: [], timers: record.timers } satisfies Advance;
         })();
         const started = checkEffects(start.map(timer => ({ type: 'after', ...timer }))) as Array<Extract<Effect, { type: 'after' }>>;
-        step.timers = [...step.timers.filter(timer => !started.some(entry => entry.id === timer.id)), ...started.map(timer => ({ id: timer.id, dueAt: this.now() + timer.ms }))];
+        step.timers = [...step.timers.filter(timer => !started.some(entry => entry.id === timer.id)), ...started.map(timer => ({ id: timer.id, ms: timer.ms, dueAt: this.now() + timer.ms }))];
         if (step.timers.length > playLimits.timers) throw new PlayError(`An app may have ${playLimits.timers} timers pending.`);
         const notes = await this.probe(engine, record, step, !reset);
         if (live.engine !== engine) live.engine?.dispose();
@@ -473,7 +521,7 @@ export class PlayRuntime {
   /** A dry run with no message, persistence or timers, so the model can check an app before posting it. */
   async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean; state?: unknown; conversation?: string } = {}): Promise<string> {
     const engine = await this.build(source);
-    const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: options.conversation ?? '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], createdAt: 0, updatedAt: 0 };
+    const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: options.conversation ?? '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], interacted: true, createdAt: 0, updatedAt: 0 };
     const lines: string[] = [];
     let last: string[] = [];
     // Actions that change nothing (a move into a wall, a turn out of order) are easy to miss in the final state alone.
@@ -513,8 +561,15 @@ export class PlayRuntime {
   /** The code an app runs now, so a change can be made as small edits to it. */
   source(id: string, conversation: string): Source { return this.owned(id, conversation).record.source; }
 
-  /** The attached file an app was started from, if any. */
+  /** The workspace file an app runs from, if any. */
   file(id: string, conversation: string): string | undefined { return this.owned(id, conversation).record.file; }
+
+  /** Records the workspace file an app runs from now: one whose code was only inline, or one moved to another file. */
+  adopt(id: string, conversation: string, file: string): void {
+    const live = this.owned(id, conversation);
+    live.record.file = file;
+    this.options.store.save(live.record);
+  }
 
   /** The state an app runs with now. */
   state(id: string, conversation: string): unknown { return this.owned(id, conversation).record.state; }
@@ -588,6 +643,8 @@ export class PlayRuntime {
       return Boolean(control && !control.disabled && (control.type === 'select') === (interaction.kind === 'select'));
     };
     if (!current()) { await interaction.reply('That control is no longer available.'); return; }
+    // Someone is playing now, so any clock the app has been holding starts from here.
+    record.interacted = true;
     const control = interaction.kind === 'button' ? findControl(record.view, interaction.controlId) : undefined;
     if (control?.type === 'button' && control.opens) { await interaction.openModal(renderModal(record.id, control.opens)); return; }
     await interaction.defer();
@@ -627,6 +684,7 @@ export class PlayRuntime {
       this.arm(live);
       count++;
     }
+    this.report();
     if (!this.sweeper) this.schedule();
     return count;
   }
@@ -646,6 +704,7 @@ export class PlayRuntime {
         this.options.store.remove(live.record.id);
       }
     }
+    this.report();
   }
 
   close(): void {

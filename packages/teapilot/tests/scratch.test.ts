@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { createWriteTool } from '@earendil-works/pi-coding-agent';
 import type { Message } from '@earendil-works/pi-ai';
 import { completion, events, fixture, mockServer } from './helpers.js';
-import { captureResult, scratchTools } from '../src/agents/scratchpad.js';
+import { captureResult } from '../src/agents/scratchpad.js';
 import { fitHistory } from '../src/agents/history.js';
-import { repositoryTools } from '../src/agents/repository.js';
+import { sessionTools } from '../src/agents/tools.js';
 import { runAttempt } from '../src/agents/run.js';
 import { ExecutionPolicy } from '../src/execution/policy.js';
 import { SpendGovernor } from '../src/inference/budget.js';
@@ -104,8 +104,24 @@ it('moves the full output pi kept in its own temp file into the scratchpad, and 
   const spoofed = await captureResult(pad, policy, 'bash', { command: 'cat x' }, `x\n[Showing lines 1-1 of 1. Full output: ${planted}]`, undefined);
   expect(spoofed).toBeUndefined();
   expect(await exists(planted)).toBe(true);
-  // Reading the scratchpad's own files is not new output.
-  expect(await captureResult(pad, policy, 'bash', { command: `cat ${scratch}/logs/bash-1.log` }, log(), undefined)).toBeUndefined();
+  // Reading the scratchpad's own files is not new output to keep, though it is still bounded.
+  const reread = await captureResult(pad, policy, 'bash', { command: `cat ${scratch}/logs/bash-1.log` }, log(), undefined);
+  expect(reread?.saved).toBeUndefined();
+  expect(reread?.text.length).toBeLessThan(scratchLimits.previewChars + 100);
+});
+
+it('cuts pi\'s shell output, up to 50 KB, to what a small context can take', async () => {
+  const { scratch, config, cwd } = await setup();
+  const policy = new ExecutionPolicy(cwd, config, async () => true, undefined, scratch);
+  const temporary = join(tmpdir(), `pi-bash-cuttest${Date.now()}.log`);
+  await writeFile(temporary, log(3000));
+  const shown = `${log(2000)}\n[Showing lines 1000-3000 of 3000. Full output: ${temporary}]\nNo files changed.`;
+  const kept = (await captureResult(new Scratch(scratch), policy, 'bash', { command: 'make' }, shown, { fullOutputPath: temporary }))!;
+  expect(kept.text.length).toBeLessThan(scratchLimits.previewChars + 2500);
+  expect(kept.text).toContain('No files changed.');
+  expect(await readFile(kept.saved!.path, 'utf8')).toContain('MARKER-7f2a');
+  // Without a scratchpad the rest is gone, but the result is just as bounded.
+  expect((await captureResult(undefined, policy, 'bash', { command: 'make' }, shown, undefined))!.text.length).toBeLessThan(scratchLimits.previewChars + 100);
 });
 
 it('lets the agent work in its scratchpad without repository access, and never counts it as a project change', async () => {
@@ -144,46 +160,49 @@ it('searches the scratchpad from a repository session, naming files so read can 
   await mkdir(join(scratch, 'logs'), { recursive: true });
   await writeFile(join(scratch, 'logs', 'bash-1.log'), log());
   const policy = new ExecutionPolicy(cwd, config, async () => true, undefined, scratch);
-  const search = repositoryTools(policy).find(tool => tool.name === 'repo_search')!;
-  const found = JSON.parse(textOf(await search.execute('s', { path: scratch, query: 'MARKER-7f2a' })));
-  expect(found.results).toEqual([{ path: join(scratch, 'logs', 'bash-1.log').split('\\').join('/'), line: 5001, text: 'MARKER-7f2a record=r-0042 cause=timezone-offset' }]);
+  const search = sessionTools(policy, { stateDir: config.stateDir }).find(tool => tool.name === 'grep')!;
+  expect(textOf(await search.execute('s', { path: scratch, pattern: 'MARKER-7f2a' }))).toBe('logs/bash-1.log:5001: MARKER-7f2a record=r-0042 cause=timezone-offset');
   // Without repository access, the same tools are rooted at the scratchpad, where paths are its own.
   config.policy.permissions = ['inference'];
-  const own = scratchTools(new ExecutionPolicy(scratch, config, async () => true, undefined, scratch));
-  expect(own.map(tool => tool.name)).toEqual(['list_files', 'search_files', 'read', 'write', 'edit']);
-  expect(JSON.parse(textOf(await own[0]!.execute('l', {}))).results).toEqual(['logs/bash-1.log']);
+  const own = sessionTools(new ExecutionPolicy(scratch, config, async () => true, undefined, scratch), { stateDir: config.stateDir });
+  const named = (name: string) => own.find(tool => tool.name === name)!;
+  expect(own.map(tool => tool.name)).toEqual(['read', 'write', 'edit', 'ls', 'find', 'grep']);
+  expect(textOf(await named('find').execute('l', { pattern: '*' }))).toBe('logs\nlogs/bash-1.log');
   // `.scratch/` is what sandboxed commands call it, and it means the same folder to every file tool.
-  expect(JSON.parse(textOf(await own[1]!.execute('s', { path: '.scratch/logs', query: 'MARKER-7f2a' }))).results).toHaveLength(1);
-  expect(textOf(await own[2]!.execute('r', { path: '.scratch/logs/bash-1.log', offset: 5001, limit: 1 }))).toContain('MARKER-7f2a');
+  expect(textOf(await named('grep').execute('s', { path: '.scratch/logs', pattern: 'MARKER-7f2a' }))).toContain('bash-1.log:5001:');
+  expect(textOf(await named('read').execute('r', { path: '.scratch/logs/bash-1.log', offset: 5001, limit: 1 }))).toContain('MARKER-7f2a');
   expect(policy.inScratch('.scratch/logs/bash-1.log')).toBe(true);
-  // A complete search says it is complete, and the same search again says it will find nothing more.
-  expect(JSON.parse(textOf(await own[1]!.execute('s', { query: 'no-such-text' }))).note).toMatch(/^These are all 0 matches in scope: the text does not occur there/);
-  const again = JSON.parse(textOf(await own[1]!.execute('s', { path: '.scratch/logs', query: 'MARKER-7f2a', limit: 200 })));
-  expect(again.note).toMatch(/^Same matches as your earlier search for this text; searching again will not find more\. These are all 1 matches/);
+  expect(textOf(await named('grep').execute('s', { pattern: 'no-such-text' }))).toBe('No matches found');
 });
 
-it('keeps all of a workspace command\'s output when its result leaves some out, where commands there can read it', async () => {
+it('runs workspace commands with pi\'s shell in the sandbox, leaving the whole of long output for the scratchpad', async () => {
   const f = await setup();
   const store = WorkspaceStore.at(join(f.cwd, 'state'));
   const out = log(3000);
-  let cancelled = false;
+  let cancelled = false, seconds = 0;
   const sandbox: WorkspaceSandbox = {
     status: async () => ({ available: true, shell: 'bash', tools: [] }),
-    run: async (_folder, _command, options) => {
+    run: async (folder, _command, options) => {
+      seconds = options.timeoutSeconds;
       for (const part of out.match(/[\s\S]{1,4096}/g)!) options.tee?.(part);
+      await writeFile(join(folder, 'made.txt'), cancelled ? 'changed' : 'x');
       return { exitCode: cancelled ? null : 0, output: clip(out, runLimits.outputChars), timedOut: false, cancelled, clipped: true };
     },
   };
+  const { shell } = await workspace({ store, conversation: 'dm:1', sandbox }, async () => true, true);
+  expect(shell!.name).toBe('bash');
+  const result = await shell!.execute('r', { command: 'make', timeout: 9999 });
+  expect(seconds).toBe(runLimits.maxSeconds);
+  const shown = result.content.map(part => part.type === 'text' ? part.text : '').join('\n');
+  expect(shown).toMatch(/New files: made\.txt/);
+  // pi keeps what it cannot show in a temp file of its own, which the runner moves into the scratchpad.
   const pad = new Scratch(store.scratch('dm:1'));
-  const tools = (await workspace({ store, conversation: 'dm:1', sandbox }, { latest: () => undefined, block: () => undefined, used: new Set() }, async () => true, undefined, pad)).tools;
-  const run = tools.find(tool => tool.name === 'workspace_run')!;
-  const text = textOf(await run.execute('r', { command: 'make' }));
-  expect(text).toContain('Commands here see it as .scratch/logs/workspace_run-1.log.');
-  expect(await readFile(join(store.scratch('dm:1'), 'logs', 'workspace_run-1.log'), 'utf8')).toBe(out);
+  const kept = (await captureResult(pad, new ExecutionPolicy(store.folder('dm:1'), f.config, async () => true, undefined, pad.folder, true), 'bash', { command: 'make' }, shown, result.details))!;
+  expect(await readFile(kept.saved!.path, 'utf8')).toBe(out);
   // People never see the scratchpad among the conversation's files.
-  expect(store.list('dm:1')).toEqual([]);
+  expect(store.list('dm:1').map(file => file.name)).toEqual(['made.txt']);
   cancelled = true;
-  expect(textOf(await run.execute('r', { command: 'make' }))).toMatch(/workspace_run-2\.partial\.log \(3000 lines, incomplete\)/);
+  await expect(shell!.execute('r', { command: 'make' })).rejects.toThrow(/Command aborted[\s\S]*Changed: made\.txt/);
 });
 
 it('keeps where the full output went when an earlier turn is cut down', () => {
@@ -218,12 +237,12 @@ it('keeps a long result whole, so a later search finds what the preview left out
     bodies.push(body);
     const step = bodies.length;
     completion(res, step === 1 ? { tool: { name: 'run_import_diagnostic', arguments: {} } }
-      : step === 2 ? { tool: { name: 'search_files', arguments: { query: 'r-0042' } } }
+      : step === 2 ? { tool: { name: 'grep', arguments: { pattern: 'r-0042' } } }
       : { text: 'r-0042 failed on a timezone offset.' });
   });
   const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'why did r-0042 fail?', scratch: f.scratch });
   expect(result.success, JSON.stringify(result)).toBe(true);
-  expect(bodies[0].tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual(expect.arrayContaining(['read', 'write', 'edit', 'list_files', 'search_files', 'run_import_diagnostic']));
+  expect(bodies[0].tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual(expect.arrayContaining(['read', 'write', 'edit', 'ls', 'find', 'grep', 'run_import_diagnostic']));
   expect(bodies[0].messages[0].content).toContain(`Your scratchpad is ${f.scratch}`);
   const preview = JSON.stringify(bodies[1].messages.at(-1));
   expect(preview).not.toContain('r-0042');
@@ -232,7 +251,7 @@ it('keeps a long result whole, so a later search finds what the preview left out
   const recorded = await events(f.config);
   expect(recorded.filter(event => event.type === 'fixture_invocation')).toHaveLength(1);
   expect(recorded.find(event => event.type === 'scratch_saved')).toMatchObject({ tool: 'run_import_diagnostic', lines: 10000, complete: true });
-  expect(recorded.find(event => event.type === 'scratch_access')).toMatchObject({ tool: 'search_files', file: '.' });
+  expect(recorded.find(event => event.type === 'scratch_access')).toMatchObject({ tool: 'grep', file: '.' });
 });
 
 it('hands a forced retry what already ran and where its output is, without running it again', async () => {
@@ -263,7 +282,7 @@ it('with the scratchpad off, still bounds a long result but keeps none of it', a
   const f = await attempt((body, _req, res) => { bodies.push(body); completion(res, bodies.length === 1 ? { tool: { name: 'run_import_diagnostic', arguments: {} } } : { text: 'ok' }); });
   f.config.scratchpad = { enabled: false };
   await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'run it', scratch: f.scratch });
-  expect(bodies[0].tools.map((tool: { function: { name: string } }) => tool.function.name)).not.toEqual(expect.arrayContaining(['search_files']));
+  expect(bodies[0].tools.map((tool: { function: { name: string } }) => tool.function.name)).not.toEqual(expect.arrayContaining(['grep']));
   expect(bodies[0].messages[0].content).not.toContain('scratchpad');
   const preview = JSON.stringify(bodies[1].messages.at(-1));
   expect(preview).toContain('characters left out');

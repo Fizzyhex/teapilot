@@ -1,13 +1,15 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
 
 /**
  * Tools teapilot installs for workspace commands when the system lacks them: pandoc, and Python packages.
  * They live under teapilot's state, which sandboxed commands may read but not write, so one copy serves every
- * conversation. ffmpeg, ImageMagick, Python and Node come from the system.
+ * conversation. ffmpeg, ImageMagick, Python and Node come from the system. ripgrep, for the grep tool, is teapilot's
+ * own too, pinned and checked the same way.
  */
 export const pandocRelease = {
   version: '3.11',
@@ -20,6 +22,17 @@ export const pandocRelease = {
     'darwin-arm64': { file: 'pandoc-3.11-arm64-macOS.zip', sha256: '15806bedf9517bfead72e88fe6a6696635c3691efbb6e152173440e9c5bb50b4', binary: 'pandoc-3.11-arm64/bin/pandoc' },
   } as Record<string, { file: string; sha256: string; binary: string }>,
 };
+/** ripgrep for the grep tool, which pi would otherwise download unpinned on first use. */
+export const ripgrepRelease = {
+  version: '14.1.1',
+  assets: {
+    'win32-x64': { file: 'ripgrep-14.1.1-x86_64-pc-windows-msvc.zip', sha256: 'd0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1', binary: 'ripgrep-14.1.1-x86_64-pc-windows-msvc/rg.exe' },
+    'linux-x64': { file: 'ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz', sha256: '4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e', binary: 'ripgrep-14.1.1-x86_64-unknown-linux-musl/rg' },
+    'linux-arm64': { file: 'ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz', sha256: 'c827481c4ff4ea10c9dc7a4022c8de5db34a5737cb74484d62eb94a95841ab2f', binary: 'ripgrep-14.1.1-aarch64-unknown-linux-gnu/rg' },
+    'darwin-x64': { file: 'ripgrep-14.1.1-x86_64-apple-darwin.tar.gz', sha256: 'fc87e78f7cb3fea12d69072e7ef3b21509754717b746368fd40d88963630e2b3', binary: 'ripgrep-14.1.1-x86_64-apple-darwin/rg' },
+    'darwin-arm64': { file: 'ripgrep-14.1.1-aarch64-apple-darwin.tar.gz', sha256: '24ad76777745fbff131c8fbc466742b011f925bfa4fffa2ded6def23b5b937be', binary: 'ripgrep-14.1.1-aarch64-apple-darwin/rg' },
+  } as Record<string, { file: string; sha256: string; binary: string }>,
+};
 /** Python packages every workspace can import, pinned; prebuilt wheels only, so nothing is compiled or run to install them. */
 export const pythonPackages = [{ name: 'Pillow', version: '12.3.0' }, { name: 'numpy', version: '2.5.3' }, { name: 'yt-dlp', version: '2026.8.19' }];
 
@@ -30,6 +43,7 @@ export const toolsFolder = (stateDir: string) => join(stateDir, 'tools', 'worksp
 export const pandocFolder = (stateDir: string) => join(toolsFolder(stateDir), 'pandoc', pandocRelease.version);
 export const packagesFolder = (stateDir: string, abi: string) => join(toolsFolder(stateDir), 'python', abi);
 export const pandocAsset = (platform = process.platform, arch = process.arch) => pandocRelease.assets[`${platform}-${arch}`];
+export const ripgrepFolder = (stateDir: string) => join(stateDir, 'tools', 'ripgrep', ripgrepRelease.version);
 
 /** `.cp314-win_amd64.pyd` or `.cpython-312-x86_64-linux-gnu.so` as a folder name, so each interpreter gets matching wheels. */
 export function pythonAbi(extensionSuffix: string): string | undefined {
@@ -48,9 +62,40 @@ const failure = (error: unknown) => {
 export async function installPandoc(stateDir: string, signal: AbortSignal, get: typeof fetch = fetch): Promise<string> {
   const asset = pandocAsset();
   if (!asset) throw new Error(`pandoc publishes no build for ${process.platform} ${process.arch}`);
-  const folder = pandocFolder(stateDir);
-  const binary = join(folder, process.platform === 'win32' ? 'pandoc.exe' : 'pandoc');
-  const response = await get(`https://github.com/jgm/pandoc/releases/download/${pandocRelease.version}/${asset.file}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]) });
+  return installBinary(`https://github.com/jgm/pandoc/releases/download/${pandocRelease.version}/${asset.file}`, asset, pandocFolder(stateDir), 'pandoc', signal, get);
+}
+
+/** Downloads the pinned ripgrep for this platform, checks it, and keeps only the binary; returns its path. */
+export async function installRipgrep(stateDir: string, signal: AbortSignal, get: typeof fetch = fetch): Promise<string> {
+  const asset = ripgrepRelease.assets[`${process.platform}-${process.arch}`];
+  if (!asset) throw new Error(`ripgrep publishes no build for ${process.platform} ${process.arch}`);
+  return installBinary(`https://github.com/BurntSushi/ripgrep/releases/download/${ripgrepRelease.version}/${asset.file}`, asset, ripgrepFolder(stateDir), 'rg', signal, get);
+}
+
+let ripgrep: Promise<string> | undefined, found: string | undefined;
+/**
+ * Makes rg findable for pi's grep, which runs the first rg on PATH: the system's, or else teapilot's pinned copy,
+ * installed on first use. PI_OFFLINE keeps pi from downloading an unpinned one of its own.
+ */
+export async function ensureRipgrep(stateDir: string, get: typeof fetch = fetch): Promise<string> {
+  process.env.PI_OFFLINE = '1';
+  // The copy found before is used again while it is still there.
+  if (found && (found === 'rg' || existsSync(found))) return found;
+  ripgrep ??= (async () => {
+    if (!spawnSync('rg', ['--version'], { stdio: 'ignore', windowsHide: true }).error) return 'rg';
+    const folder = ripgrepFolder(stateDir);
+    const binary = join(folder, process.platform === 'win32' ? 'rg.exe' : 'rg');
+    if (!existsSync(binary)) await installRipgrep(stateDir, AbortSignal.timeout(2 * 60 * 1000), get);
+    process.env.PATH = `${folder}${delimiter}${process.env.PATH ?? ''}`;
+    return binary;
+  })();
+  // A failed install is tried again by the next search.
+  try { return found = await ripgrep; } finally { ripgrep = undefined; }
+}
+
+async function installBinary(url: string, asset: { file: string; sha256: string; binary: string }, folder: string, name: string, signal: AbortSignal, get: typeof fetch): Promise<string> {
+  const binary = join(folder, process.platform === 'win32' ? `${name}.exe` : name);
+  const response = await get(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]) });
   if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   if (createHash('sha256').update(bytes).digest('hex') !== asset.sha256) throw new Error('the download did not match its pinned checksum');

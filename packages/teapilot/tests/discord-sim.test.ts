@@ -139,7 +139,11 @@ async function models() {
       jev(response, 'ask.normal');
     }
     else if (request.url?.endsWith('/models')) response.end(JSON.stringify({ data: [{ id: 'fast-test' }, { id: 'capable-test' }] }));
-    else completion(response, ++completions === 1 ? { tool: { name: 'play_start', arguments: { title: 'Counter', source: counter } } } : { text: 'Your counter is up.' });
+    else {
+      // The model writes the app to a workspace file, then starts it from there.
+      const steps = [{ tool: { name: 'write', arguments: { path: 'apps/counter.js', content: counter } } }, { tool: { name: 'play_start', arguments: { file: 'apps/counter.js', title: 'Counter' } } }];
+      completion(response, steps[completions++] ?? { text: 'Your counter is up.' });
+    }
   });
   cleanups.push(server.close);
   f.config.router.endpoint = `${server.url}/jev`;
@@ -168,7 +172,7 @@ it('runs teapilot discord start against the simulator: a model builds an app, pe
   expect(world.screen('dm-stranger')).not.toContain('teapilot');
   const card = world.messages.find(message => message.content.startsWith('-# Result: completed'))!;
   expect(card.components[0]!.components.map(control => control.label)).toEqual(['Details']);
-  expect(await world.click('op', card.id, 'details')).toMatch(/\(only op sees this\).*\n {2}\*\*Turn details\*\* · completed · 1 step · \d+s\n {2}- play\\_start/);
+  expect(await world.click('op', card.id, 'details')).toMatch(/\(only op sees this\).*\n {2}\*\*Turn details\*\* · completed · 2 steps · \d+s\n {2}- write apps\W+counter\.js \(1 KB\)\n {2}- play\\_start/);
   const app = world.messages.find(message => message.content.startsWith('Count 0'))!;
   expect(app.channel.name).toBe('dm-op');
   expect(await world.click('op', app.id, 'add')).toContain('Count 1');

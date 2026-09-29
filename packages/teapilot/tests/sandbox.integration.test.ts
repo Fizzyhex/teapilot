@@ -34,7 +34,7 @@ describe.skipIf(!status.available)('sandboxed workspace commands', () => {
   afterAll(async () => { await sandbox.close(); await rm(state, { recursive: true, force: true }); });
 
   it('reads and writes its own workspace by relative names', async () => {
-    const result = await sandbox.run(mine, shell ? 'echo hello> out.txt && type out.txt' : 'echo hello > out.txt && cat out.txt', offline);
+    const result = await sandbox.run(mine, shell ? 'echo hello > out.txt; Get-Content out.txt' : 'echo hello > out.txt && cat out.txt', offline);
     expect(result).toMatchObject({ exitCode: 0, timedOut: false });
     expect(result.output).toContain('hello');
   }, 60_000);

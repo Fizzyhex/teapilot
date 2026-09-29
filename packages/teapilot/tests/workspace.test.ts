@@ -52,7 +52,13 @@ function fakeSandbox(handler: (folder: string, command: string, options: RunOpti
   return {
     commands,
     status: async () => available ? { available, shell: 'bash', tools: [{ name: 'magick', kind: 'imagemagick', version: '7.1.2' }, { name: 'python3', kind: 'python', version: '3.12.3' }] } : { available, reason: 'the sandbox is not installed', shell: 'bash', tools: [] },
-    run: async (folder, command, options) => { commands.push(command); return { exitCode: 0, output: await handler(folder, command, options) ?? '', timedOut: false, cancelled: false }; },
+    run: async (folder, command, options) => {
+      commands.push(command);
+      // Output reaches the shell tool as it arrives, as the real sandbox sends it.
+      const output = await handler(folder, command, options) ?? '';
+      if (output) options.tee?.(output);
+      return { exitCode: 0, output, timedOut: false, cancelled: false };
+    },
   };
 }
 
@@ -197,11 +203,12 @@ async function agentSetup(handler: Parameters<typeof mockServer>[0], sandbox: Wo
     base: { tier: 'normal' as const, workload: 'ask' as const, web: false, approve: async (approval: Approval) => { approvals.push(approval); return true; } } };
 }
 
-it('runs a script from the reply in the workspace, then posts what it made', async () => {
+it('writes a script, runs it with the sandboxed shell, then posts what it made', async () => {
   const bodies: any[] = [];
-  const script = '```python\nfrom PIL import Image\nImage.open("leaves.png").transpose(Image.FLIP_LEFT_RIGHT).rotate(90, expand=True).save("leaves-turned.png")\n```';
+  const script = 'from PIL import Image\nImage.open("leaves.png").transpose(Image.FLIP_LEFT_RIGHT).rotate(90, expand=True).save("leaves-turned.png")\n';
   const steps = [
-    { text: script, tool: { name: 'workspace_run', arguments: { script: 'turn.py', command: 'python3 turn.py' } } },
+    { tool: { name: 'write', arguments: { path: 'turn.py', content: script } } },
+    { tool: { name: 'bash', arguments: { command: 'python3 turn.py' } } },
     { tool: { name: 'file_send', arguments: { file: 'leaves-turned.png' } } },
     { text: 'Here you go.' },
   ];
@@ -211,30 +218,30 @@ it('runs a script from the reply in the workspace, then posts what it made', asy
   const result = await runAttempt({ ...f, ...f.base, prompt: 'flip it and turn it 90 degrees', activePermissions: ['inference'], play: f.play, workspace: f.workspace });
   expect(result.success, JSON.stringify(result)).toBe(true);
   const names = (bodies[0].tools ?? []).map((tool: any) => tool.function.name);
-  expect(names).toEqual(expect.arrayContaining(['workspace_run', 'file_send']));
-  expect(names).not.toContain('image_edit');
+  expect(names).toEqual(expect.arrayContaining(['read', 'write', 'edit', 'ls', 'find', 'grep', 'bash', 'file_send']));
+  expect(names).not.toContain('workspace_run');
   const instructions = JSON.stringify(bodies[0].messages);
   expect(instructions).toContain('leaves.png (PNG image 40×20');
   expect(instructions).toContain('Installed: magick 7.1.2, python3 3.12.3');
+  expect(instructions).toContain('Use write only for new files or complete rewrites.');
   expect(sandbox.commands).toEqual(['python3 turn.py']);
   expect(f.store.read('dm:1', 'turn.py')?.data.toString()).toContain('FLIP_LEFT_RIGHT');
-  const ran = JSON.stringify(bodies[1].messages);
-  expect(ran).toContain('Saved the script as turn.py. Exit code 0.');
+  const ran = JSON.stringify(bodies[2].messages);
+  expect(ran).toContain('turned');
   expect(ran).toContain('New files: leaves-turned.png (PNG image 40×20');
   expect(f.sent.map(entry => entry.files.map(file => file.name))).toEqual([['leaves-turned.png']]);
-  // The script is shown by what it made, not by its source.
-  expect(result.text).not.toContain('FLIP_LEFT_RIGHT');
 });
 
-it('gives the file tools the workspace workspace_run uses, so an edited script is the one that runs next', async () => {
+it('gives every tool the workspace as its root, so an edited script is the one that runs next', async () => {
   const bodies: any[] = [];
   const steps = [
-    { text: '```python\nprint("old")\n```', tool: { name: 'workspace_run', arguments: { script: 'scene.py', command: 'python3 scene.py' } } },
+    { tool: { name: 'write', arguments: { path: 'scene.py', content: 'print("old")\n' } } },
+    { tool: { name: 'bash', arguments: { command: 'python3 scene.py' } } },
     { tool: { name: 'edit', arguments: { path: 'scene.py', edits: [{ oldText: 'print("old")', newText: 'print("new")' }] } } },
-    { tool: { name: 'workspace_run', arguments: { command: 'python3 scene.py' } } },
+    { tool: { name: 'bash', arguments: { command: 'python3 scene.py' } } },
     { tool: { name: 'write', arguments: { path: '.scratch/notes.md', content: 'the scene works' } } },
     { tool: { name: 'write', arguments: { path: 'credits.txt', content: 'made by teapilot' } } },
-    { tool: { name: 'list_files', arguments: {} } },
+    { tool: { name: 'ls', arguments: {} } },
     { tool: { name: 'file_send', arguments: { files: ['credits.txt'] } } },
     { text: 'Done.' },
   ];
@@ -247,18 +254,16 @@ it('gives the file tools the workspace workspace_run uses, so an edited script i
   const result = await runAttempt({ ...f, ...f.base, prompt: 'make a scene', activePermissions: ['inference'], workspace, scratch: store.scratch('dm:1'),
     onEvent: event => { if (event.type === 'tool_execution_end') shown.push(event.path); } });
   expect(result.success, JSON.stringify(result)).toBe(true);
-  expect(JSON.stringify(bodies[0].messages)).toContain('take workspace file names, as workspace_run does');
-  expect(JSON.stringify(bodies[3].messages)).toContain('ran print(\\"new\\")');
+  expect(JSON.stringify(bodies[0].messages)).toContain('read, write, edit, ls, find and grep take workspace file names');
+  expect(JSON.stringify(bodies[4].messages)).toContain('ran print(\\"new\\")');
   expect(await readFile(join(store.scratch('dm:1'), 'notes.md'), 'utf8')).toBe('the scene works');
-  // Files the tools write join the workspace's list, so they can be sent; the scratchpad and its files stay out of sight.
+  // Files the tools write join the workspace's list, so they can be sent; the scratchpad and its files stay out of it.
   expect(store.list('dm:1').map(file => file.name)).toEqual(['scene.py', 'credits.txt']);
   expect(f.sent.map(entry => entry.files.map(file => file.name))).toEqual([['credits.txt']]);
-  const listed = JSON.stringify(bodies[6].messages.at(-1));
-  expect(listed).toContain('scene.py');
-  expect(listed).not.toContain('.scratch');
+  expect(JSON.stringify(bodies[7].messages.at(-1))).toContain('scene.py');
   // Nothing asked anyone, and changed files read as workspace names (scratchpad writes are shown without one).
   expect(f.approvals).toEqual([]);
-  expect(shown.filter(Boolean)).toEqual(['scene.py', 'credits.txt']);
+  expect(shown.filter(Boolean)).toEqual(['scene.py', 'scene.py', 'credits.txt']);
   expect(result.changedFiles).toEqual(['scene.py', 'credits.txt']);
 });
 
@@ -269,8 +274,7 @@ it('asks once before a command reaches a package registry, and remembers the ans
     return 'Successfully installed six';
   });
   const f = await agentSetup(() => undefined, sandbox);
-  const tools = (await workspace(f.workspace, { latest: () => undefined, block: () => undefined, used: new Set() }, f.base.approve)).tools;
-  const run = tools.find(tool => tool.name === 'workspace_run')!;
+  const run = (await workspace(f.workspace, f.base.approve, true)).shell!;
   await run.execute('one', { command: 'pip install six' });
   expect(hosts).toEqual([true, true]);
   expect(f.approvals).toEqual([expect.objectContaining({ kind: 'network', details: 'pip install six', summary: expect.stringContaining('pypi.org and files.pythonhosted.org') })]);
@@ -279,9 +283,9 @@ it('asks once before a command reaches a package registry, and remembers the ans
   expect(f.approvals).toHaveLength(1);
 
   // A refusal is reported, so the model does not retry.
-  const refusing = await workspace({ ...f.workspace, conversation: 'dm:2' }, { latest: () => undefined, block: () => undefined, used: new Set() }, async () => false);
-  const refused = await refusing.tools.find(tool => tool.name === 'workspace_run')!.execute('three', { command: 'pip install six' });
-  expect(refused.content[0]).toMatchObject({ text: expect.stringContaining('pypi.org and files.pythonhosted.org was not approved') });
+  const refusing = await workspace({ ...f.workspace, conversation: 'dm:2' }, async () => false, true);
+  const refused = await refusing.shell!.execute('three', { command: 'pip install six' });
+  expect(JSON.stringify(refused.content)).toContain('pypi.org and files.pythonhosted.org was not approved');
 });
 
 it('asks once for a YouTube download, whichever video servers it reaches', async () => {
@@ -294,97 +298,131 @@ it('asks once for a YouTube download, whichever video servers it reaches', async
     return 'Downloaded';
   });
   const f = await agentSetup(() => undefined, sandbox);
-  const run = (await workspace(f.workspace, { latest: () => undefined, block: () => undefined, used: new Set() }, f.base.approve)).tools.find(tool => tool.name === 'workspace_run')!;
-  await run.execute('one', { command: 'yt-dlp -x URL' });
+  await (await workspace(f.workspace, f.base.approve, true)).shell!.execute('one', { command: 'yt-dlp -x URL' });
   expect(f.approvals).toHaveLength(1);
   expect(f.store.domains('dm:1')).toContain('*.googlevideo.com');
   // Another server under an approved name needs no new question; an unrelated look-alike does.
   later = true;
-  const again = await workspace(f.workspace, { latest: () => undefined, block: () => undefined, used: new Set() }, async approval => { f.approvals.push(approval); return false; });
-  await again.tools.find(tool => tool.name === 'workspace_run')!.execute('two', { command: 'yt-dlp URL' });
+  const again = await workspace(f.workspace, async approval => { f.approvals.push(approval); return false; }, true);
+  await again.shell!.execute('two', { command: 'yt-dlp URL' });
   expect(hosts).toEqual([true, false]);
   expect(f.approvals).toHaveLength(2);
 });
 
+it('reports a failing command with its output and what it changed, and a long one with how to give it more time', async () => {
+  let exitCode = 2;
+  const sandbox: WorkspaceSandbox = {
+    status: async () => ({ available: true, shell: 'bash', tools: [] }),
+    run: async (folder, _command, options) => {
+      options.tee?.('Traceback: boom\n');
+      await writeFile(join(folder, 'half.png'), 'x');
+      return { exitCode, output: '', timedOut: exitCode === 124, cancelled: false };
+    },
+  };
+  const f = await agentSetup(() => undefined, sandbox);
+  const shell = (await workspace(f.workspace, f.base.approve, true)).shell!;
+  await expect(shell.execute('one', { command: 'python3 x.py' })).rejects.toThrow(/Traceback: boom[\s\S]*exited with code 2[\s\S]*New files: half\.png/);
+  exitCode = 124;
+  await expect(shell.execute('two', { command: 'python3 x.py', timeout: 5 })).rejects.toThrow(/timed out after 5 seconds\. Pass a longer timeout \(up to 300\)/);
+});
+
 it('without a sandbox, keeps and sends files but says commands cannot run', async () => {
   const f = await agentSetup(() => undefined, fakeSandbox(undefined, false));
-  const setup = await workspace(f.workspace, { latest: () => undefined, block: () => undefined, used: new Set() }, f.base.approve);
+  const setup = await workspace(f.workspace, f.base.approve, true);
   expect(setup.tools.map(tool => tool.name)).toEqual(['file_send']);
+  expect(setup.shell).toBeUndefined();
   expect(setup.systemPrompt).toContain('Commands cannot run here (the sandbox is not installed)');
 });
 
-it('pauses tools when workspace_run names a script that was not written, then runs what the model writes', async () => {
-  const bodies: any[] = [];
-  const steps = [
-    { tool: { name: 'workspace_run', arguments: { script: 'hello.py', command: 'python3 hello.py' } } },
-    { text: '```python\nprint("hi")\n```' },
-    { tool: { name: 'workspace_run', arguments: { script: 'hello.py', command: 'python3 hello.py' } } },
-    { text: 'It printed hi.' },
-  ];
-  const sandbox = fakeSandbox(async () => 'hi');
-  const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); }, sandbox);
-  const result = await runAttempt({ ...f, ...f.base, prompt: 'run a hello world', activePermissions: ['inference'], workspace: f.workspace });
-  expect(result.success, JSON.stringify(result)).toBe(true);
-  expect(bodies[1].tools ?? []).toHaveLength(0);
-  expect(JSON.stringify(bodies[1].messages)).toContain('workspace_run saves the newest code block in your reply');
-  expect(JSON.stringify(bodies[2].messages)).toContain('Call workspace_run again now');
-  expect(sandbox.commands).toEqual(['python3 hello.py']);
-});
-
-it('runs an attached app file, replaces an emoji everywhere, and sends the source back under its name', async () => {
+it('runs an app from its workspace file, and changes it with an edit to that file rather than a new copy', async () => {
   const bodies: any[] = [];
   const game = `// chairs 🪑 block you
 import { app, button, row } from '@teapilot/discord-play';
 export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: '🪑 ' + n, rows: [row(button('go', 'Go'))] }) });`;
   const steps = [
-    { tool: { name: 'play_start', arguments: { file: 'game.js', title: 'Game' } } },
-    { tool: { name: 'play_start', arguments: { file: 'game.js', title: 'Game' } } },
-    { tool: { name: 'play_update', arguments: { edits: [{ find: '🪑', replace: '🐖' }] } } },
-    { tool: { name: 'play_update', arguments: { edits: [{ find: '🪑', replace: '🐖', all: true }] } } },
-    { tool: { name: 'file_send', arguments: { app: 'APP' } } },
+    { tool: { name: 'play_start', arguments: { file: 'apps/game.js', title: 'Game' } } },
+    { tool: { name: 'write', arguments: { path: 'apps/game.js', content: game } } },
+    { tool: { name: 'play_start', arguments: { file: 'apps/game.js', title: 'Game' } } },
+    { tool: { name: 'play_start', arguments: { file: 'apps/game.js', title: 'Game' } } },
+    { tool: { name: 'play_update', arguments: {} } },
+    { tool: { name: 'edit', arguments: { path: 'apps/game.js', edits: [{ oldText: '// chairs 🪑', newText: '// chairs 🐖' }, { oldText: "'🪑 '", newText: "'🐖 '" }] } } },
+    { tool: { name: 'play_update', arguments: {} } },
+    { tool: { name: 'file_send', arguments: { files: ['apps/game.js'] } } },
     { text: 'Done.' },
   ];
-  const f = await agentSetup((body, _req, res) => {
-    bodies.push(body);
-    const step = structuredClone(steps[bodies.length - 1]!) as any;
-    if (step.tool?.arguments.app) step.tool.arguments.app = f.runtime.list('dm:1')[0]!.id;
-    completion(res, step);
-  });
-  await f.store.save('dm:1', 'game.js', Buffer.from(game), 'op', 'text/javascript');
-  const result = await runAttempt({ ...f, ...f.base, prompt: 'embed this game', activePermissions: ['inference', 'discord.play'], play: f.play, workspace: f.workspace });
+  const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make a game', activePermissions: ['inference', 'discord.play'], play: f.play, workspace: f.workspace });
   expect(result.success, JSON.stringify(result)).toBe(true);
-  expect(JSON.stringify(bodies[0].messages)).toContain('play_start({ file, title })');
+  expect(JSON.stringify(bodies[0].messages)).toContain('write the whole app to one such as apps/snake.js with write, then call play_start({ file, title })');
+  // Starting before writing is one wasted call, not a paused turn.
+  expect(JSON.stringify(bodies[1].messages.at(-1))).toContain('No file named \\"apps/game.js\\" in the workspace: write the app to it first');
   expect(f.posts[0]!.content).toBe('🪑 0');
-  expect(JSON.stringify(bodies[2].messages)).toContain('is already live from this turn');
+  expect(JSON.stringify(bodies[4].messages)).toContain('is already live from this turn');
   expect(f.posts).toHaveLength(1);
-  expect(JSON.stringify(bodies[3].messages)).toContain('occurs 2 times');
-  expect(JSON.stringify(bodies[3].messages)).toContain('set all: true');
+  expect(JSON.stringify(bodies[5].messages.at(-1))).toContain('Nothing to change: apps/game.js is the same as the running code');
+  const [app] = f.runtime.list('dm:1');
+  expect(app).toMatchObject({ file: 'apps/game.js' });
+  const source = f.runtime.source(app!.id, 'dm:1');
+  expect(source.kind === 'sandbox' && source.code).toBe(game.replaceAll('🪑', '🐖'));
   const sent = f.sent[0]!.files[0]!;
   expect(sent.name).toBe('game.js');
   expect(sent.data.toString()).toBe(game.replaceAll('🪑', '🐖'));
 });
 
-it('holds a model to a change it claims without calling a play tool, once', async () => {
+it('rejects an app naming what to fix in its file, and will not run the same file again unchanged', async () => {
   const bodies: any[] = [];
+  const broken = "import { app, button, row } from '@teapilot/discord-play';\nexport default app({ init: () => 0, update: n => n + 1, view: n => { throw new Error('nope'); } });";
   const steps = [
-    { text: 'Done — chairs are now pigs 🐷.' },
-    { tool: { name: 'play_update', arguments: { edits: [{ find: '🪑', replace: '🐷' }] } } },
-    { text: 'Swapped the chairs for pigs.' },
+    { tool: { name: 'write', arguments: { path: 'apps/x.js', content: broken } } },
+    { tool: { name: 'play_start', arguments: { file: 'apps/x.js', title: 'X' } } },
+    { tool: { name: 'play_start', arguments: { file: 'apps/x.js', title: 'X' } } },
+    { tool: { name: 'edit', arguments: { path: 'apps/x.js', edits: [{ oldText: "{ throw new Error('nope'); }", newText: "({ content: 'n ' + n, rows: [row(button('go', 'Go'))] })" }] } } },
+    { tool: { name: 'play_start', arguments: { file: 'apps/x.js', title: 'X' } } },
+    { text: 'Live.' },
   ];
   const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make x', activePermissions: ['inference', 'discord.play'], play: f.play, workspace: f.workspace });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(JSON.stringify(bodies[2].messages.at(-1))).toContain('Fix it with edit on apps/x.js');
+  expect(JSON.stringify(bodies[3].messages.at(-1))).toContain('apps/x.js is unchanged since it was rejected');
+  expect(f.posts.map(post => post.content)).toEqual(['n 0']);
+});
+
+it('holds a model to a change it claims without calling a play tool, once', async () => {
+  const bodies: any[] = [];
+  const f = await agentSetup((body, _req, res) => {
+    bodies.push(body);
+    const file = `apps/${f.runtime.list('dm:1')[0]!.id}.js`;
+    const steps = [
+      { text: 'Done — chairs are now pigs 🐷.' },
+      { tool: { name: 'play_inspect', arguments: {} } },
+      { tool: { name: 'edit', arguments: { path: file, edits: [{ oldText: "'🪑 '", newText: "'🐷 '" }] } } },
+      { tool: { name: 'play_update', arguments: {} } },
+      { text: 'Swapped the chairs for pigs.' },
+    ];
+    completion(res, steps[bodies.length - 1]!);
+  });
   const code = `import { app, button, row } from '@teapilot/discord-play';
 export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: '🪑 ' + n, rows: [row(button('go', 'Go'))] }) });`;
-  await f.runtime.start({ title: 'Game', channelId: 'c1', conversation: 'dm:1', owner, source: { kind: 'sandbox', code } });
+  // Started before apps were files: its code is only inline, until a play tool writes it to one.
+  const { record } = await f.runtime.start({ title: 'Game', channelId: 'c1', conversation: 'dm:1', owner, source: { kind: 'sandbox', code } });
   const result = await runAttempt({ ...f, ...f.base, prompt: 'replace the chairs with pigs', activePermissions: ['inference', 'discord.play'], play: f.play, workspace: f.workspace });
   expect(result.success, JSON.stringify(result)).toBe(true);
   expect(JSON.stringify(bodies[1].messages)).toContain('no play_start or play_update succeeded in this turn');
+  expect(JSON.stringify(bodies[2].messages.at(-1))).toContain(`Code: the workspace file apps/${record.id}.js`);
+  expect(JSON.stringify(bodies[2].messages.at(-1))).not.toContain('export default');
   expect(result.text).toBe('Swapped the chairs for pigs.');
-  const source = f.runtime.source(f.runtime.list('dm:1')[0]!.id, 'dm:1');
+  const source = f.runtime.source(record.id, 'dm:1');
   expect(source.kind === 'sandbox' && source.code).toContain('🐷');
+  expect(f.runtime.file(record.id, 'dm:1')).toBe(`apps/${record.id}.js`);
+});
 
-  // A plain answer about a running app is left alone.
-  bodies.length = 0;
-  steps.splice(0, steps.length, { text: 'Press Go to count up.' });
+it('answers about a running app without changing it', async () => {
+  const bodies: any[] = [];
+  const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, { text: 'Press Go to count up.' }); });
+  const code = `import { app, button, row } from '@teapilot/discord-play';
+export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: '🪑 ' + n, rows: [row(button('go', 'Go'))] }) });`;
+  await f.runtime.start({ title: 'Game', channelId: 'c1', conversation: 'dm:1', owner, source: { kind: 'sandbox', code } });
   const answer = await runAttempt({ ...f, ...f.base, prompt: 'how do I play?', activePermissions: ['inference', 'discord.play'], play: f.play, workspace: f.workspace });
   expect(answer.text).toBe('Press Go to count up.');
   expect(bodies).toHaveLength(1);
@@ -392,26 +430,24 @@ export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: '
 
 it('reports a failed upload as not sent, rather than as Discord\'s own error', async () => {
   const store = WorkspaceStore.at(await directory('teapilot-workspace-'));
+  await store.save('dm:1', 'helo.txt', Buffer.from('olleh'), 'teapilot');
   const context: ConversationWorkspace = { store, conversation: 'dm:1', send: async () => { throw new Error('This operation was aborted'); } };
-  const drafts = { latest: () => undefined, block: () => ({ tag: 'txt', body: 'olleh' }), used: new Set<string>() };
-  const send = (await workspace(context, drafts, async () => true)).tools.find(tool => tool.name === 'file_send')!;
-  await expect(send.execute('call', { name: 'helo.txt' })).rejects.toThrow(/nothing was sent.*This operation was aborted.*Do not send it again/);
+  const send = (await workspace(context, async () => true, true)).tools.find(tool => tool.name === 'file_send')!;
+  await expect(send.execute('call', { files: ['helo.txt'] })).rejects.toThrow(/nothing was sent.*This operation was aborted.*Do not send it again/);
 });
 
-it('pauses tools when file_send is called before the content is written, then sends what the model writes', async () => {
+it('sends only files that exist, so new content is written first', async () => {
   const bodies: any[] = [];
   const steps = [
-    { tool: { name: 'file_send', arguments: { name: 'helo.txt' } } },
-    { text: '```txt\nolleh\n```' },
-    { tool: { name: 'file_send', arguments: { name: 'helo.txt' } } },
+    { tool: { name: 'file_send', arguments: { files: ['helo.txt'] } } },
+    { tool: { name: 'write', arguments: { path: 'helo.txt', content: 'olleh' } } },
+    { tool: { name: 'file_send', arguments: { files: ['helo.txt'] } } },
     { text: 'sent.' },
   ];
   const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
-  const result = await runAttempt({ ...f, ...f.base, prompt: 'reverse helo.txt and send it back', activePermissions: ['inference'], workspace: f.workspace });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'reverse helo and send it back', activePermissions: ['inference'], workspace: f.workspace });
   expect(result.success, JSON.stringify(result)).toBe(true);
-  expect(bodies[1].tools ?? []).toHaveLength(0);
-  expect(JSON.stringify(bodies[1].messages)).toContain('file_send never writes content itself');
-  expect(JSON.stringify(bodies[2].messages)).toContain('Call file_send now');
+  expect(JSON.stringify(bodies[1].messages.at(-1))).toContain('No file named \\"helo.txt\\" in the workspace. Write it first');
   expect(f.sent.map(entry => entry.files.map(file => [file.name, file.data.toString()]))).toEqual([[['helo.txt', 'olleh']]]);
 });
 

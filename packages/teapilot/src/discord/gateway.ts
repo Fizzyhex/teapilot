@@ -82,6 +82,8 @@ export interface Gateway {
   username(id: string): Promise<string | undefined>;
   /** Posts and edits discord.play messages by channel, so apps keep working after a restart. */
   play: PlaySurface;
+  /** Shows `text` as the bot's custom status, or clears it when there is nothing to say. */
+  setStatus(text: string | undefined): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -92,6 +94,8 @@ const choicePrefix = 'teapilot-choice:';
 const cardPrefix = 'teapilot-card:';
 /** Status cards whose buttons still answer; the oldest are forgotten first. */
 const cardLimit = 500;
+/** Discord's limit on a custom status. */
+const statusLimitChars = 128;
 const quiet = { allowedMentions: { parse: [] as [] } };
 /**
  * discord.play renders Discord API JSON, which discord.js accepts in place of its builders. Its pictures travel as
@@ -126,7 +130,7 @@ function restAgent(): NonNullable<NonNullable<ClientOptions['rest']>['agent']> {
  * no public URL, webhook or local server. Approval clicks are accepted from allowlisted users only.
  */
 export async function connect(settings: DiscordSettings, handlers: GatewayHandlers, log: (text: string) => void): Promise<Gateway> {
-  const { ActionRowBuilder, ApplicationIntegrationType, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, InteractionContextType, MessageFlags, MessageReferenceType, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
+  const { ActionRowBuilder, ActivityType, ApplicationIntegrationType, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, InteractionContextType, MessageFlags, MessageReferenceType, Partials, PermissionFlagsBits, ThreadAutoArchiveDuration } = await import('discord.js');
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Channel],
@@ -508,6 +512,10 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       async post(channelId, payload) { return (await (await messages(channelId)).send(raw(payload))).id; },
       async edit(channelId, messageId, payload) { await (await (await messages(channelId)).messages.fetch(messageId)).edit(raw(payload, true)); },
       request: (method, route, body) => client.rest.request({ method: method as RequestMethod, fullRoute: route as RouteLike, body }),
+    },
+    // A custom status carries its text in `state`; the name is required but never shown for this type.
+    async setStatus(text) {
+      client.user?.setPresence({ activities: text ? [{ name: 'Custom Status', type: ActivityType.Custom, state: text.slice(0, statusLimitChars) }] : [], status: 'online' });
     },
     async close() {
       for (const entry of pending.values()) entry.resolve(false);

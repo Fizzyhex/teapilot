@@ -26,7 +26,7 @@ export interface Tool { name: string; kind: string; version: string }
 export interface SandboxStatus {
   available: boolean;
   reason?: string;
-  shell: 'bash' | 'cmd';
+  shell: 'bash' | 'powershell';
   tools: Tool[];
   /** The Python commands run, which teapilot's own packages must be installed for. */
   python?: PythonInfo;
@@ -105,7 +105,7 @@ export class SrtSandbox implements WorkspaceSandbox {
   status(): Promise<SandboxStatus> { return this.checked ??= this.check(); }
 
   private async check(): Promise<SandboxStatus> {
-    const shell = windows ? 'cmd' : 'bash';
+    const shell = windows ? 'powershell' : 'bash';
     const unavailable = (reason: string): SandboxStatus => ({ available: false, reason, shell, tools: [] });
     if (this.settings.sandbox === 'off') return unavailable('Workspace commands are turned off (WORKSPACE_SANDBOX=off).');
     let srt: typeof import('@anthropic-ai/sandbox-runtime');
@@ -232,20 +232,24 @@ export class SrtSandbox implements WorkspaceSandbox {
       PYTHONUSERBASE: join(folder, '.packages'), PIP_USER: '1', PIP_NO_CACHE_DIR: '1', PIP_DISABLE_PIP_VERSION_CHECK: '1', PYTHONDONTWRITEBYTECODE: '1',
       npm_config_cache: join(folder, '.cache', 'npm'), npm_config_update_notifier: 'false', MPLCONFIGDIR: join(folder, '.cache', 'matplotlib'),
       ...(this.pythonPath ? { PYTHONPATH: this.pythonPath } : {}),
-      // Windows builds PATH from teapilot's own and the command line, so it extends it there.
-      ...(windows && this.toolPath.length ? { PATH: [...this.toolPath, '%PATH%'].join(';') } : {}),
       ...(windows ? { USERPROFILE: folder, APPDATA: join(folder, '.appdata'), LOCALAPPDATA: join(folder, '.appdata', 'local') } : {}),
     };
     // Windows starts the command from the sandbox account's own environment and passes only what the command
-    // line sets; elsewhere the command inherits the spawn environment, which never carries teapilot's secrets.
-    const script = windows ? `${Object.entries(own).map(([key, value]) => `set "${key}=${value}"`).join('& ')}& ${command}` : command;
+    // line sets, PATH extended with teapilot's own tools; elsewhere the command inherits the spawn environment,
+    // which never carries teapilot's secrets. PowerShell there starts at C:\ although the process starts in the
+    // workspace, and runs other programs from its own location. Set-Location to the workspace is refused, since
+    // PowerShell reads every folder above it to spell the path, so it moves to a drive rooted at the workspace.
+    const quoted = (value: string) => `'${value.replace(/'/g, "''")}'`;
+    const script = windows
+      ? [`$null = New-PSDrive -Name W -PSProvider FileSystem -Root ${quoted(folder)}`, 'Set-Location W:\\', ...Object.entries(own).map(([key, value]) => `$env:${key}=${quoted(value)}`), ...this.toolPath.length ? [`$env:PATH=${quoted(`${this.toolPath.join(';')};`)}+$env:PATH`] : [], command].join('; ')
+      : command;
     const commandId = randomUUID();
     // srt hands POSIX commands its own TMPDIR, /tmp/claude unless this names another; one shared by every
     // conversation would let them pass files, so each run gets its workspace's own.
     const shared = process.env.CLAUDE_CODE_TMPDIR;
     if (!windows) process.env.CLAUDE_CODE_TMPDIR = temporary;
     let argv: string[];
-    try { ({ argv } = await SandboxManager.wrapWithSandboxArgv(script, windows ? 'cmd' : '/bin/bash', undefined, options.signal, folder, { commandId, commandText: command })); }
+    try { ({ argv } = await SandboxManager.wrapWithSandboxArgv(script, windows ? 'powershell' : '/bin/bash', undefined, options.signal, folder, { commandId, commandText: command })); }
     finally { if (shared === undefined) delete process.env.CLAUDE_CODE_TMPDIR; else process.env.CLAUDE_CODE_TMPDIR = shared; }
     const env = { ...cleanChildEnvironment(), ...own, PATH: [join(folder, '.packages', 'bin'), join(folder, 'node_modules', '.bin'), ...this.toolPath, process.env.PATH ?? ''].join(windows ? ';' : ':') };
     this.active = options;

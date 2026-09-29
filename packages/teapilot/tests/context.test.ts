@@ -25,7 +25,7 @@ it.each([false, true])('completes several coding tool round trips at 16k (web=%s
   const f = await setup((body, _req, res) => {
     bodies.push(body);
     const steps = [
-      { name: 'repo_list', arguments: { path: '.' } },
+      { name: 'ls', arguments: { path: '.' } },
       { name: 'read', arguments: { path: 'notes.txt' } },
       { name: 'write', arguments: { path: 'web-pong/index.html', content: '<html>Pong</html>\n' } },
       { name: 'read', arguments: { path: 'web-pong/index.html' } },

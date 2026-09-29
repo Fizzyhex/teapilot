@@ -62,6 +62,8 @@ export class World {
   /** Status cards by message id, as the gateway keeps them; a restart forgets them. */
   private cards = new Map<string, CardControls['press']>();
   private recent?: Channel;
+  /** The bot's custom status, as `teapilot discord start` last set it. */
+  status?: string;
   private lastEvent = Date.now();
 
   /** `files` is where attachments are written, one file per upload. */
@@ -111,6 +113,10 @@ export class World {
           this.warn(`A trusted app called Discord REST ${method} ${route}; the simulator does not emulate REST routes.`);
           throw new Error('The Discord simulator does not emulate REST routes.');
         },
+      },
+      setStatus: async text => {
+        this.status = text;
+        this.log(`status: ${text ?? '(cleared)'}`);
       },
       close: async () => {
         this.handlers = undefined;

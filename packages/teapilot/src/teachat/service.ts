@@ -17,7 +17,11 @@ import { teachatTools } from './tools.js';
 
 /** Where gossip is shown: grey lines in the terminal, the operator log for Discord and the bridge. */
 export interface GossipView { line(text: string, kind?: 'header' | 'thought' | 'post' | 'status'): void; activity?(label: string | undefined): void }
-export interface TeachatOptions { provider?: CancellableJevProvider; graceMs?: number; pollMs?: number; pauseLimitMs?: number }
+export interface TeachatOptions {
+  provider?: CancellableJevProvider; graceMs?: number; pollMs?: number; pauseLimitMs?: number;
+  /** Called after each round that ran to completion; the Discord bot counts them in its status. */
+  onRound?: () => void;
+}
 
 const LEASE_MS = 30 * 60_000;
 const TRANSCRIPT_TURNS = 12;
@@ -116,7 +120,11 @@ export class TeachatService {
     const controller = new AbortController();
     const done = this.gossip(session, view, AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]));
     this.running = { controller, done: done.catch(() => {}) };
-    try { return await done; }
+    try {
+      const gossiped = await done;
+      if (gossiped) this.options.onRound?.();
+      return gossiped;
+    }
     catch (error) { if (isAbortError(error) || controller.signal.aborted || signal?.aborted) return false; throw error; }
     finally { if (this.running?.controller === controller) this.running = undefined; view.activity?.(undefined); }
   }

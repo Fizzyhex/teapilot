@@ -38,6 +38,31 @@ export default app({
   ] }),
 });`;
 
+/** A clock started by init(), which is what should wait for someone to play. */
+const ticker = `
+import { app, button, row, step, after } from '@teapilot/discord-play';
+export default app({
+  init: () => step({ n: 0 }, after(2000, 'tick')),
+  update(state, action) {
+    if (action.kind === 'timer') return step({ n: state.n + 1 }, after(2000, 'tick'));
+    return state;
+  },
+  view: state => ({ content: 'n' + state.n, rows: [row(button('poke', 'Poke'))] }),
+});`;
+
+/** A clock that outlives the 14 minutes an interaction can edit its message. */
+const slow = `
+import { app, button, row, step, after } from '@teapilot/discord-play';
+export default app({
+  init: () => ({ n: 0 }),
+  update(state, action) {
+    if (action.kind === 'button' && action.id === 'go') return step(state, after(20 * 60000, 'tick'));
+    if (action.kind === 'timer') return { ...state, n: state.n + 1 };
+    return state;
+  },
+  view: state => ({ content: 'n' + state.n, rows: [row(button('go', 'Go'), button('poke', 'Poke'))] }),
+});`;
+
 async function setup(options: { consult?: Consultant; clock?: Clock; directory?: string; probe?: boolean } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'teapilot-play-'));
   if (!options.directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -173,7 +198,7 @@ it('fires timers, cancels them, and keeps them across a restart', async () => {
   await first.runtime.interact(act(record.id, 'never').interaction);
   expect(first.store.all()[0]!.timers).toEqual([]);
   await first.runtime.interact(act(record.id, 'soon').interaction);
-  expect(first.store.all()[0]!.timers).toEqual([{ id: 'tick', dueAt: clock + 2000 }]);
+  expect(first.store.all()[0]!.timers).toEqual([{ id: 'tick', ms: 2000, dueAt: clock + 2000 }]);
   first.runtime.close();
   // A new process a minute later: the overdue timer fires as soon as the app is recovered.
   clock += 60_000;
@@ -185,6 +210,54 @@ it('fires timers, cancels them, and keeps them across a restart', async () => {
   const click = act(record.id, 'add');
   await second.runtime.interact(click.interaction);
   expect(click.seen.updates[0]!.content).toBe('101 ');
+});
+
+it('leaves a clock from init() pending until someone plays, then counts from there', async () => {
+  let now = 1_000_000;
+  const due: Array<{ at: number; run: () => void }> = [];
+  const clock: Clock = { now: () => now, after(ms, run) { const entry = { at: now + ms, run }; due.push(entry); return () => { if (due.includes(entry)) due.splice(due.indexOf(entry), 1); }; } };
+  const advance = (ms: number) => { now += ms; for (const entry of due.filter(item => item.at <= now)) { due.splice(due.indexOf(entry), 1); entry.run(); } };
+  const { runtime, store } = await setup({ clock });
+  const { record } = await start(runtime, { code: ticker });
+
+  // Posted with its clock held: nothing is scheduled, so ten idle minutes cost the app nothing.
+  expect(store.all()[0]!.timers).toEqual([{ id: 'tick', ms: 2000 }]);
+  expect(due).toHaveLength(0);
+  advance(10 * 60_000);
+  expect(store.all()[0]!.state).toMatchObject({ n: 0 });
+
+  // The first click starts it, so it runs from the click and not from the post.
+  await runtime.interact(act(record.id, 'poke').interaction);
+  expect(store.all()[0]!.timers).toEqual([{ id: 'tick', ms: 2000, dueAt: now + 2000 }]);
+  advance(2000);
+  await vi.waitFor(() => expect(store.all()[0]!.state).toMatchObject({ n: 1 }));
+});
+
+it('gives back the time nobody could see the message, instead of counting it against the clock', async () => {
+  let now = 1_000_000;
+  const due: Array<{ at: number; run: () => void }> = [];
+  const clock: Clock = { now: () => now, after(ms, run) { const entry = { at: now + ms, run }; due.push(entry); return () => { if (due.includes(entry)) due.splice(due.indexOf(entry), 1); }; } };
+  const advance = (ms: number) => { now += ms; for (const entry of due.filter(item => item.at <= now)) { due.splice(due.indexOf(entry), 1); entry.run(); } };
+  const { runtime, store } = await setup({ clock });
+  const hosted: MessagePayload[] = [];
+  const post = vi.fn(async (payload: MessagePayload) => { hosted.push(payload); return { id: 'reply-1', edit: async (next: MessagePayload) => { hosted.push(next); } }; });
+  const { record } = await runtime.start({ title: 'Slow', channelId: 'channel-1', conversation: 'reply:1', owner, source: { kind: 'sandbox', code: slow }, post });
+
+  // A twenty minute clock, started by a click, outlives the fourteen minutes that click can edit the message.
+  await runtime.interact(act(record.id, 'go').interaction);
+  expect(store.all()[0]!.timers).toEqual([{ id: 'tick', ms: 20 * 60_000, dueAt: now + 20 * 60_000 }]);
+  advance(14 * 60_000);
+  // Its clock stops there rather than waiting on an hour nobody is watching.
+  expect(due).toHaveLength(0);
+  advance(60 * 60_000);
+  expect(store.all()[0]!.state).toMatchObject({ n: 0 });
+  expect(store.all()[0]!.timers).toEqual([{ id: 'tick', ms: 20 * 60_000, dueAt: 2_200_000 }]);
+
+  // The next click hands back that hour, leaving the six minutes the clock had left.
+  await runtime.interact(act(record.id, 'poke').interaction);
+  expect(store.all()[0]!.timers).toEqual([{ id: 'tick', ms: 20 * 60_000, dueAt: now + 6 * 60_000 }]);
+  advance(6 * 60_000);
+  await vi.waitFor(() => expect(store.all()[0]!.state).toMatchObject({ n: 1 }));
 });
 
 it('runs an app posted through an interaction, and holds its timers while nothing can show them', async () => {

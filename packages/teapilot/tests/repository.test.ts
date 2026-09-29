@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
 import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { repositoryTools } from '../src/agents/repository.js';
+import { inventory, sessionTools } from '../src/agents/tools.js';
 import { ExecutionPolicy } from '../src/execution/policy.js';
 import { Evidence } from '../src/routing/escalation.js';
 import { completion, fixture, mockServer } from './helpers.js';
@@ -10,8 +10,9 @@ import { runHost } from '../src/host.js';
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 async function setup() { const f = await fixture(); cleanup.push(f.cleanup); return f; }
+const noApproval = async () => { throw new Error('Unexpected approval'); };
 
-it('lists and searches without approval, respecting ignore rules and file boundaries', async () => {
+it('lists, finds and searches without approval, respecting ignore rules and file boundaries', async () => {
   const f = await setup(), outside = await setup();
   await mkdir(join(f.cwd, 'src'));
   await writeFile(join(f.cwd, '.gitignore'), '*.log\n');
@@ -19,53 +20,66 @@ it('lists and searches without approval, respecting ignore rules and file bounda
   await writeFile(join(f.cwd, 'ignored.log'), 'needle ignored');
   await writeFile(join(f.cwd, 'src', 'index.ts'), 'first\nneedle here\nneedle twice\n');
   await symlink(outside.cwd, join(f.cwd, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
-  const tools = repositoryTools(new ExecutionPolicy(f.cwd, f.config, async () => { throw new Error('Unexpected approval'); }));
-  const run = async (index: number, args: unknown) => JSON.parse((await tools[index]!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join(''));
-  const listing = await run(0, {});
-  expect(listing.results).toContain('src/index.ts');
-  expect(JSON.stringify(listing.results)).not.toMatch(/\.env|ignored.log|linked/);
-  expect((await run(1, { query: 'NEEDLE', path: 'src', limit: 1 }))).toMatchObject({ results: [{ path: 'src/index.ts', line: 2, text: 'needle here' }], truncated: true });
-  await expect(run(0, { path: '..' })).rejects.toThrow();
-  await expect(run(0, { path: 'linked' })).rejects.toThrow();
+  const tools = sessionTools(new ExecutionPolicy(f.cwd, f.config, noApproval), { stateDir: f.config.stateDir });
+  expect(tools.map(tool => tool.name)).toEqual(['read', 'write', 'edit', 'ls', 'find', 'grep']);
+  const run = async (name: string, args: unknown) => (await tools.find(tool => tool.name === name)!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join('');
+  const listing = await run('ls', {});
+  expect(listing).toContain('src/');
+  expect(listing).not.toMatch(/\.env|linked/);
+  const found = await run('find', { pattern: '*' });
+  expect(found).toContain('src/index.ts');
+  expect(found).not.toMatch(/\.env|ignored\.log|linked/);
+  expect(await run('find', { pattern: '*.ts', path: 'src' })).toBe('index.ts');
+  // pi's grep runs rg --hidden: lines from protected files are dropped all the same.
+  const matches = await run('grep', { pattern: 'needle', ignoreCase: true });
+  expect(matches).toContain('src/index.ts:2: needle here');
+  expect(matches).not.toMatch(/secret|ignored/);
+  expect(await run('grep', { pattern: 'NEEDLE', path: 'src', ignoreCase: true, limit: 1 })).toMatch(/^index\.ts:2: needle here\n\n\[1 matches limit reached/);
+  await expect(run('ls', { path: '..' })).rejects.toThrow();
+  await expect(run('ls', { path: 'linked' })).rejects.toThrow('Linked');
+  await expect(run('grep', { pattern: 'x', path: '.env' })).rejects.toThrow('protected');
   f.config.policy.permissions = [];
-  await expect(run(0, {})).rejects.toThrow('Missing repository.read');
+  await expect(run('ls', {})).rejects.toThrow('Missing repository.read');
 });
 
-it('summarises a root with many subdirectories instead of a depth-first dump', async () => {
+it('opens a code session with each folder of the root and the files in it', async () => {
   const f = await setup();
   for (let i = 0; i < 15; i++) {
     const dir = join(f.cwd, `repo-${i}`);
     await mkdir(dir);
     for (let j = 0; j < 30; j++) await writeFile(join(dir, `file-${j}.ts`), 'x'.repeat(50));
   }
-  const tools = repositoryTools(new ExecutionPolicy(f.cwd, f.config, async () => { throw new Error('Unexpected approval'); }));
-  const run = async (args: unknown) => JSON.parse((await tools[0]!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join(''));
-  const listing = await run({});
-  expect(JSON.stringify(listing.results).length).toBeLessThan(4096);
-  expect(listing.truncated).toBe(true);
-  expect(listing.note).toMatch(/subdirector/i);
-  expect(listing.results).toHaveLength(15);
-  expect(listing.results).toContain('repo-0/ (30 files)');
-});
-
-it('lists an empty child directory instead of omitting it', async () => {
-  const f = await setup();
   await mkdir(join(f.cwd, 'self-contained-pong-v2'));
   await writeFile(join(f.cwd, 'readme.md'), 'hi');
-  const tools = repositoryTools(new ExecutionPolicy(f.cwd, f.config, async () => { throw new Error('Unexpected approval'); }));
-  const run = async (args: unknown) => JSON.parse((await tools[0]!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join(''));
-  const listing = await run({});
-  expect(listing.results).toContain('self-contained-pong-v2/ (empty)');
-  expect(listing.results).toContain('readme.md');
+  const listed = await inventory(new ExecutionPolicy(f.cwd, f.config, noApproval));
+  expect(listed.length).toBeLessThan(4096);
+  expect(listed.split('\n')).toHaveLength(17);
+  expect(listed).toContain('repo-0/ (30 files)');
+  expect(listed).toContain('self-contained-pong-v2/ (empty)');
+  expect(listed).toContain('readme.md');
+});
+
+it('reaches the conversation\'s workspace from a repository as .workspace/, without repository permissions', async () => {
+  const f = await setup();
+  const workspace = join(f.config.stateDir, 'workspaces', 'abc');
+  await mkdir(workspace, { recursive: true });
+  f.config.policy.permissions = ['repository.read'];
+  const tools = sessionTools(new ExecutionPolicy(f.cwd, f.config, noApproval, undefined, undefined, false, workspace), { stateDir: f.config.stateDir });
+  const run = async (name: string, args: unknown) => (await tools.find(tool => tool.name === name)!.execute('id', args)).content.map(part => part.type === 'text' ? part.text : '').join('');
+  await run('write', { path: '.workspace/apps/game.js', content: 'export default 1;\n' });
+  expect(await run('read', { path: '.workspace/apps/game.js' })).toContain('export default 1;');
+  expect(await run('find', { pattern: '*.js', path: '.workspace' })).toBe('apps/game.js');
+  // The rest of the state directory stays protected.
+  await expect(run('read', { path: join(f.config.stateDir, 'spend.jsonl') })).rejects.toThrow('Host state is protected');
 });
 
 it('gives repeated equivalent inspection one recovery opportunity and invalidates checks on edits', () => {
   const evidence = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
-  evidence.observe('repo_list', {}, false, 'empty');
-  evidence.observe('repo_list', { path: '.' }, false, 'empty');
+  evidence.observe('ls', {}, false, 'empty');
+  evidence.observe('ls', { path: '.' }, false, 'empty');
   expect(evidence.reason).toBeUndefined();
   expect(evidence.warning).toContain('Change approach');
-  evidence.observe('repo_list', { limit: 200 }, false, 'empty');
+  evidence.observe('ls', { limit: 200 }, false, 'empty');
   expect(evidence.reason).toBe('ineffective_calls');
   // discord.play calls carry their code in the reply, so the same arguments with new results are progress.
   const play = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
@@ -85,12 +99,12 @@ it('gives repeated equivalent inspection one recovery opportunity and invalidate
   expect(check.lastCheck).toBeUndefined();
   // Editing a scratchpad script between runs makes the next run a new experiment, though it changes nothing in the project.
   const scratch = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 }, [], path => path.startsWith('/s/'));
-  scratch.observe('workspace_run', { command: 'python .scratch/fit.py' }, false, 'error');
+  scratch.observe('powershell', { command: 'python .scratch/fit.py' }, false, 'error');
   scratch.observe('edit', { path: '/s/fit.py' }, false);
-  scratch.observe('workspace_run', { command: 'python .scratch/fit.py' }, false, 'error');
+  scratch.observe('powershell', { command: 'python .scratch/fit.py' }, false, 'error');
   expect(scratch.reason).toBeUndefined();
   expect(scratch.changedFiles.size).toBe(0);
-  scratch.observe('workspace_run', { command: 'python .scratch/fit.py' }, false, 'error');
+  scratch.observe('powershell', { command: 'python .scratch/fit.py' }, false, 'error');
   expect(scratch.reason).toBe('ineffective_calls');
 });
 
@@ -117,7 +131,7 @@ it('empty-repository coding can inspect and write without a shell approval', asy
   const server = await mockServer((_body, req, res) => {
     if (req.url?.endsWith('/models')) { res.end('{}'); return; }
     calls++;
-    if (calls === 1) completion(res, { tool: { name: 'repo_list', arguments: {} } });
+    if (calls === 1) completion(res, { tool: { name: 'ls', arguments: {} } });
     else if (calls === 2) completion(res, { tool: { name: 'write', arguments: { path: 'index.html', content: '<canvas id="pong"></canvas>' } } });
     else completion(res, { text: 'Created the canvas; gameplay is not implemented.' });
   }); cleanup.push(server.close);
@@ -132,7 +146,7 @@ it('a local inspection loop preserves same-tier recovery and reports its final f
   const f = await setup();
   const server = await mockServer((_body, req, res) => {
     if (req.url?.endsWith('/models')) res.end('{}');
-    else completion(res, { tool: { name: 'repo_list', arguments: {} } });
+    else completion(res, { tool: { name: 'ls', arguments: {} } });
   }); cleanup.push(server.close);
   f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url;
   f.config.models.fast.enabled = false;

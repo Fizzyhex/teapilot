@@ -41,7 +41,7 @@ const syntaxChecks = files.filter(file => file.endsWith('.js')).map(file => {
   return { file, passed: check.status === 0, output: check.stderr };
 });
 const outcomes = (await readFile(join(config.stateDir, 'outcomes.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-const inspectionCalls = outcomes.filter(event => event.type === 'repository_inventory' || (event.type === 'tool' && ['repo_list', 'repo_search'].includes(event.name))).length;
+const inspectionCalls = outcomes.filter(event => event.type === 'repository_inventory' || (event.type === 'tool' && ['ls', 'find', 'grep'].includes(event.name))).length;
 const report = { model, elapsedSeconds, approvals, inspectionCalls, files, syntaxChecks, result,
   acceptance: 'Host completion and JS syntax only; visual gameplay requires browser/human review.' };
 await writeFile(join(scratch, 'report.json'), JSON.stringify(report, null, 2));

@@ -19,9 +19,10 @@ import { casualPrompt } from './casual.js';
 import { coder } from './coder.js';
 import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, shouldCompact, summarise, summaryLength, summaryMessage, turnMark, type Compaction } from './compaction.js';
 import { carryOver, fitHistory, supersedePlayCalls, supersedeReads, turnForms, turnSteps, withoutOldThinking, type HistoryFit } from './history.js';
-import { latestBlock, latestCode, pastedEmoji, play, withoutCode, type Drafts, type PlayContext } from './play.js';
+import { pastedEmoji, play, type PlayContext } from './play.js';
 import { workspace, type ConversationWorkspace } from './workspace.js';
-import { captureResult, fixtureTool, scratchPrompt, scratchTools, scratchTouched } from './scratchpad.js';
+import { captureResult, fixtureTool, scratchPrompt, scratchTouched } from './scratchpad.js';
+import { inventory, sessionTools, toolGuidelines } from './tools.js';
 import { Scratch, secretsOf } from '../workspace/scratch.js';
 import type { WebController } from '../web/controller.js';
 
@@ -76,7 +77,7 @@ export interface AttemptResult {
   resume?: Resume;
 }
 
-/** Reply length a discord.play attempt reserves: a whole app plus a sentence, on any tier. */
+/** Reply length a discord.play attempt reserves: a write call with a whole app, on any tier. */
 export const playOutputTokens = 8192;
 
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
@@ -98,21 +99,21 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const effectiveConfig: Config = { ...config, policy: { ...config.policy,
     get permissions() { return active.filter(permission => config.policy.permissions.includes(permission) && (!input.authorization || input.authorization.allows(permission))); },
   } };
-  const policy = new ExecutionPolicy(input.cwd, effectiveConfig, input.approve, input.beforeMutation, scratchFolder);
-  // Without repository access the same file tools work in the conversation's own folder, where relative paths are its
-  // own: its workspace when it has one, so a name means the same file to them as to workspace_run, or else the scratchpad.
-  const workspaceFolder = input.workspace && scratchFolder ? input.workspace.store.folder(input.workspace.conversation) : undefined;
-  const ownRoot = workspaceFolder && within(workspaceFolder, scratchFolder!) ? workspaceFolder : scratchFolder;
-  let scratchOnly: AgentTool[] | undefined, ownPolicy: ExecutionPolicy | undefined, ownFiles = false;
-  const scratchSet = () => scratchOnly ??= scratchTools(ownPolicy = new ExecutionPolicy(ownRoot!, effectiveConfig, input.approve, undefined, scratchFolder, ownRoot !== scratchFolder),
-    ownRoot !== scratchFolder ? () => input.workspace!.store.reconcile(input.workspace!.conversation) : undefined);
+  const workspaceFolder = input.workspace ? input.workspace.store.folder(input.workspace.conversation) : undefined;
+  const reconcile = input.workspace ? () => input.workspace!.store.reconcile(input.workspace!.conversation) : undefined;
+  // With repository access the tools work in the repository, and the workspace is .workspace/ there.
+  const policy = new ExecutionPolicy(input.cwd, effectiveConfig, input.approve, input.beforeMutation, scratchFolder, false, workspaceFolder);
+  // Without it the same tools work in the conversation's own folder, where relative paths are its own: its workspace
+  // when it has one, or else the scratchpad. One root per session, so a name means the same file to every tool.
+  const ownRoot = workspaceFolder ?? scratchFolder;
+  let ownPolicy: ExecutionPolicy | undefined, ownFiles = false;
   /** A path as displays show it: from the workspace when the file tools work there, else from the working root. */
   const shownPath = (path: string) => {
     const full = (ownFiles ? ownPolicy! : policy).resolve(path);
     return relative(ownFiles && within(ownRoot!, full, true) ? ownRoot! : policy.root, full) || path;
   };
   const model = modelFor(config, tier); const tierProfile = effectiveProfile(config, tier);
-  // A discord.play reply carries a whole app as text, so it gets room for one even on tiers set for short answers.
+  // A discord.play turn writes a whole app in one write call, so it gets room for one even on tiers set for short answers.
   const playing = Boolean(input.play) && effectiveConfig.policy.permissions.includes('discord.play');
   const profile = playing ? { ...tierProfile, maxOutputTokens: Math.max(tierProfile.maxOutputTokens, Math.min(playOutputTokens, model.maxOutputTokens)) } : tierProfile;
   const inference: InferenceState = { turns: 0 };
@@ -122,12 +123,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let lostCalls = 0, lostNotice = false;
   let repositorySetup: Awaited<ReturnType<typeof coder>> | undefined;
   const controlTools: AgentTool[] = [];
-  // discord.play takes an app's code from the newest code block in this request's replies, so code never
-  // has to be escaped into JSON arguments; blocks it used are left out of the answer shown to people.
   let messages = (): Message[] => [];
-  const drafts: Drafts = { latest: () => latestCode(messages()), block: () => latestBlock(messages()), used: new Set<string>() };
-  // Models that call a play tool or file_send without writing its code tend to repeat that call; a reply without tools cannot.
-  let paused: AgentTool[] | undefined, pausedFor: Drafts['missing'], writing = false, pauses = 0;
   // Small models sometimes answer "done" to a change request without calling a tool; the host holds them to it once.
   let changed = false, claimChecked = false, claimNotice = false;
   // A page is at most about a third of this model's context, and pages together at most about a quarter
@@ -139,9 +135,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     if (repository && !repositorySetup) {
       input.onAgenticWork?.();
       input.onActivity?.({ kind: 'waiting', label: 'Inspecting repository...' });
-      repositorySetup = await coder(effectiveConfig, policy);
-      const inventory = await repositorySetup.tools.find(tool => tool.name === 'repo_list')!.execute('initial-inventory', { limit: 40 }, input.signal);
-      repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${inventory.content.filter(part => part.type === 'text').map(part => part.text).join('\n')}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
+      repositorySetup = await coder(effectiveConfig, policy, reconcile);
+      repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${await inventory(policy)}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
       await telemetry.event('repository_inventory', { succeeded: true });
     }
     const setup = ask(effectiveConfig, effectiveConfig.policy.permissions.includes('web.search'), repository, input.searchUnavailable, reader);
@@ -160,26 +155,27 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     if (input.play && effectiveConfig.policy.permissions.includes('discord.play')) {
       // Server emoji people pasted reach apps through ctx.emoji whether or not the model passes them on.
       const emojis = { ...input.play.emojis, ...pastedEmoji(...(input.history ?? []).map(turn => turn.user), asked) };
-      const apps = play({ ...input.play, emojis, requested: Object.keys(pastedEmoji(asked)) }, effectiveConfig, policy, input.approve, drafts);
+      const apps = play({ ...input.play, emojis, requested: Object.keys(pastedEmoji(asked)) }, effectiveConfig, policy, input.approve);
       setup.tools.push(...apps.tools);
       setup.systemPrompt += '\n' + apps.systemPrompt;
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
       setup.systemPrompt += '\n- For interactive Discord apps (games, polls, quizzes, boards, timers with buttons), request `discord.play` with request_capabilities; it is granted without a prompt.';
     }
+    // Without repository access the file tools, and the workspace's sandboxed shell, share its folder as their root.
+    ownFiles = !repository && ownRoot !== undefined && model.toolCalling;
+    let shell: AgentTool | undefined;
     if (input.workspace) {
-      const shared = await workspace(input.workspace, drafts, input.approve, input.play, scratch);
+      const shared = await workspace(input.workspace, input.approve, ownFiles);
       setup.tools.push(...shared.tools);
+      shell = shared.shell;
       setup.systemPrompt += '\n' + shared.systemPrompt;
     }
-    if (scratch && model.toolCalling) {
-      // Repository tools take scratchpad paths too; whatever they do not cover comes from the scratchpad's own set.
-      const declared = new Set(setup.tools.map(tool => tool.name));
-      const covered = (name: string) => declared.has(name) || (name === 'list_files' && declared.has('repo_list')) || (name === 'search_files' && declared.has('repo_search'));
-      const own = scratchSet().filter(tool => !covered(tool.name));
-      ownFiles = own.some(tool => tool.name === 'read');
-      setup.tools.push(...own);
-      setup.systemPrompt += '\n' + scratchPrompt(scratch, Boolean(input.workspace), ownFiles && ownRoot !== scratchFolder);
+    if (ownFiles) {
+      ownPolicy ??= new ExecutionPolicy(ownRoot!, effectiveConfig, input.approve, undefined, scratchFolder, ownRoot !== scratchFolder);
+      setup.tools.push(...sessionTools(ownPolicy, { shell, stateDir: config.stateDir, changed: reconcile }));
+      setup.systemPrompt += '\n' + toolGuidelines();
     }
+    if (scratch && model.toolCalling) setup.systemPrompt += '\n' + scratchPrompt(scratch, ownFiles && workspaceFolder !== undefined && within(workspaceFolder, scratch.folder));
     if (config.test?.fixture && model.toolCalling) setup.tools.push(fixtureTool(config.test.fixture, () => telemetry.event('fixture_invocation', { tool: config.test!.fixture!.name, attempt: input.attempt ?? 0 })));
     if (input.conversational) setup.systemPrompt += '\nKeep context for follow-up turns; do not treat each message as an unrelated task.';
     if (input.access) setup.systemPrompt += input.access.role === 'operator'
@@ -358,26 +354,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     prepareNextTurnWithContext: async ({ context }) => {
       if (claimNotice) {
         claimNotice = false;
-        return { messages: [{ role: 'user', content: '[host notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (play_update with edits on its current source), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
+        return { messages: [{ role: 'user', content: '[host notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (edit the app\'s file, then play_update), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
       }
       if (lostNotice) {
         lostNotice = false;
         const messages = context.messages.filter(message => !(message.role === 'assistant' && lost(message)));
-        return { context: { ...context, messages }, messages: [{ role: 'user', content: '[host notice] The model server could not read your last tool call, so nothing ran. Keep tool arguments short: put code and long text in your reply (an app goes in one ```js code block), then call the tool again.', timestamp: Date.now() }] };
-      }
-      if (drafts.missing && context.tools?.length && pauses < 2) {
-        pausedFor = drafts.missing; drafts.missing = undefined; pauses++; paused = context.tools; writing = true;
-        const write = pausedFor === 'file'
-          ? 'That call had nothing to send: file_send never writes content itself. Tools are paused for this reply: write the whole content to send now as one code block, with at most a sentence around it.'
-          : pausedFor === 'script'
-          ? 'That call had no script to save: workspace_run saves the newest code block in your reply. Tools are paused for this reply: write the whole script now as one code block, with at most a sentence around it.'
-          : 'That call had no new app code to use. Tools are paused for this reply: write the whole app now as one ```js code block, with at most a sentence around it.';
-        return { context: { ...context, tools: [] }, messages: [{ role: 'user', content: `[host notice] ${write} The tools return on your next turn.`, timestamp: Date.now() }] };
-      }
-      if (paused) {
-        const tools = paused; paused = undefined;
-        const call = pausedFor === 'file' ? 'Call file_send now with the file name; it sends' : pausedFor === 'script' ? 'Call workspace_run again now with script and command; it saves' : 'Call play_start (or play_update) now; it reads';
-        return { context: { ...context, tools }, messages: [{ role: 'user', content: `[host notice] Tools are back. ${call} the code block you just wrote.`, timestamp: Date.now() }] };
+        return { context: { ...context, messages }, messages: [{ role: 'user', content: '[host notice] The model server could not read your last tool call, so nothing ran. Keep each call smaller: write a long file in parts (write the first part, then add the rest with edit), then carry on.', timestamp: Date.now() }] };
       }
       // The last turn of a discord.play attempt answers about what is live rather than ending mid-call at the limit.
       if (playing && !evidence.answerNow && inference.turns >= config.policy.limits.maxTurns - 1) { evidence.answerNow = true; evidence.answerWhy = 'This is the last turn'; }
@@ -437,7 +419,6 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
       // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
       if (lost(message) && lostCalls < 2) { lostCalls++; lostNotice = true; return { action: 'continue' }; }
-      if (writing) { writing = false; if (pausedFor === 'app' ? drafts.latest() : drafts.block?.()) return { action: 'continue' }; paused = undefined; }
       if (playing && !changed && !claimChecked && message.stopReason === 'stop' && !message.content.some(part => part.type === 'toolCall')
         && claimsChange(message.content.map(part => part.type === 'text' ? part.text : '').join('\n'))
         && input.play!.runtime.list(input.play!.conversation, input.play!.channelId).some(app => app.status === 'running')) {
@@ -505,7 +486,6 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const turn = messages().slice(Math.max(0, keptFrom - start));
   // A final reply without calls is the answer itself; everything before it is what the tools did.
   const steps = turnSteps(last?.role === 'assistant' && last === turn.at(-1) && !last.content.some(part => part.type === 'toolCall') ? turn.slice(0, -1) : turn);
-  const shown = drafts.used.size ? withoutCode(text, drafts.used) : text;
   const stopped = capabilityDenied || policy.denied ? 'approval_denied' : input.signal?.aborted ? 'cancelled' : searchFailed ? 'search_unavailable' : timeout ? 'timeout' : toolLimit ? 'tool_limit' : inference.stop;
   // A server that says the model called a tool but sends no call it could parse leaves nothing to run or show.
   const lostCall = last?.role === 'assistant' && lost(last);
@@ -530,7 +510,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   });
   return {
     success,
-    text: shown.trim() ? shown : text,
+    text,
     steps,
     changedFiles,
     fileSizes,

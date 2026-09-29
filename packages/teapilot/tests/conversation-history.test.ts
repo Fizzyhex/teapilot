@@ -119,14 +119,14 @@ it('carries an attempt over without a reply that was cut off or failed, or calls
   const request: Message = { role: 'user', content: 'make a space scene', timestamp: 0 };
   const carried = carryOver([
     request, read('a', 'scene.py'), lines('a', 'scene'),
-    assistant([{ type: 'text', text: 'running it' }, { type: 'toolCall', id: 'b', name: 'workspace_run', arguments: { command: 'python scene.py' } }]),
+    assistant([{ type: 'text', text: 'running it' }, { type: 'toolCall', id: 'b', name: 'bash', arguments: { command: 'python scene.py' } }]),
     ended('length', [{ type: 'text', text: '```python\nimport numpy' }]),
   ])!;
   // The run never got a result, so only its text is kept; the reply cut off at the output limit goes.
   expect(carried).toHaveLength(4);
   expect(carried.slice(0, 3)).toEqual([request, read('a', 'scene.py'), lines('a', 'scene')]);
   expect(textOf(carried[3]!)).toContain('running it');
-  expect(textOf(carried[3]!)).not.toContain('workspace_run');
+  expect(textOf(carried[3]!)).not.toContain('python scene.py');
   expect(carried[3]).toMatchObject({ stopReason: 'stop' });
   expect(carryOver([request, ended('error')])).toBeUndefined();
 });

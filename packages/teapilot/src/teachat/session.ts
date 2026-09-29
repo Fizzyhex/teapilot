@@ -89,9 +89,9 @@ export function headlessTeachat(service: TeachatService, key: string): SessionEx
 }
 
 /** Opens teachat for a headless surface, logging its gossip to the operator. Undefined when off or unavailable. */
-export async function openHeadlessTeachat(config: Config, log: (text: string) => void): Promise<TeachatService | undefined> {
+export async function openHeadlessTeachat(config: Config, log: (text: string) => void, options: TeachatOptions = {}): Promise<TeachatService | undefined> {
   try {
-    const service = await TeachatService.open(config);
+    const service = await TeachatService.open(config, options);
     service?.idle({ line: text => log(`teachat: ${text}`) });
     return service;
   } catch (error) { log(`Teachat is unavailable: ${error instanceof Error ? error.message : String(error)}`); return undefined; }

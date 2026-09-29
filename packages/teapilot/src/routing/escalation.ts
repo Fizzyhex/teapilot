@@ -70,7 +70,7 @@ export class Evidence {
     // A search with every engine down cannot improve on retry; refuse further searches at once.
     if (search && result?.startsWith(SEARCH_UNAVAILABLE)) this.searchExhausted = true;
     if (reading && result?.startsWith(READS_SPENT)) this.readsExhausted = true;
-    const inspection = (['repo_list', 'repo_search', 'read'].includes(name) && !failed) || search || reading;
+    const inspection = (['ls', 'find', 'grep', 'read'].includes(name) && !failed) || search || reading;
     // Equal bounded inspection results provide no new evidence, even if the
     // caller varies query spelling or optional arguments. Never normalize shell grammar.
     // discord.play tools read the app from the reply, so equal arguments often carry new code: only an equal result repeats.

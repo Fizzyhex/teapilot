@@ -3,7 +3,7 @@ import { emptyUsage } from '../integration/inference.js';
 import type { ConversationTurn } from '../integration/events.js';
 import { estimateValueTokens } from '../inference/context.js';
 import { savedLine } from '../workspace/scratch.js';
-import { DEFAULT_READ_LINES } from './coder.js';
+import { DEFAULT_READ_LINES } from './tools.js';
 
 type Model = { provider: string; id: string };
 
@@ -56,22 +56,24 @@ function compact(steps: Message[]): Message[] {
 }
 
 const playCalls = new Set(['play_start', 'play_update', 'play_test']);
+/** Calls that carry an app's code: it is written to its file, then run by the play tools. */
+const appCalls = new Set([...playCalls, 'write', 'edit']);
 /**
- * An attempt's messages with app calls a later one superseded cut down: a call that changed nothing keeps only
- * its outcome, since its code or edits were never applied. Under `pressure`, earlier calls that did apply lose
- * their long arguments and code blocks too; the running app's source stays one play_inspect away. The newest
- * call is never touched. Returns the same array when nothing changes.
+ * An attempt's messages with app calls a later one superseded cut down: a play call that changed nothing keeps only
+ * its outcome. Under `pressure`, earlier calls that did apply lose their long arguments and code blocks too, the
+ * code written to files included; the app's file stays one read away. The newest call is never touched. Returns
+ * the same array when nothing changes.
  */
 export function supersedePlayCalls(messages: Message[], pressure: boolean): Message[] {
-  const newest = messages.findLastIndex(message => message.role === 'assistant' && message.content.some(part => part.type === 'toolCall' && playCalls.has(part.name)));
+  const newest = messages.findLastIndex(message => message.role === 'assistant' && message.content.some(part => part.type === 'toolCall' && appCalls.has(part.name)));
   if (newest < 0) return messages;
   const unapplied = new Set(messages.flatMap(message => message.role === 'toolResult' && playCalls.has(message.toolName)
-    && (message.isError || message.content.some(part => part.type === 'text' && /Nothing was (changed|started)|^No app code found/.test(part.text))) ? [message.toolCallId] : []));
+    && (message.isError || message.content.some(part => part.type === 'text' && /Nothing was (changed|started)|^No file named|unchanged since it was rejected/.test(part.text))) ? [message.toolCallId] : []));
   let changed = false;
   const result = messages.map((message, index) => {
     if (index >= newest || message.role !== 'assistant') return message;
     const content = message.content.map(part => {
-      if (part.type === 'toolCall' && playCalls.has(part.name) && (pressure || unapplied.has(part.id))) {
+      if (part.type === 'toolCall' && appCalls.has(part.name) && (pressure || unapplied.has(part.id))) {
         const args = clipValue(part.arguments) as typeof part.arguments;
         if (JSON.stringify(args) === JSON.stringify(part.arguments)) return part;
         changed = true;

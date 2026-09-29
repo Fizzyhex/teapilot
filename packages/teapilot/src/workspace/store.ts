@@ -172,9 +172,25 @@ export class WorkspaceStore {
   }
 
   /** Keeps `data` as `name`, replacing a file of that name; the oldest files go if the workspace outgrows its limit. */
-  async save(conversation: string, name: string, data: Buffer, from: string, type?: string): Promise<StoredFile> {
-    if (data.length > maxFileBytes) throw new Error(`${name} is ${size(data.length)}; files may be at most ${size(maxFileBytes)}.`);
-    const clean = fileName(name);
+  save(conversation: string, name: string, data: Buffer, from: string, type?: string): Promise<StoredFile> {
+    return this.keep(conversation, fileName(name), data, from, type);
+  }
+
+  /** As save, at a path with folders (apps/game.js), each part made safe; never through a link a command left. */
+  async saveAt(conversation: string, path: string, data: Buffer, from: string): Promise<StoredFile> {
+    const parts = path.split(/[\\/]/).filter(part => part && part !== '.' && part !== '..').map(fileName);
+    let current = this.folder(conversation);
+    for (const part of parts.slice(0, -1)) {
+      current = join(current, part);
+      const info = lstatSync(current, { throwIfNoEntry: false });
+      if (!info) mkdirSync(current);
+      else if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${part} is not a folder in the workspace.`);
+    }
+    return this.keep(conversation, parts.join('/') || 'file', data, from);
+  }
+
+  private async keep(conversation: string, clean: string, data: Buffer, from: string, type?: string): Promise<StoredFile> {
+    if (data.length > maxFileBytes) throw new Error(`${clean} is ${size(data.length)}; files may be at most ${size(maxFileBytes)}.`);
     const folder = this.folder(conversation);
     // Never write through a link a command left under this name.
     rmSync(join(folder, clean), { force: true });

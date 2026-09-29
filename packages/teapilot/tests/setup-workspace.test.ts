@@ -31,8 +31,8 @@ function sandbox(state: 'not set up' | 'ready' | 'installed', platform: NodeJS.P
     platform,
     status: async (): Promise<SandboxStatus> => {
       calls.push('status');
-      if (!account) return { available: false, reason: 'The Windows sandbox account is not set up.', shell: 'cmd', tools: [] };
-      return { available: true, shell: 'cmd', python: { executable: 'python', abi: 'cp314-win_amd64' },
+      if (!account) return { available: false, reason: 'The Windows sandbox account is not set up.', shell: 'powershell', tools: [] };
+      return { available: true, shell: 'powershell', python: { executable: 'python', abi: 'cp314-win_amd64' },
         tools: [...system, ...pandoc ? [extras[0]!] : [], ...packages ? extras.slice(1) : []] };
     },
     installWindows: async () => { calls.push('windows'); account = true; return true; },
@@ -64,7 +64,7 @@ it('installs nothing when declined, and says which tools are missing', async () 
   const f = await fixture(); cleanup.push(f.cleanup);
   const env: Record<string, string> = {};
   const { io, calls } = sandbox('ready');
-  io.status = async () => { calls.push('status'); return { available: true, shell: 'cmd', python: { executable: 'python', abi: 'x' }, tools: [tool('python')] }; };
+  io.status = async () => { calls.push('status'); return { available: true, shell: 'powershell', python: { executable: 'python', abi: 'x' }, tools: [tool('python')] }; };
   const { screen, logs } = ui(setUp, false);
   expect(await configureWorkspaceStep(f.config, env, screen, new AbortController().signal, io)).toBe('workspaces: on (python)');
   expect(calls).toEqual(['status']);

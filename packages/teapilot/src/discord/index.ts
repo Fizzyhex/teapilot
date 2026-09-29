@@ -16,9 +16,10 @@ import { WorkspaceStore } from '../workspace/store.js';
 import { consultant } from './play/consult.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
 import { PlayStore } from './play/store.js';
-import type { connect, GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
+import type { connect, Gateway, GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
 import { interactionLifetimeMs, setupCommands, type PromptSetup } from './commands.js';
 import { quoteMessage } from './render.js';
+import { StatusPresence } from './presence.js';
 import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
 import { readDiscordSettings, type DiscordSettings } from './settings.js';
 
@@ -72,11 +73,23 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
   const histories = HistoryStore.at(stateDir);
-  const teachat = withTeachat ? await openHeadlessTeachat(config, log) : undefined;
+  /**
+   * The bot's custom status: the games running, the requests answered and the rounds gossipped, this session only.
+   * It is bound to the gateway once connected, and each count feeds it from where that count changes.
+   */
+  const presence = new StatusPresence({ set: async text => { await setStatus?.(text); }, log });
+  const teachat = withTeachat ? await openHeadlessTeachat(config, log, { onRound: () => presence.gossipped() }) : undefined;
   const run = (request: HostRequest, dependencies: Parameters<typeof runHost>[2]) => teachat ? teachat.work(() => runHost(config, request, dependencies)) : runHost(config, request, dependencies);
+  /** A conversation turn, which counts towards the status; a consult on an app's behalf is not one. */
+  const runTurn: typeof run = async (request, dependencies) => {
+    try { return await run(request, dependencies); }
+    finally { presence.handled(); }
+  };
   // The surface is bound once the gateway connects; apps only post after a message arrives or on recovery, both later.
   let surface: PlaySurface | undefined;
   const connected = () => { if (!surface) throw new Error('Discord is not connected yet.'); return surface; };
+  /** Set once the gateway is up; until then the status has nowhere to go. */
+  let setStatus: Gateway['setStatus'] | undefined;
   const files = WorkspaceStore.at(stateDir);
   /** A conversation's scratchpad is working material for its task, so it goes when its history is cleared; files and apps stay. */
   const clearScratch = (historyKey: string) => { void rm(files.scratch(historyKey), { recursive: true, force: true }).catch(error => log(`${historyKey}: scratchpad not cleared: ${error instanceof Error ? error.message : String(error)}`)); };
@@ -86,6 +99,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     : `Workspace commands are off: ${status.reason}`));
   const play = new PlayRuntime({
     store: PlayStore.at(stateDir), log, clock, pictures: pictures(files),
+    onRunning: count => presence.games(count),
     surface: { post: (...args) => connected().post(...args), edit: (...args) => connected().edit(...args), request: (...args) => connected().request(...args) },
     consult: consultant({ config, root, access, queue, run, signal }),
   });
@@ -145,7 +159,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
         history: histories.load(historyKey) },
       onHistory: history => { if (!history.length) clearScratch(historyKey); try { histories.save(historyKey, history); } catch (error) { log(`${historyKey}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
       maxPromptChars: config.policy.limits.maxPromptChars,
-      run,
+      run: runTurn,
       extension: teachat && headlessTeachat(teachat, key),
       // A one-shot posts apps through its interaction, and later one-shots in the same history manage them.
       play: { runtime: play, conversation: historyKey, ...(!oneShot ? { channelId } : transport.postApp ? { channelId, post: payload => transport.postApp!(payload) } : {}) },
@@ -291,6 +305,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     component: interaction => void (surface ? play.interact(interaction) : interaction.reply('teapilot is still starting; try again in a moment.')).catch(failed('App interaction')),
   }, log);
   surface = gateway.play;
+  setStatus = gateway.setStatus;
+  presence.start();
   const recovered = await play.recover();
   if (recovered) log(`Resumed ${recovered} discord.play app(s).`);
   if (!config.policy.permissions.includes('discord.play')) log('discord.play is off: add "discord.play" to "permissions" in this profile\'s policy.json to let teapilot build interactive Discord apps.');
@@ -300,6 +316,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   log(`Repository root: ${root}. Sessions start in ${settings.startMode} mode. Press Ctrl+C to stop.`);
   if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
   log('Stopping: pending approvals are denied.');
+  presence.close();
   play.close();
   await gateway.close();
   await sandbox.close();

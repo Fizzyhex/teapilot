@@ -24,7 +24,7 @@ async function oneShots() {
   let handlers: GatewayHandlers | undefined;
   const fake: typeof connect = async (_settings, given) => {
     handlers = given;
-    return { botName: 'teapilot', username: async () => undefined, play: { post: async () => 'm', edit: async () => undefined, request: async () => undefined }, close: async () => undefined };
+    return { botName: 'teapilot', username: async () => undefined, play: { post: async () => 'm', edit: async () => undefined, request: async () => undefined }, setStatus: async () => undefined, close: async () => undefined };
   };
   const controller = new AbortController();
   const settings = { token: 'simulated-discord-token', allowedUserIds: ['op', 'friend'], channelIds: [], root: f.cwd, startMode: 'ask' as const };
