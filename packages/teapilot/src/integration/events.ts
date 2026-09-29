@@ -16,7 +16,9 @@ export const contextSchema = z.array(z.object({ name: z.string().max(1000), text
  * `steps` are the tool calls and results between the request and the reply, kept inside teapilot so a later
  * turn still has what the tools did (ids, code, results); the integration protocol carries text only.
  */
-export type ConversationTurn = z.infer<typeof historySchema>[number] & { steps?: Message[] };
+export type ConversationTurn = z.infer<typeof historySchema>[number] & { steps?: Message[];
+  /** Set when the request stopped before finishing; the next turn opens with a host notice built from it. */
+  stopped?: { status: string; failedCalls?: Array<{ call: string; error: string }> } };
 export type TextContext = z.infer<typeof contextSchema>[number];
 
 /** Keep complete recent turns; never truncate the user's current request. */

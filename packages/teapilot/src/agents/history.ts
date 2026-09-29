@@ -173,7 +173,9 @@ export function turnForms(turn: ConversationTurn, model: Model): [Message[], Mes
   const user: Message = { role: 'user', content: turn.user, timestamp: 0 };
   const assistant: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: turn.assistant }], api: 'openai-completions', provider: model.provider, model: model.id, timestamp: 0, usage: emptyUsage(), stopReason: 'stop' };
   const steps = turn.steps ?? [];
-  return [[user, ...steps, assistant], [user, ...compact(steps), assistant], [user, assistant]];
+  // A turn that stopped without a reply of the model's own has none: host text there reads as the model's words, and it copies them.
+  const reply = turn.assistant.trim() ? [assistant] : [];
+  return [[user, ...steps, ...reply], [user, ...compact(steps), ...reply], [user, ...reply]];
 }
 
 /**

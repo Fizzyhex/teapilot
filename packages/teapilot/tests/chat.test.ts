@@ -47,12 +47,28 @@ it('ignores empty prompts, continues after incomplete turns, and bounds retained
   expect(run.mock.calls[1]![0].history).toEqual([]);
 });
 
-it('keeps host diagnostics from failed turns out of the conversation history', async () => {
-  const input = vi.fn().mockResolvedValueOnce('try again').mockResolvedValueOnce('/exit');
+it('keeps host text out of the reply of a failed turn, keeping only what the model said', async () => {
+  const input = vi.fn().mockResolvedValueOnce('try again').mockResolvedValueOnce('again').mockResolvedValueOnce('/exit');
   const run = vi.fn().mockResolvedValueOnce({ ...result, success: false, status: 'context_limit', text: 'Incomplete: context limit.\nNext: Type /new' })
+    .mockResolvedValueOnce({ ...result, success: false, status: 'timeout', text: 'Incomplete: timeout.', reply: 'The render is still running.' })
     .mockResolvedValueOnce(result);
   await runChat({ request: { prompt: 'Build it', cwd: '.' }, maxPromptChars: 2000, input, run });
-  expect(run.mock.calls[1]![0].history).toEqual([{ user: 'Build it', assistant: '[that request stopped before finishing: context limit]' }]);
+  expect(run.mock.calls[1]![0].history).toEqual([{ user: 'Build it', assistant: '', stopped: { status: 'context_limit' } }]);
+  expect(run.mock.calls[2]![0].history[1].assistant).toBe('The render is still running.');
+});
+
+it('opens the turn after a stopped request with a host notice of what failed', async () => {
+  const input = vi.fn().mockResolvedValueOnce('continue').mockResolvedValueOnce('next').mockResolvedValueOnce('/exit');
+  const run = vi.fn().mockResolvedValueOnce({ ...result, success: false, status: 'tool_failures', text: 'Incomplete: tool failures.', failedCalls: [{ call: 'bash: npm tset', error: 'npm: unknown command "tset"' }] })
+    .mockResolvedValueOnce(result).mockResolvedValueOnce(result);
+  await runChat({ request: { prompt: 'Run the tests', cwd: '.' }, maxPromptChars: 2000, input, run });
+  const notice = run.mock.calls[1]![0].notice;
+  expect(notice).toMatch(/^\[host notice\] The previous request stopped before finishing \(tool failures\)\./);
+  expect(notice).toContain('- bash: npm tset → npm: unknown command "tset"');
+  expect(run.mock.calls[1]![0].prompt).toBe('continue');
+  expect(run.mock.calls[2]![0].notice).toBeUndefined();
+  expect(run.mock.calls[2]![0].history[1].user).toBe(`${notice}\n\ncontinue`);
+  expect(run.mock.calls[2]![0].history.map((turn: { assistant: string }) => turn.assistant)).toEqual(['', result.text]);
 });
 
 it('ends an empty session on terminal EOF without running a request', async () => {

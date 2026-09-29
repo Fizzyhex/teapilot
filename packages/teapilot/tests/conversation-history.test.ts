@@ -56,6 +56,18 @@ it('replays the newest turn in full and cuts older ones down to fit the budget',
   expect(compacted).toContain('answer 1');
 });
 
+it('replays a stopped turn without a reply when the model gave none, and keeps its stop in the store', async () => {
+  const stopped: ConversationTurn = { user: 'render it', assistant: '', steps: [call('s', 'x'), result('s', 'timed out')], stopped: { status: 'tool_failures', failedCalls: [{ call: 'bash: render', error: 'timed out' }] } };
+  const replay = fitHistory([stopped], 100_000, model);
+  expect(replay.map(message => message.role)).toEqual(['user', 'assistant', 'toolResult']);
+  expect(fitHistory([{ user: 'hi', assistant: '' }], 100_000, model).map(message => message.role)).toEqual(['user']);
+  const directory = await mkdtemp(join(tmpdir(), 'teapilot-history-'));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const store = new HistoryStore(directory);
+  store.save('k', [stopped]);
+  expect(store.load('k')[0]!.stopped).toEqual(stopped.stopped);
+});
+
 it('cuts app calls a later one superseded: unapplied ones always, applied ones under pressure, never the newest', () => {
   const edits = [{ find: 'x'.repeat(2000), replace: 'y'.repeat(2000) }];
   const update = (id: string) => assistant([{ type: 'text', text: '```js\n' + code + '\n```' }, { type: 'toolCall', id, name: 'play_update', arguments: { edits } }]);

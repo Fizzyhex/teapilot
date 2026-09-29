@@ -6,7 +6,8 @@ import type { ConversationTurn } from '../integration/events.js';
 import { replaceFileSync } from '../replace.js';
 
 // Steps are pi messages written by teapilot itself; only their outline is checked here.
-const turns = z.array(z.object({ user: z.string(), assistant: z.string(), steps: z.array(z.object({ role: z.enum(['assistant', 'toolResult']) }).passthrough()).optional() }));
+const turns = z.array(z.object({ user: z.string(), assistant: z.string(), steps: z.array(z.object({ role: z.enum(['assistant', 'toolResult']) }).passthrough()).optional(),
+  stopped: z.object({ status: z.string(), failedCalls: z.array(z.object({ call: z.string(), error: z.string() })).optional() }).optional() }));
 
 /**
  * Each Discord conversation's turns, tool steps included, so a restart continues the conversation where it

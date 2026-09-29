@@ -103,6 +103,20 @@ it('gives repeated equivalent inspection one recovery opportunity and invalidate
   expect(scratch.reason).toBe('ineffective_calls');
 });
 
+it('stops on the same error repeating, whatever the arguments, until a project edit', () => {
+  const evidence = new Evidence({ repeatedToolCalls: 3, consecutiveFailures: 2, maxEscalations: 2 });
+  evidence.observe('bash', { command: 'npm tset' }, true, 'npm: command not found');
+  evidence.observe('bash', { command: 'npm  tset' }, true, 'npm: command not found');
+  expect(evidence.reason).toBeUndefined();
+  evidence.observe('edit', { path: 'package.json' }, false);
+  evidence.observe('bash', { command: 'npm tset ' }, true, 'npm: command not found');
+  expect(evidence.reason).toBeUndefined();
+  evidence.observe('bash', { command: 'npm tset --x' }, true, 'npm: command not found\nFull output saved to .scratch/a.log');
+  evidence.observe('bash', { command: 'npm tset --y' }, true, 'npm: command not found\nFull output saved to .scratch/b.log');
+  expect(evidence.reason).toBe('tool_failures');
+  expect(evidence.failedCalls.map(item => item.error)).toEqual(Array(5).fill('npm: command not found'));
+});
+
 it('repeated searches warn, then refuse further searches instead of aborting', () => {
   const evidence = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
   evidence.observe('web_search', { query: 'a' }, false, 'same results');

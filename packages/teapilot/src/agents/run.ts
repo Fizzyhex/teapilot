@@ -73,6 +73,7 @@ export interface AttemptResult {
   searchExhausted?: boolean;
   /** Tool calls and results before the final reply, for later turns to replay. */
   steps?: Message[];
+  failedCalls?: Array<{ call: string; error: string }>;
   /** How the last model message ended, so an unexplained incomplete attempt can be diagnosed. */
   ending?: { stopReason?: string; error?: string; textChars: number };
   /** For a retry on the same model to carry on from; absent when the model never replied. */
@@ -407,6 +408,14 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (touched) await telemetry.event('scratch_access', { tool: toolCall.name, toolCallId: toolCall.id, attempt: input.attempt ?? 0, file: touched, succeeded: !isError, chars: shown.length });
       evidence.observe(toolCall.name, args, isError, kept ? kept.text : shown, kept?.saved?.path);
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
+      let continueNote: string | undefined;
+      if (evidence.awaitingContinue) {
+        const approved = await input.approve({ kind: 'continue', summary: `Continue after ${evidence.failures} consecutive tool failures?`, details: 'The last several tool calls in a row have failed. Approve to let the attempt keep retrying.', signal: input.signal });
+        evidence.awaitingContinue = false;
+        await telemetry.event('continue_approval', { approved, failures: evidence.failures });
+        if (approved) { evidence.failures = 0; continueNote = 'The user approved continuing after repeated tool failures. Reconsider your approach before trying again.'; }
+        else evidence.reason = 'tool_failures';
+      }
       // A benchmark's stand-in for an interruption: the attempt ends as if it needed another, after this call ran once.
       if (config.test?.forceRetry === toolCall.name && !isError && !input.attempt && !evidence.reason) {
         // turn_limit continues on the same tier when no higher one is available, as a real interruption would.
@@ -425,7 +434,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       } else if (toolCall.name === 'read' && data.path) toolDetails.set(toolCall.id, { path: shownPath(data.path) });
       else if (['bash', 'powershell'].includes(toolCall.name) && data.command) toolDetails.set(toolCall.id, { command: data.command });
       else if (toolCall.name === 'web_read' && typeof data.url === 'string') toolDetails.set(toolCall.id, { url: shortUrl(data.url) });
-      if (evidence.warning) return { content: [...content, { type: 'text' as const, text: evidence.warning }] };
+      const note = evidence.warning ?? continueNote;
+      if (note) return { content: [...content, { type: 'text' as const, text: note }] };
       return kept ? { content } : undefined;
     },
     finishTurn: ({ message }) => {
@@ -504,9 +514,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const lostCall = last?.role === 'assistant' && lost(last);
   // Running out of tokens with only thinking to show is overthinking; with an answer or a call under way, the reply was too long.
   const overthought = last?.role === 'assistant' && last.content.some(part => part.type === 'thinking' && part.thinking.trim()) && !text.trim() && !last.content.some(part => part.type === 'toolCall');
+  // A model that answers after a failed call has seen the error; its answer stands rather than being retried as incomplete.
+  const answered = last?.role === 'assistant' && last.stopReason === 'stop' && Boolean(text.trim());
   const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? overthought ? 'overthinking' : 'unsupported' : undefined) ?? (lostCall ? 'provider_error' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
-    ?? (evidence.unresolvedChecks.size || evidence.lastCheck === 'failed' ? 'test_failures' : evidence.failures ? 'tool_failures' : undefined);
-  const success = !stopped && !reason && evidence.failures === 0 && evidence.lastCheck !== 'failed' && last?.role === 'assistant' && last.stopReason === 'stop' && Boolean(text.trim());
+    ?? (evidence.unresolvedChecks.size || evidence.lastCheck === 'failed' ? 'test_failures' : evidence.failures && !answered ? 'tool_failures' : undefined);
+  const success = !stopped && !reason && evidence.lastCheck !== 'failed' && answered;
   // What the model last saw of this request, for a retry on the same model: after a compaction here, everything after
   // its summary (which may reach back into earlier turns); otherwise everything after the earlier turns it opened with.
   const compactedHere = lead !== opening.lead;
@@ -525,6 +537,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     success,
     text,
     steps,
+    failedCalls: evidence.failedCalls,
     changedFiles,
     fileSizes,
     largestToolResult: evidence.largestResult,

@@ -100,6 +100,14 @@ Reference similar approaches used elsewhere or internally. Compare relevant patt
 /** The idea wrapped in the template for its kind. */
 export const proposalPrompt = (kind: ProposalKind, idea: string): string => (kind === 'rfc' ? rfcTemplate : planTemplate).replace('%prompt%', () => idea);
 
+/** What the model is told, as the host, about the request before this one stopping. */
+export function stopNotice(stopped: NonNullable<ConversationTurn['stopped']>): string {
+  const calls = stopped.failedCalls?.length
+    ? ` These calls failed; change the approach instead of repeating them unchanged:\n${stopped.failedCalls.map(({ call, error }) => `- ${call}${error ? ` → ${error}` : ''}`).join('\n')}`
+    : '';
+  return `[host notice] The previous request stopped before finishing (${stopped.status.replaceAll('_', ' ')}).${calls}`;
+}
+
 /** Optional behaviour layered on a session, such as teachat. Every hook is awaited in turn order. */
 export interface SessionExtension {
   /** Runs before any command or turn: background work must get out of the way first. */
@@ -233,18 +241,23 @@ export async function runSession(options: {
     if (workspace) prompt = await workspace.attach(prompt, cwd, options.maxPromptChars - prompt.length - (correction?.length ?? 0) - 1500);
     // With session grants the host routes by mode and activates access on demand;
     // without them the mode's workload is fixed for the turn.
-    const result = await options.run({ ...options.request, ...extension?.request?.(), cwd, prompt, correction, tier, relatedTier, history,
+    const stopped = history.at(-1)?.stopped;
+    const notice = stopped ? stopNotice(stopped) : undefined;
+    const result = await options.run({ ...options.request, ...extension?.request?.(), cwd, prompt, correction, notice, tier, relatedTier, history,
       mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode), ...(workspace ? { workspace: workspace.context(cwd) } : {}),
       ...(options.workspace ? { scratch: options.workspace.scratch() } : {}) });
     spentUsd += result.spentUsd;
     lastModel = result.models?.at(-1) ?? lastModel;
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;
     if (!result.success) exitCode = 2;
-    const user = prompt + (correction ? `\nUser correction:\n${correction}` : '');
-    // A failed turn's text is the host's diagnostic, not a reply; models imitate it on the next turn.
-    const assistant = result.success ? result.text : `[that request stopped before finishing: ${result.status.replaceAll('_', ' ')}]`;
+    const user = (notice ? `${notice}\n\n` : '') + prompt + (correction ? `\nUser correction:\n${correction}` : '');
+    // A failed turn's text is the host's diagnostic, and anything the host writes as the reply reads as the model's
+    // own words, which it then copies. The turn keeps only what the model said; the next one opens with a notice.
+    const assistant = result.success ? result.text : result.reply ?? '';
+    const turn: ConversationTurn = { user, assistant, ...(result.steps?.length ? { steps: result.steps } : {}),
+      ...(result.success ? {} : { stopped: { status: result.status, ...(result.failedCalls?.length ? { failedCalls: result.failedCalls } : {}) } }) };
     // Only recent turns keep their steps: fitting history to a model replays older ones as text anyway.
-    const turns = [...history, { user, assistant, ...(result.steps?.length ? { steps: result.steps } : {}) }];
+    const turns = [...history, turn];
     history = prepareConversation('', [], turns.map((turn, index) => index < turns.length - keptSteps ? { user: turn.user, assistant: turn.assistant } : turn), options.maxPromptChars).history;
     options.onHistory?.(history);
     await extension?.turnEnd?.({ user, assistant }, result);

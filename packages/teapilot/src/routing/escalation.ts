@@ -1,10 +1,16 @@
 import { createHash } from 'node:crypto';
 import type { Policy } from '../config.js';
+import { savedLine } from '../workspace/scratch.js';
 
 /** overthinking: the reply ran out of tokens while still thinking, so a retry thinks less rather than more. */
 export type EscalationReason = 'test_failures' | 'tool_failures' | 'ineffective_calls' | 'unsupported' | 'uncertainty' | 'turn_limit' | 'provider_error' | 'overthinking';
 export const SEARCH_UNAVAILABLE = 'No results: the search engines were unavailable';
 export const READS_SPENT = 'Not read: the page-reading budget for this request is spent';
+// A hard ceiling on consecutive tool failures, independent of the escalation policy's own
+// (much lower) threshold: the model is warned as it nears this, then the attempt pauses for
+// the user to explicitly approve continuing, rather than escalating or stopping on its own.
+const CONSECUTIVE_FAILURE_LIMIT = 15;
+const CONSECUTIVE_FAILURE_WARNING_LEAD = 5;
 export class Evidence {
   reason?: EscalationReason;
   toolCalls = 0;
@@ -12,6 +18,8 @@ export class Evidence {
   testFailures = 0;
   lastCheck?: 'passed' | 'failed';
   warning?: string;
+  /** Set once consecutive tool failures reach CONSECUTIVE_FAILURE_LIMIT; the caller must get the user's explicit approval before another tool call runs. */
+  awaitingContinue = false;
   changedFiles = new Set<string>();
   fileSizes = new Map<string, number>();
   largestResult?: { tool: string; chars: number };
@@ -19,6 +27,8 @@ export class Evidence {
   checks: Array<{ command: string; status: 'passed' | 'failed' }> = [];
   /** The latest calls for a retry to continue from: what each was asked, how it ended, and where its full output went. */
   observations: Array<{ tool: string; args?: string; failed: boolean; detail: string; saved?: string }> = [];
+  /** Distinct failed calls and the first line of each error, for a later turn to avoid repeating them. */
+  failedCalls: Array<{ call: string; error: string }> = [];
   private inspectionWarning = false;
   // Set once a search repeats after its warning: further searches are refused so the model answers instead.
   searchExhausted = false;
@@ -50,7 +60,21 @@ export class Evidence {
     const chars = (result ?? '').length + JSON.stringify(args ?? {}).length;
     if (!this.largestResult || chars > this.largestResult.chars) this.largestResult = { tool: name, chars };
     this.failures = failed ? this.failures + 1 : 0;
-    if (this.failures >= this.thresholds.consecutiveFailures) this.reason = 'tool_failures';
+    const remaining = CONSECUTIVE_FAILURE_LIMIT - this.failures;
+    if (this.failures >= CONSECUTIVE_FAILURE_LIMIT) this.awaitingContinue = true;
+    else if (this.failures && remaining <= CONSECUTIVE_FAILURE_WARNING_LEAD) this.warning = `You have had ${this.failures} consecutive tool failures. ${remaining} more in a row will require the user's approval to continue. Make sure you are taking the right approach.`;
+    if (failed) {
+      // Where a long result was saved differs per call; the error itself is what repeats.
+      const error = (result ?? '').replace(savedLine, '').trim();
+      const call = asked ? `${name}: ${asked.slice(0, 200)}` : name;
+      const first = error.split('\n').find(line => line.trim())?.trim().slice(0, 200) ?? '';
+      if (!this.failedCalls.some(item => item.call === call && item.error === first)) this.failedCalls = [...this.failedCalls, { call, error: first }].slice(-8);
+      // The same error from the same tool, whatever the arguments, is a loop; a project edit in between clears the count.
+      const key = createHash('sha256').update(JSON.stringify(['failed', name, error])).digest('hex');
+      const same = (this.repeated.get(key) ?? 0) + 1;
+      this.repeated.set(key, same);
+      if (same >= this.thresholds.repeatedToolCalls) this.reason = 'tool_failures';
+    }
     if (['bash', 'powershell'].includes(name) && /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(String((args as { command?: string }).command))) {
       this.lastCheck = failed ? 'failed' : 'passed';
       if (failed) this.unresolvedChecks.add(String(data.command));

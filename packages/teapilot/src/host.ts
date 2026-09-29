@@ -28,6 +28,8 @@ export interface HostRequest { prompt: string; cwd: string; workload?: Workload;
   side?: boolean;
   /** The session's scratchpad folder, from the surface that owns the session. */
   scratch?: string;
+  /** A host notice put before the prompt, such as why the previous request stopped. */
+  notice?: string;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
@@ -35,6 +37,10 @@ export interface HostResult {
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
   check?: 'passed' | 'failed'; models?: string[];
   tier?: Tier;
+  /** On a stopped request: the calls that failed across its attempts, so the next turn does not repeat them. */
+  failedCalls?: Array<{ call: string; error: string }>;
+  /** On a stopped request: what the model itself last said, as `text` is then the host's diagnostic. */
+  reply?: string;
   teachatIdentity?: TeachatIdentityAnswer;
   /** Answered in conversational mode: the text is short lines, each meant to be sent as its own message. */
   casual?: boolean;
@@ -63,7 +69,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   if (!(await stat(cwd)).isDirectory()) throw new Error('Working directory is not a directory');
   const contextPolicy = new ExecutionPolicy(cwd, config, dependencies.approve);
   for (const context of request.context ?? []) if (context.path) await contextPolicy.path(context.path, false);
-  const currentPrompt = prompt + (request.correction ? `\nUser correction:\n${request.correction}` : '');
+  const currentPrompt = (request.notice ? `${request.notice}\n\n` : '') + prompt + (request.correction ? `\nUser correction:\n${request.correction}` : '');
   // Leave room for system instructions and tool schemas while retaining whole,
   // recent turns. The inference boundary remains the final exact admission check.
   const currentLength = currentPrompt.length + (request.context?.length ? JSON.stringify(request.context).length + 64 : 0);
@@ -97,6 +103,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   const models: string[] = [];
   const changedFiles = new Set<string>();
   const fileSizes = new Map<string, number>();
+  const failedCalls = new Map<string, { call: string; error: string }>();
   let shellRan = false;
   const activePermissions: Permission[] = ['inference'];
   let searchDisabled = false;
@@ -171,7 +178,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   let previousTier: Tier | undefined;
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
-    const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }), ...(casual && { casual }) };
+    const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }), ...(casual && { casual }),
+      ...(!success && previous?.text.trim() ? { reply: telemetry.redact(previous.text.trim().slice(0, 20_000)) } : {}),
+      ...(!success && failedCalls.size ? { failedCalls: [...failedCalls.values()].slice(-8).map(({ call, error }) => ({ call: telemetry.redact(call), error: telemetry.redact(error) })) } : {}) };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     return result;
   };
@@ -346,6 +355,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       check = previous.check;
       for (const path of previous.changedFiles ?? []) changedFiles.add(path);
       for (const [path, size] of Object.entries(previous.fileSizes ?? {})) fileSizes.set(path, size);
+      for (const failed of previous.failedCalls ?? []) failedCalls.set(`${failed.call}\n${failed.error}`, failed);
       shellRan ||= Boolean(previous.shellRan);
       // A later attempt in the same request gains nothing from searching a dead or exhausted service again.
       if (previous.searchExhausted) {
