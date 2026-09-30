@@ -438,6 +438,20 @@ export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: '
   expect(f.runtime.file(record.id, 'dm:1')).toBe(`apps/${record.id}.js`);
 });
 
+it('keeps a questioned answer when the turn limit leaves no room to answer again', async () => {
+  const bodies: any[] = [];
+  const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, { text: 'Fixed the last two images; the TTS is still blocked.' }); });
+  f.config.policy.limits.maxTurns = 1;
+  const code = `import { app, button, row } from '@teapilot/discord-play';
+export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: 'n ' + n, rows: [row(button('go', 'Go'))] }) });`;
+  await f.runtime.start({ title: 'Game', channelId: 'c1', conversation: 'dm:1', owner, source: { kind: 'sandbox', code } });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'carry on with the video', activePermissions: ['inference', 'discord.play'], play: f.play, workspace: f.workspace });
+  expect(bodies).toHaveLength(1);
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(result.text).toBe('Fixed the last two images; the TTS is still blocked.');
+  expect(result.stopped).toBeUndefined();
+});
+
 it('answers about a running app without changing it', async () => {
   const bodies: any[] = [];
   const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, { text: 'Press Go to count up.' }); });

@@ -13,7 +13,7 @@
     "approvalThresholdUsd": 0.1
   },
   "limits": {
-    "maxTurns": 12,
+    "maxTurns": 500,
     "maxToolCalls": 40,
     "attemptTimeoutMs": 900000,
     "requestTimeoutMs": 60000,

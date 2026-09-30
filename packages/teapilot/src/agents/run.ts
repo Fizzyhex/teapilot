@@ -135,6 +135,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let messages = (): Message[] => [];
   // Small models sometimes answer "done" to a change request without calling a tool; the host holds them to it once.
   let changed = false, claimChecked = false, claimNotice = false;
+  let claimed: Message | undefined;
   // A page is at most about a third of this model's context, and pages together at most about a quarter
   // of it in tokens, so the attempt keeps room to reason and answer.
   const reader = input.webController && { controller: input.webController, maxChars: Math.min(12_000, Math.floor(profile.contextTokens * 0.35)), budget: { remaining: profile.contextTokens }, scratch };
@@ -466,7 +467,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (playing && !changed && !claimChecked && message.stopReason === 'stop' && !message.content.some(part => part.type === 'toolCall')
         && claimsChange(message.content.map(part => part.type === 'text' ? part.text : '').join('\n'))
         && input.play!.runtime.list(input.play!.conversation, input.play!.channelId).some(app => app.status === 'running')) {
-        claimChecked = true; claimNotice = true;
+        claimChecked = true; claimNotice = true; claimed = message;
         return { action: 'continue' };
       }
       return undefined;
@@ -525,20 +526,26 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     input.signal?.removeEventListener('abort', cancel);
     await log?.flush();
   }
-  const last = messages().findLast(message => message.role === 'assistant');
-  const text = last?.role === 'assistant' ? last.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '';
+  const textOf = (message?: Message) => message?.role === 'assistant' ? message.content.filter(part => part.type === 'text').map(part => part.text).join('\n') : '';
+  const latest = messages().findLast(message => message.role === 'assistant');
+  // The answer the change check questioned stands when the turn it asked for brings none, such as one cut off at the turn limit.
+  const kept = claimed && claimed !== latest && !textOf(latest).trim() ? claimed : undefined;
+  const last = kept ?? latest;
+  const text = textOf(last);
   // After a compaction, later turns replay only what it kept, as pi does; the summary covers the rest.
-  const turn = messages().slice(Math.max(0, keptFrom - start));
+  const replayed = messages().slice(Math.max(0, keptFrom - start));
+  const turn = kept && replayed.includes(kept) ? replayed.slice(0, replayed.indexOf(kept) + 1) : replayed;
+  const stop = kept ? undefined : inference.stop;
   // A final reply without calls is the answer itself; everything before it is what the tools did.
   const steps = turnSteps(last?.role === 'assistant' && last === turn.at(-1) && !last.content.some(part => part.type === 'toolCall') ? turn.slice(0, -1) : turn);
-  const stopped = capabilityDenied || policy.denied ? 'approval_denied' : input.signal?.aborted ? 'cancelled' : searchFailed ? 'search_unavailable' : timeout ? 'timeout' : toolLimit ? 'tool_limit' : inference.stop;
+  const stopped = capabilityDenied || policy.denied ? 'approval_denied' : input.signal?.aborted ? 'cancelled' : searchFailed ? 'search_unavailable' : timeout ? 'timeout' : toolLimit ? 'tool_limit' : stop;
   // A server that says the model called a tool but sends no call it could parse leaves nothing to run or show.
   const lostCall = last?.role === 'assistant' && lost(last);
   // Running out of tokens with only thinking to show is overthinking; with an answer or a call under way, the reply was too long.
   const overthought = last?.role === 'assistant' && last.content.some(part => part.type === 'thinking' && part.thinking.trim()) && !text.trim() && !last.content.some(part => part.type === 'toolCall');
   // A model that answers after a failed call has seen the error; its answer stands rather than being retried as incomplete.
   const answered = last?.role === 'assistant' && last.stopReason === 'stop' && Boolean(text.trim());
-  const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? overthought ? 'overthinking' : 'unsupported' : undefined) ?? (lostCall ? 'provider_error' : undefined) ?? (inference.stop && ['unsupported', 'turn_limit', 'provider_error'].includes(inference.stop) ? inference.stop as EscalationReason : undefined)
+  const reason = evidence.reason ?? (last?.role === 'assistant' && last.stopReason === 'length' ? overthought ? 'overthinking' : 'unsupported' : undefined) ?? (lostCall ? 'provider_error' : undefined) ?? (stop && ['unsupported', 'turn_limit', 'provider_error'].includes(stop) ? stop as EscalationReason : undefined)
     ?? (evidence.unresolvedChecks.size || evidence.lastCheck === 'failed' ? 'test_failures' : evidence.failures && !answered ? 'tool_failures' : undefined);
   const success = !stopped && !reason && evidence.lastCheck !== 'failed' && answered;
   // What the model last saw of this request, for a retry on the same model: after a compaction here, everything after
