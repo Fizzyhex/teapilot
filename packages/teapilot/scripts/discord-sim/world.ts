@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { browseGone, browseModal, browseModalPrefix, browsePrefix, browseRows, browseSubmit, type BrowseAction, type BrowseSession, type WorkspaceBrowser } from '../../src/discord/browse.js';
 import type { CardButton, CardControls, DiscordTransport } from '../../src/discord/bridge.js';
 import type { connect, GatewayHandlers } from '../../src/discord/gateway.js';
+import { grantPrefix, grantsGone, grantView, type GrantPanel } from '../../src/discord/grants-panel.js';
+import type { Permission } from '../../src/execution/grants.js';
 import { planButtons, planModal, type PlanAction, type PlanControls } from '../../src/discord/plan.js';
 import { parseCustomId, type ModalPayload } from '../../src/discord/play/render.js';
 import type { PlayInteraction } from '../../src/discord/play/runtime.js';
@@ -71,6 +73,8 @@ export class World {
   private plans = new Map<string, PlanControls>();
   /** Folder views under /workspace tree, by nonce, as the gateway keeps them; a restart forgets them. */
   private browsing = new Map<string, BrowseSession>();
+  /** Panels under /convo grants, by message id, as the gateway keeps them; a restart forgets them. */
+  private panels = new Map<string, GrantPanel>();
   private recent?: Channel;
   /** The bot's custom status, as `teapilot discord start` last set it. */
   status?: string;
@@ -133,6 +137,7 @@ export class World {
         this.cards.clear();
         this.plans.clear();
         this.browsing.clear();
+        this.panels.clear();
         // Like the real gateway: pending approvals resolve as denied, and their buttons stay behind.
         for (const message of this.messages) { const resolve = message.approval; message.approval = undefined; resolve?.(false); }
       },
@@ -323,6 +328,7 @@ export class World {
     if (custom.startsWith('teapilot:')) return this.answerApproval(person, message, custom.endsWith(':approve'));
     if (custom.startsWith('teapilot-plan:')) return this.pressPlan(person, message, custom.slice('teapilot-plan:'.length) as PlanAction);
     if (custom.startsWith(browsePrefix)) return this.pressBrowse(person, message, custom.slice(browsePrefix.length));
+    if (custom.startsWith(grantPrefix)) return this.pressGrant(person, message, custom.slice(grantPrefix.length) as Permission);
     if (custom.startsWith('teapilot-card:')) return this.pressCard(person, message, custom.slice('teapilot-card:'.length) as CardButton);
     return this.interact(person, message, 'button', custom, `clicked [${this.label(control)}]`);
   }
@@ -372,6 +378,28 @@ ${this.render(this.post(message.channel, bot.name, { content: note }, person.nam
     this.forms.set(person.name, { message, payload });
     this.emit(`${person.name} opened form "${payload.title}" from ${message.id}`);
     return `${label}\n${person.name} sees a form:\n${this.renderForm(payload)}`;
+  }
+
+  /**
+   * Like the real gateway: the press is acknowledged at once, and the panel is repainted once it settles, which can
+   * wait on an operator's approval. Only a refusal is said, privately.
+   */
+  private async pressGrant(person: Person, message: Message, permission: Permission): Promise<string> {
+    const panel = this.panels.get(message.id);
+    const say = (content: string) => this.render(this.post(message.channel, bot.name, { content }, person.name));
+    const seen = [`${person.name} clicked [${permission}] on ${message.id}.`];
+    if (!panel) return `${seen[0]}\n${say(grantsGone)}`;
+    let settled = false;
+    void panel.press(permission, person.id).catch(error => `that didn't work: ${error instanceof Error ? error.message : String(error)}`).then(note => {
+      settled = true;
+      this.update(message, grantView(panel) as Payload);
+      seen.push(this.render(message));
+      if (note) seen.push(say(note));
+    });
+    for (const deadline = Date.now() + 1000; !settled && Date.now() < deadline;) await pause(20);
+    await this.quiet(150, 1000);
+    if (!settled) seen.push('(waiting on an approval; check screen later)');
+    return seen.join('\n');
   }
 
   /** Like the real gateway: anyone may press, the conversation decides, and only the presser sees the answer. */
@@ -471,6 +499,14 @@ ${this.render(this.post(form.message.channel, bot.name, { content: note }, perso
           const nonce = `sim${++this.counters.browse}`;
           this.browsing.set(nonce, { browser, dir });
           note(content, browseRows(nonce));
+          finish();
+        },
+        grants: async panel => {
+          first();
+          // Posted for everyone, without notifying anyone.
+          const message = this.post(channel, bot.name, grantView(panel) as Payload);
+          this.panels.set(message.id, panel);
+          seen.push(this.render(message));
           finish();
         },
         choose: async (content, labels) => {

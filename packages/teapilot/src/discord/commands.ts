@@ -76,7 +76,10 @@ export const commandDefinitions: CommandDefinition[] = [
   },
   { type: 3, name: replyMenu, ...everywhere },
   // Also where teapilot is not invited, where they act on the conversation /reply or /prompt keeps there.
-  { name: 'convo', description: 'Your conversation with teapilot here', options: [subcommand('clear', 'Clear its context; the workspace keeps its files')], ...everywhere },
+  { name: 'convo', description: 'Your conversation with teapilot here', options: [
+    subcommand('clear', 'Clear its context; the workspace keeps its files'),
+    subcommand('grants', 'Show its access as buttons to grant or revoke'),
+  ], ...everywhere },
   {
     name: 'workspace', description: 'The files this conversation works on',
     options: [

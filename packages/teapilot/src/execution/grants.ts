@@ -83,24 +83,29 @@ export class SessionGrants {
    */
   withhold(withheld: readonly Permission[]): void { this.withheld = new Set(withheld); }
   list(): Permission[] { return permissions.filter(permission => this.allows(permission)); }
-  available(): Permission[] {
-    const caller = this.caller?.();
+  /** Everything this session can hold whoever is speaking, and whether it holds it now. */
+  offered(): Array<{ permission: Permission; granted: boolean }> {
+    return permissions.filter(permission => this.ceiling.includes(permission) && !this.withheld.has(permission))
+      .map(permission => ({ permission, granted: this.granted.has(permission) }));
+  }
+  available(caller = this.caller?.()): Permission[] {
     return (caller ? this.ceiling.filter(permission => caller.permissions.includes(permission)) : [...this.ceiling]).filter(permission => !this.withheld.has(permission));
   }
-  allows(permission: Permission): boolean { return this.granted.has(permission) && this.available().includes(permission); }
+  allows(permission: Permission, caller = this.caller?.()): boolean { return this.granted.has(permission) && this.available(caller).includes(permission); }
   /** Whether the current caller holds `permission` already or would be granted it without an approval click. */
   free(permission: Permission): boolean {
     return this.allows(permission) || Boolean(this.available().includes(permission) && this.caller?.().preapproved?.includes(permission));
   }
+  /** Asks for `requested` on behalf of `caller`, by default whoever is speaking. */
   async request(requested: Permission[], reason: string, approve: Approve, signal?: AbortSignal,
-    emit?: (type: string, fields: Record<string, unknown>) => Promise<void>): Promise<boolean> {
+    emit?: (type: string, fields: Record<string, unknown>) => Promise<void>, caller = this.caller?.()): Promise<boolean> {
     signal?.throwIfAborted();
     const needed = withPrerequisites(requested);
-    const available = this.available();
+    const available = this.available(caller);
     if (needed.some(permission => !available.includes(permission))) return false;
-    const missing = needed.filter(permission => !this.allows(permission));
+    const missing = needed.filter(permission => !this.allows(permission, caller));
     if (!missing.length) return true;
-    const preapproved = this.caller?.().preapproved ?? [];
+    const preapproved = caller?.preapproved ?? [];
     if (missing.every(permission => preapproved.includes(permission))) {
       for (const permission of missing) this.granted.add(permission);
       await emit?.('grant_granted', { permissions: missing, cwd: this.root });

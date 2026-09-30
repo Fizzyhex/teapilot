@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { DiscordTransport } from '../src/discord/bridge.js';
 import type { connect, GatewayHandlers, GatewayReply } from '../src/discord/gateway.js';
+import { grantView, type GrantPanel } from '../src/discord/grants-panel.js';
 import { serveDiscord } from '../src/discord/index.js';
 import { completion, fixture, jev, mockServer } from './helpers.js';
 
@@ -46,10 +47,13 @@ async function oneShots() {
     choose: async note => { notes.push(note); return { choice: pick, settle: async settled => { notes.push(settled); }, transport: () => transport }; },
   } satisfies GatewayReply);
   const results = (count: number) => vi.waitFor(() => expect(sent.filter(text => text.includes('Result: completed'))).toHaveLength(count), { timeout: 20_000 });
+  /** Panels posted by /convo grants, oldest first. */
+  const panels: GrantPanel[] = [];
   /** A slash command; resolves with its private note, or with the note its buttons settle on after `pick` is pressed. */
-  const command = (authorId: string, text: string, oneShot = true) => new Promise<string | undefined>(resolve => handlers!.command({
-    authorId, authorIsBot: false, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false, text, oneShot, respond: async note => resolve(note),
+  const command = (authorId: string, text: string, oneShot = true, channelId = 'channel') => new Promise<string | undefined>(resolve => handlers!.command({
+    authorId, authorIsBot: false, guildId: channelId.startsWith('dm-') ? undefined : 'guild', channelId, ownThread: false, mentionsBot: false, text, oneShot, respond: async note => resolve(note),
     browse: async text => resolve(text),
+    grants: async panel => { panels.push(panel); resolve(grantView(panel).content); },
     choose: async note => { notes.push(note); return { choice: pick, settle: async settled => { notes.push(settled); resolve(settled); }, transport: () => transport }; },
   }));
   const complete = (authorId: string, text: string, typed: string) => new Promise<string[]>(resolve => handlers!.complete!({
@@ -67,7 +71,7 @@ async function oneShots() {
   /** Messages answered as replies to them. */
   const replies: string[] = [];
   const asides = (count: number) => vi.waitFor(() => expect(sent.filter(text => /-# this is an aside/.test(text))).toHaveLength(count), { timeout: 20_000 });
-  return { typed: () => typed, prompts, tools, sent, replies, reply, message, reactions, results, asides, command, complete, notes, press: (index: number) => { pick = index; } };
+  return { typed: () => typed, prompts, tools, sent, replies, reply, message, reactions, results, asides, command, complete, notes, panels, press: (index: number) => { pick = index; } };
 }
 
 it('continues one history per person per channel across one-shot replies, and /convo clear ends it', async () => {
@@ -237,4 +241,22 @@ it('answers a /btw message in a DM publicly without adding it to the conversatio
   message('op', 'what did I just ask?');
   await vi.waitFor(() => expect(prompts).toHaveLength(3), { timeout: 20_000 });
   expect(prompts[2]).not.toContain('what is the secret word');
+}, 60_000);
+
+it('shows the access of a running conversation under /convo grants, and changes it from the buttons', async () => {
+  const { message, results, command, panels } = await oneShots();
+  expect(await command('op', '/convo grants', false, 'dm-op')).toBe('no active conversation here. send a message to start one.');
+  message('op', 'hello');
+  await results(1);
+  expect(await command('op', '/convo grants', false, 'dm-op')).toMatch(/^session access: green is granted/);
+  const panel = panels[0]!;
+  // A conversation with a workspace is offered its repository only in Code mode.
+  expect(panel.state().map(entry => entry.permission)).toEqual(['inference', 'web.search', 'discord.play']);
+  const held = () => panel.state().find(entry => entry.permission === 'web.search')!.granted;
+  const before = held();
+  expect(await panel.press('web.search', 'op')).toBeUndefined();
+  expect(held()).toBe(!before);
+  expect(await panel.press('web.search', 'stranger')).toBe("you can't use teapilot here.");
+  expect(held()).toBe(!before);
+  expect(await command('op', '/convo grants')).toBe("each /prompt here starts with fresh access, so there's nothing to grant.");
 }, 60_000);

@@ -319,6 +319,13 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       return;
     }
     const conversation = target && conversations.get(target.key);
+    if (command.text === '/convo grants') {
+      // Grants belong to a running session; where teapilot answers through the command, each prompt starts afresh.
+      const panel = !seat && conversation?.active ? conversation.grantPanel() : undefined;
+      if (panel) await command.grants(panel);
+      else await command.respond(command.oneShot ? "each /prompt here starts with fresh access, so there's nothing to grant." : 'no active conversation here. send a message to start one.');
+      return;
+    }
     if (target && conversation?.active) {
       log(`${target.key}: ${command.text}`);
       // /convo clear is answered privately, with a button to clear the workspace too.
@@ -328,7 +335,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       else await command.respond();
       return;
     }
-    if (!key) { await command.respond(target ? 'No active conversation here. Send a message to start one.' : 'You are not in a conversation with teapilot here.'); return; }
+    if (!key) { await command.respond(target ? 'no active conversation here. send a message to start one.' : "you're not in a conversation with teapilot here."); return; }
     if (command.text === '/stop') {
       const turn = runningOneShots.get(key);
       if (!turn?.active) { await command.respond('Nothing is running.'); return; }
@@ -367,7 +374,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       await command.respond(await workspaceCommand(storeControls(files, () => key), command.text) ?? 'Unknown teapilot command.');
       return;
     }
-    await command.respond('No active conversation here. Send a message to start one.');
+    await command.respond('no active conversation here. send a message to start one.');
   };
   /** Folders of the workspace /workspace tree is about to show, for Discord to offer as they are typed. */
   const handleComplete = async (completion: GatewayCompletion): Promise<void> => {

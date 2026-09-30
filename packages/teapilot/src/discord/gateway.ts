@@ -7,6 +7,8 @@ import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
 import { browseGone, browseModal, browseModalPrefix, browsePrefix, browseRows, browseSubmit, type BrowseAction, type BrowseSession, type WorkspaceBrowser } from './browse.js';
 import { attachmentOption, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, treeOption, withoutUserInstall, type PromptSetup } from './commands.js';
 import { isAside } from '../chat.js';
+import type { Permission } from '../execution/grants.js';
+import { grantPrefix, grantsGone, grantView, type GrantPanel } from './grants-panel.js';
 import { InteractionFeed, type FeedLink } from './feed.js';
 import { planButtons, planModal, type PlanAction, type PlanControls } from './plan.js';
 import { chunk, MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
@@ -46,6 +48,8 @@ export interface GatewayCommand extends IncomingMessage {
   choose(note: string, labels: string[]): Promise<GatewayChoice | undefined>;
   /** Instead of `respond()`: a private view of a folder, `text`, with buttons that open another folder or send a file. */
   browse(text: string, browser: WorkspaceBrowser, dir: string): Promise<void>;
+  /** Instead of `respond()`: posts `panel` for everyone here without notifying anyone; each press repaints it. */
+  grants(panel: GrantPanel): Promise<void>;
   /** teapilot cannot post here, so /reply and /prompt answer through their interactions, one person or collab at a time. */
   oneShot: boolean;
 }
@@ -373,6 +377,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   const sideAnswers = new Map<string, PendingAside>();
   /** Folder views under /workspace tree, by nonce, with who opened them; the oldest are forgotten first. */
   const browsing = new Map<string, { userId: string; session: BrowseSession }>();
+  /** Panels under /convo grants, by message id; the oldest are forgotten first. */
+  const panels = new Map<string, GrantPanel>();
   /** Open `choose()` notes by nonce: who may press them, and what the press resolves. */
   const choices = new Map<string, { userId: string; resolve(click: GatewayChoice | undefined): void }>();
   /** A private note with a button per label, the first one primary; resolves with the invoker's click, or undefined once it expires. */
@@ -607,6 +613,16 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
           await interaction.reply({ content: text, components: browseRows(nonce) as unknown as BaseMessageOptions['components'], flags: MessageFlags.Ephemeral, ...quiet })
             .catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
         },
+        grants: async panel => {
+          if (answered) throw new Error('This interaction was already answered.');
+          answered = true;
+          const response = await interaction.reply({ ...grantView(panel) as unknown as BaseMessageOptions, flags: MessageFlags.SuppressNotifications, ...quiet, withResponse: true })
+            .catch(error => { log(`Discord: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
+          const id = response?.resource?.message?.id;
+          if (!id) return;
+          panels.set(id, panel);
+          if (panels.size > cardLimit) panels.delete(panels.keys().next().value!);
+        },
       });
       return;
     }
@@ -705,6 +721,16 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       if (!entry) { await interaction.reply({ content: browseGone, flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
       if (entry.userId !== interaction.user.id) { await interaction.reply({ content: 'this view is not yours.', flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
       await interaction.showModal(browseModal(action, nonce, entry.session.dir) as unknown as APIModalInteractionResponseCallbackData).catch(noop);
+      return;
+    }
+    if (interaction.customId.startsWith(grantPrefix)) {
+      const panel = panels.get(interaction.message.id);
+      if (!panel) { await interaction.reply({ content: grantsGone, flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
+      // A grant can wait on an operator's approval, well past Discord's 3 seconds.
+      await interaction.deferUpdate().catch(noop);
+      const note = await panel.press(interaction.customId.slice(grantPrefix.length) as Permission, interaction.user.id).catch(error => `that didn't work: ${failure(error)}`);
+      await interaction.editReply({ ...grantView(panel) as unknown as BaseMessageOptions, ...quiet }).catch(noop);
+      if (note) await interaction.followUp({ content: note, flags: MessageFlags.Ephemeral, ...quiet }).catch(noop);
       return;
     }
     if (interaction.customId.startsWith(showPrefix)) {

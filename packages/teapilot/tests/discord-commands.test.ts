@@ -1,5 +1,7 @@
 import { expect, it } from 'vitest';
 import { commandDefinitions, commandText, promptSetup, setupCommands, withoutUserInstall } from '../src/discord/commands.js';
+import { grantView } from '../src/discord/grants-panel.js';
+import { permissions } from '../src/execution/grants.js';
 
 it('maps slash commands to session commands', () => {
   expect(commandText('mode', null, 'code')).toBe('/mode code');
@@ -58,6 +60,7 @@ it('offers /convo, /workspace and /new in place of /clear, and /collab as join, 
   expect(find('clear')).toBeUndefined();
   expect(find('exit')).toBeUndefined();
   expect(commandText('convo', 'clear')).toBe('/convo clear');
+  expect(commandText('convo', 'grants')).toBe('/convo grants');
   expect(commandText('convo')).toBeUndefined();
   expect(commandText('workspace', 'clear')).toBe('/workspace clear');
   expect(commandText('workspace', 'name', 'tea notes')).toBe('/workspace name tea notes');
@@ -68,4 +71,14 @@ it('offers /convo, /workspace and /new in place of /clear, and /collab as join, 
   expect(commandText('collab', null, 'hello')).toBeUndefined();
   expect(find('workspace')?.options).toContainEqual(expect.objectContaining({ name: 'tree', options: [expect.objectContaining({ name: 'dir', autocomplete: true })] }));
   for (const name of ['collab', 'convo', 'workspace', 'new', 'stop']) expect(find(name)).toMatchObject({ integration_types: [0, 1], contexts: [0, 1, 2] });
+});
+
+it('shows /convo grants as a button per permission, green when granted and grey when not, five to a row', () => {
+  const view = grantView({ state: () => permissions.map(permission => ({ permission, granted: permission === 'inference' })), press: async () => undefined });
+  expect(view.components.map(row => row.components.length)).toEqual([5, 1]);
+  expect(view.components[0]!.components.slice(0, 2)).toEqual([
+    { type: 2, style: 3, label: 'inference', custom_id: 'teapilot-grant:inference' },
+    { type: 2, style: 2, label: 'repository.read', custom_id: 'teapilot-grant:repository.read' },
+  ]);
+  expect(grantView({ state: () => [], press: async () => undefined })).toEqual({ content: 'this conversation cannot be granted anything.', components: [] });
 });

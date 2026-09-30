@@ -296,3 +296,32 @@ it('offers a conversation with a workspace its repository only in Code mode insi
   }
   expect(seen).toEqual([false, false, false, true]);
 });
+
+it('lets anyone allowed revoke from /convo grants, and asks an operator before granting to anyone else', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  const authorization = await SessionGrants.create(f.cwd, f.config, 'ask');
+  const { approvals, transport } = discord();
+  const roles = { ...access, callerFor: (id: string) => () => ({ permissions: id === 'op' ? f.config.policy.permissions : ['inference', 'web.search'] }) } as unknown as AccessStore;
+  const { chat } = conversation({ transport, access: roles, request: { prompt: '', cwd: f.cwd, mode: 'ask', authorization } });
+  const panel = chat.grantPanel()!;
+  const held = () => panel.state().filter(entry => entry.granted).map(entry => entry.permission);
+  expect(panel.state().map(entry => entry.permission)).toEqual(['inference', 'repository.read', 'repository.write', 'repository.shell', 'web.search', 'discord.play']);
+  expect(held()).toEqual(['inference']);
+  // An operator's press is its own approval.
+  expect(await panel.press('repository.write', 'op')).toBeUndefined();
+  expect(held()).toEqual(['inference', 'repository.read', 'repository.write']);
+  expect(approvals).toHaveLength(0);
+  // Anyone else asks an operator, and only for what they may hold.
+  const asked = panel.press('web.search', 'bob');
+  await vi.waitFor(() => expect(approvals).toHaveLength(1));
+  expect(approvals[0]!.text).toContain('Allow web.search for this session?');
+  approvals[0]!.resolve(true);
+  expect(await asked).toBeUndefined();
+  expect(await panel.press('discord.play', 'bob')).toBe("discord.play wasn't granted - denied or unavailable.");
+  expect(approvals).toHaveLength(1);
+  // Revoking needs no approval, and read takes write with it.
+  expect(await panel.press('repository.read', 'bob')).toBeUndefined();
+  expect(held()).toEqual(['inference', 'web.search']);
+  expect(await panel.press('web.search', 'mallory')).toBe("you can't use teapilot here.");
+  expect(held()).toEqual(['inference', 'web.search']);
+});

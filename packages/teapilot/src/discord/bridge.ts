@@ -5,6 +5,7 @@ import { repositoryOffered, repositoryPermissions } from '../execution/grants.js
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
+import { grantsGone, type GrantPanel } from './grants-panel.js';
 import type { ConversationWorkspace } from '../agents/workspace.js';
 import type { WorkspaceSandbox } from '../workspace/sandbox.js';
 import type { WorkspaceStore } from '../workspace/store.js';
@@ -92,7 +93,7 @@ export interface ConversationOptions {
   lineDelayMs?: () => number;
 }
 
-const discordHelp = '`/stop` - cancel the running turn\n`/convo clear` - clear the context window; the workspace keeps its files\n`/workspace clear|name|tree` - delete, name or list the workspace\'s files\n`/new` - clear both\n`/btw` - ask a question without polluting the context window.\n`/plan` - get an implementation plan to discuss before anything is changed.\n`/rfc` - get a design proposal to discuss before anything is changed.';
+const discordHelp = '`/stop` - cancel the running turn\n`/convo clear` - clear the context window; the workspace keeps its files\n`/convo grants` - see and change what teapilot may do here\n`/workspace clear|name|tree` - delete, name or list the workspace\'s files\n`/new` - clear both\n`/btw` - ask a question without polluting the context window.\n`/plan` - get an implementation plan to discuss before anything is changed.\n`/rfc` - get a design proposal to discuss before anything is changed.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
@@ -161,12 +162,14 @@ export class Conversation {
     });
   };
 
-  private approve: Approve = async (approval: Approval) => {
+  // Only operators may answer approvals, so only an operator's message can approve everything up front.
+  private approve: Approve = approval => this.ask(approval, this.yolo && this.operator(this.speaker));
+
+  private async ask(approval: Approval, yolo: boolean): Promise<boolean> {
     const signals = [AbortSignal.timeout(this.options.approvalTimeoutMs ?? 10 * 60_000), this.options.request.signal, this.turn?.signal, approval.signal].filter((value): value is AbortSignal => Boolean(value));
     const signal = AbortSignal.any(signals);
     if (signal.aborted) return false;
-    // Only operators may answer approvals, so only an operator's message can approve everything up front.
-    if (this.yolo && this.operator(this.speaker)) {
+    if (yolo) {
       const summary = this.options.redact(approval.summary).split('\n')[0];
       this.options.log(`${this.options.key}: ${approval.kind} auto-approved (yolo): ${summary}`);
       await this.say(`-# Auto-approved (${approval.kind}): ${summary}`);
@@ -188,7 +191,36 @@ export class Conversation {
     });
     this.options.log(`${this.options.key}: ${approval.kind} ${approved ? 'approved' : 'denied'}: ${this.options.redact(approval.summary).split('\n')[0]}`);
     return approved;
-  };
+  }
+
+  /**
+   * The session's access for /convo grants. Anyone who may talk to teapilot can revoke; asking works as /grant does,
+   * within what the presser may hold, and an operator's press is its own approval.
+   */
+  grantPanel(): GrantPanel | undefined {
+    const grants = this.options.request.authorization;
+    if (!grants) return undefined;
+    const { access, key, log } = this.options;
+    return {
+      state: () => grants.offered(),
+      press: async (permission, userId) => {
+        if (access && access.roleOf(userId) === undefined) return "you can't use teapilot here.";
+        if (this.ended) return grantsGone;
+        const entry = grants.offered().find(offered => offered.permission === permission);
+        if (!entry) return `${permission} isn't available in this convo.`;
+        if (entry.granted) {
+          grants.revoke(permission, this.onEvent);
+          log(`${key}: ${userId} revoked ${permission}`);
+          return undefined;
+        }
+        const approve: Approve = this.operator(userId) ? async () => true : approval => this.ask(approval, false);
+        const approved = await grants.request([permission], 'asked for from /convo grants.', approve, this.options.request.signal,
+          async (type, fields) => { this.onEvent({ type, ...fields }); }, access?.callerFor(userId)());
+        log(`${key}: ${userId} asked for ${permission}: ${approved ? 'granted' : 'not granted'}`);
+        return approved ? undefined : `${permission} wasn't granted - denied or unavailable.`;
+      },
+    };
+  }
 
   /** Paints a plan's messages; its buttons are `actions`, none once it is settled or being worked on. */
   private async paint(state: PlanState, actions: PlanAction[], footer?: string): Promise<void> {
