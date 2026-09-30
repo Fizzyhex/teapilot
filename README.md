@@ -1,6 +1,6 @@
 # teapilot
 
-![aaa](./media/typing-7-loops-padded.webp)
+![teapilot wacking its floating ascii paws against a keyboard](./media/typing-7-loops-padded.webp)
 
 hi, teapilot is a small (but not) personal agent for coding and questions, for windows or linux.
 
