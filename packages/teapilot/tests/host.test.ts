@@ -418,6 +418,29 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     expect(await readFile(join(f.cwd, 'granted.txt'), 'utf8')).toBe('approved\n');
   });
 
+  it('goes on without search when web access is granted mid-request but search is down', async () => {
+    const bodies: any[] = [];
+    const f = await fixture(); cleanups.push(f.cleanup);
+    const server = await mockServer((body, _req, res) => {
+      bodies.push(body);
+      if (bodies.length === 1) completion(res, { tool: { name: 'request_capabilities', arguments: { permissions: ['web.search'] } } });
+      else completion(res, { text: 'from what I have' });
+    });
+    cleanups.push(server.close);
+    f.config.routingMode = 'direct';
+    f.config.models.capable.baseUrl = server.url;
+    f.config.searchUrl = 'http://127.0.0.1:1';
+    if (!f.config.policy.permissions.includes('web.search')) f.config.policy.permissions.push('web.search');
+    const grants = await SessionGrants.create(f.cwd, f.config, 'chat');
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Plan from these links', mode: 'chat', authorization: grants }, {
+      localProbe: async () => true,
+      approve: async approval => approval.kind === 'capability',
+    });
+    expect(result.status).not.toBe('approval_denied');
+    expect(JSON.stringify(bodies[1].messages)).toContain('Unavailable for this request: web.search');
+    expect(result.text).toContain('Web search was unavailable. This answer is unverified');
+  });
+
   it('offers concrete next steps on a context-limit stop', async () => {
     const f = await setup((_body, req, res) => {
       if (req.url === '/jev') jev(res, 'ask.normal');

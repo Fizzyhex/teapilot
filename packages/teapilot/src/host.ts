@@ -56,6 +56,7 @@ export interface HostDependencies {
   onEvent?: EventSink; beforeMutation?: BeforeMutation;
   /** The model's reasoning as it streams, redacted; see AttemptInput.onReasoning. */
   onReasoning?: (text: string) => void;
+  /** Asked when search is granted mid-request but unusable; without it the request goes on without search. */
   continueWithoutSearch?: (message: string) => Promise<boolean>;
 }
 
@@ -137,7 +138,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       try { await checkSearch(config, signal); }
       catch (error) {
         signal?.throwIfAborted();
-        if (!await dependencies.continueWithoutSearch?.(error instanceof Error ? error.message : 'Web search is unavailable.')) {
+        // A request goes on without search unless the host declines: the model can still use what it has, marked unverified.
+        const proceed = dependencies.continueWithoutSearch ? await dependencies.continueWithoutSearch(error instanceof Error ? error.message : 'Web search is unavailable.') : true;
+        if (!proceed) {
           accessFailure = 'Web search is unavailable. Repair search before retrying.';
           return false;
         }

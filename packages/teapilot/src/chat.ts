@@ -38,7 +38,7 @@ CRITICAL: DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"!`;
 
 const planTemplate = `${proposalHead} Your reply MUST be a plan that follows the structure below, starting with the "<plan>" tag - with NOTHING else extra.
 
-First, research before you propose anything: look through the repository for what already exists, and look for successful, lightweight open-source alternatives (small, well-maintained libraries or tools that already do part or all of this). Prefer reusing or adopting one over building from scratch, and say why if you still build it.
+First, research before you propose anything: skim the links, files and documents the request points to (ask for web access with request_capabilities if you lack it), so the plan rests on them rather than on guesses - collecting data that takes more than a few calls is a step of the plan, not research; look through the repository for what already exists, and look for successful, lightweight open-source alternatives (small, well-maintained libraries or tools that already do part or all of this). Prefer reusing or adopting one over building from scratch, and say why if you still build it.
 
 \`\`\`template
 <plan>

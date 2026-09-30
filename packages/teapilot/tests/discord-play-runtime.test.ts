@@ -536,8 +536,12 @@ it('dry-runs an app with scripted actions', async () => {
   expect(transcript).not.toContain('## 4.');
   expect(posts).toEqual([]);
   // Actions that change nothing are counted, since the final state alone hides them.
-  const idle = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }, { kind: 'button', id: 'none' }, { kind: 'button', id: 'none' }], owner);
+  const idle = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }, { kind: 'button', id: 'say' }, { kind: 'button', id: 'say' }], owner);
   expect(idle).toContain('(final of 3 actions; 2 of 3 actions changed nothing;');
+  // A control the view does not show is skipped and named, so a wrong id is not mistaken for an app that ignores it.
+  const wrong = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'open' }, { kind: 'button', id: 'add' }], owner);
+  expect(wrong).toContain('Skipped, no such control on screen at that point: 1. button open (on screen: add, boom, hint, soon, never, ask, end, say).');
+  expect(wrong).toContain('state: {"count":1,"said":""}');
   // A running app's state, so a dry run of an update shows what its players will get.
   const resumed = await runtime.test({ kind: 'sandbox', code: counter }, [{ kind: 'button', id: 'add' }], owner, { state: { count: 5, said: '' }, steps: true });
   expect(resumed).toContain('## current state\nstate: {"count":5,"said":""}');

@@ -172,7 +172,7 @@ function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus |
     '- This conversation has a workspace folder: files people attach are kept there by name, next to what you make. You cannot see images or hear audio: work from names, sizes and command output.',
     ...rooted ? ['- read, write, edit, ls, find and grep take workspace file names. Create files, scripts included, with write; change part of one with edit rather than writing all of it again.'] : [],
     ...rooted && status?.available ? [
-      `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed. Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
+      `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed except for hosts people approve when a command first connects (such as a page the request links to). Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
       '- Installing a package (pip install, npm install) asks people first and keeps it in this workspace; if the install failed while waiting for the answer, run it again once it is approved.',
       '- Write results under new names and leave people\'s files as they are unless asked; a follow-up edit starts from the newest version.',
     ] : rooted ? [`- Commands cannot run here${status?.reason ? ` (${status.reason})` : ''}, so you cannot convert or inspect media files beyond their names; say so if asked.`] : [],

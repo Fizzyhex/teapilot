@@ -196,3 +196,23 @@ it('keeps report for a junior whose other tools are withdrawn', async () => {
   expect((await events(f.config)).find(event => event.type === 'delegate')).toMatchObject({ status: 'stuck' });
   expect((await events(f.config)).find(event => event.type === 'delegate')?.stopped).toBeUndefined();
 });
+
+it('tells a junior to report before the tool limit stops it', async () => {
+  let instructorCalls = 0, juniorCalls = 0;
+  const f = await setup((body, _req, res) => {
+    if (junior(body)) {
+      juniorCalls++;
+      // It keeps working until the host says its calls are nearly spent.
+      return completion(res, JSON.stringify(body.messages).includes('tool calls left: call report now')
+        ? { tool: { name: 'report', arguments: { status: 'stuck', summary: 'Parsed half the table; rows are in notes.txt.' } } }
+        : { tool: { name: 'write', arguments: { path: 'notes.txt', content: `row ${juniorCalls}` } } });
+    }
+    completion(res, ++instructorCalls === 1 ? { tool: { name: 'delegate_task', arguments: { message: 'Parse the table.' } } } : { text: 'Noted.' });
+  });
+  f.config.policy.limits.maxToolCalls = 6;
+  await run(f, { scratch: f.scratch });
+  const delegated = (await events(f.config)).find(event => event.type === 'delegate');
+  expect(delegated).toMatchObject({ status: 'stuck' });
+  expect(delegated?.stopped).toBeUndefined();
+  expect(juniorCalls).toBe(4);
+});

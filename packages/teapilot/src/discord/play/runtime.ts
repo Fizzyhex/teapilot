@@ -552,7 +552,11 @@ export class PlayRuntime {
     let last: string[] = [];
     // Actions that change nothing (a move into a wall, a turn out of order) are easy to miss in the final state alone.
     let before = '', idle = 0;
+    /** The view on screen before each action, and the actions that named a control it did not show. */
+    let view: View | undefined;
+    const skipped: string[] = [];
     const show = (label: string, step: Advance) => {
+      view = step.view;
       const now = JSON.stringify(step.state) + describe(step.view);
       if (before && now === before && !step.effects.length) idle++;
       before = now;
@@ -571,12 +575,19 @@ export class PlayRuntime {
       }
       for (const [index, action] of actions.entries()) {
         const label = `${index + 1}. ${action.kind} ${action.id}`;
+        // Nobody can press a control that is not on screen; a wrong id would otherwise read as an app that ignores it.
+        if ((action.kind === 'button' || action.kind === 'select') && !findControl(view, action.id)) {
+          const ids = (view?.rows ?? []).flatMap(row => row.controls.flatMap(control => control.type === 'select' || control.url === undefined ? [control.id] : []));
+          skipped.push(`${label} (on screen: ${ids.join(', ') || 'no controls'})`);
+          continue;
+        }
         try { show(label, await this.advance(engine, record, toAction(action, owner))); }
         catch (error) { last = [`## ${label}`, `error: ${errorText(error)}`]; lines.push(...last); break; }
       }
     } finally { engine.dispose(); }
     const unchanged = idle ? `${idle} of ${actions.length} actions changed nothing` : '';
-    return clip((options.steps ? [...lines, ...unchanged ? [`(${unchanged})`] : []] : [`(final of ${actions.length} actions${unchanged ? `; ${unchanged}` : ''}; set steps for each)`, ...last]).join('\n'), maxOutputChars / 8);
+    const missing = skipped.length ? [`Skipped, no such control on screen at that point: ${skipped.join('; ')}.`] : [];
+    return clip((options.steps ? [...missing, ...lines, ...unchanged ? [`(${unchanged})`] : []] : [...missing, `(final of ${actions.length} actions${unchanged ? `; ${unchanged}` : ''}; set steps for each)`, ...last]).join('\n'), maxOutputChars / 8);
   }
 
   inspect(id: string, conversation: string): string {

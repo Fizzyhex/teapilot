@@ -25,8 +25,8 @@ export interface PlanControls {
 
 export const approvePrompt = 'go ahead with the plan';
 export const juniorsPrompt = [
-  'REFINE THE PLAN',
-  'workload distribtion - group up todo tasks for delegation (`delegate_task`) to juniors.',
+  'REFINE THE PLAN above - reply with the updated <plan>, don\'t take action yet.',
+  'workload distribution - group up todo tasks for delegation (`delegate_task`) to juniors: one junior per independent deliverable (research or data gathering, a separate file or feature), never parts of one small file.',
   'short descriptive `#tags` next to your todos so you can maintain and reference them.',
   '',
   'maintenance - mark off completions, crossing off failures with notes, keep me in the loop.',

@@ -12,6 +12,18 @@ All were written by the local Qwen 27B on 2026-09-27.
 | [library-abyss-iteration.js](library-abyss-iteration.js) | 2U library abyss, tuning run | not scored | Chairs and banisters can seal the player into a small pocket, and the gap teleport lands in the wrong place. |
 | [kessel-sabacc-run-3.js](kessel-sabacc-run-3.js) | 1U Kessel Sabacc | 3/10 | No Impostor or Sylop cards, hands shown to everyone, and the turn counter never advances, so a round never reaches the reveal. |
 
+### Greggs kiosk (orchestration challenge 1O, 2026-09-30)
+
+Written by the local Qwen 27B through `/plan` → `assign juniors` → `lgtm!`. Web search was down for every run, so no build has real menu or nutrition data. Scores are in [the report](../finetuning-reports/2026-09-30-finetune-1.md).
+
+| File | Run | Known problems |
+|---|---|---|
+| [greggs-kiosk-baseline.js](greggs-kiosk-baseline.js) | baseline, before any fix | Invented items and values. Traffic-light colours are computed and then dropped: every nutrient button is grey. |
+| [greggs-kiosk-run-3.js](greggs-kiosk-run-3.js) | 3 | Title is "GREGGS — breakfast", not "Find your yummy". Items include pork pie in breakfast and "lemonade" as a sweet treat; values claimed to come from the PDF but do not. |
+| [greggs-kiosk-run-4.js](greggs-kiosk-run-4.js) | 4 | Invented items ("Strawberry Roll"). No traffic-light colours on the nutrient buttons. |
+| [greggs-kiosk-run-6.js](greggs-kiosk-run-6.js) | 6 | The best build: FSA traffic lights (green / 🟠 / red), recommendations and flow work. Items are invented (the model took Greggs for a pita chain). |
+| [greggs-kiosk-run-7.js](greggs-kiosk-run-7.js) | 7 | Works like run 6, but items are invented ("Beef Poutine"), and a junior posted a second copy. |
+
 ## Not recoverable
 
 The co-op farm games (3U) and the other Kessel builds were lost: the simulator deletes a session's apps when the session stops. The farm from final run 2 (7.5/10, all five turns completed) is the one worth rebuilding; its prompts are in the report.

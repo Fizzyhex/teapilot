@@ -16,7 +16,7 @@ import type { Telemetry } from '../telemetry/outcome.js';
 import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
 import { casualPrompt } from './casual.js';
-import { delegateTool, delegationMinContext, delegationPrompt, juniorPrompt, reportTool, type JuniorRole } from './delegate.js';
+import { delegateTool, delegationMinContext, delegationPrompt, juniorPrompt, juniorPlayWithheld, juniorReportMargin, reportTool, type JuniorRole } from './delegate.js';
 import { coder } from './coder.js';
 import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, shouldCompact, summarise, summaryLength, summaryMessage, turnMark, type Compaction } from './compaction.js';
 import { carryOver, fitHistory, supersedePlayCalls, supersedeReads, turnForms, turnSteps, withoutOldThinking, type HistoryFit } from './history.js';
@@ -127,7 +127,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const playing = Boolean(input.play) && effectiveConfig.policy.permissions.includes('discord.play');
   const profile = playing ? { ...tierProfile, maxOutputTokens: Math.max(tierProfile.maxOutputTokens, Math.min(playOutputTokens, model.maxOutputTokens)) } : tierProfile;
   const inference: InferenceState = { turns: 0 };
-  let toolLimit = false, timeout = false, searchFailed = false, capabilityDenied = false;
+  let toolLimit = false, timeout = false, searchFailed = false, capabilityDenied = false, limitWarned = false;
   /** A reply that ended to call a tool but carried no call the server could parse. */
   const lost = (message: { stopReason?: string; content: Array<{ type: string }> }) => message.stopReason === 'toolUse' && !message.content.some(part => part.type === 'toolCall');
   let lostCalls = 0, lostNotice = false;
@@ -168,8 +168,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       // Server emoji people pasted reach apps through ctx.emoji whether or not the model passes them on.
       const emojis = { ...input.play.emojis, ...pastedEmoji(...(input.history ?? []).map(turn => turn.user), asked) };
       const apps = play({ ...input.play, ...repository ? { files: undefined } : {}, emojis, requested: Object.keys(pastedEmoji(asked)) }, effectiveConfig, policy, input.approve);
-      setup.tools.push(...apps.tools);
-      setup.systemPrompt += '\n' + apps.systemPrompt;
+      // Juniors build and dry-run apps; their instructor posts them, so one request never posts two copies.
+      setup.tools.push(...input.junior ? apps.tools.filter(tool => !juniorPlayWithheld.includes(tool.name)) : apps.tools);
+      setup.systemPrompt += '\n' + apps.systemPrompt + (input.junior ? '\n- As a junior you do not post apps: write the file, dry-run it with play_test, and name the file in your report so your instructor can post it.' : '');
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
       setup.systemPrompt += '\n- For interactive Discord apps (games, polls, quizzes, boards, timers with buttons), request `discord.play` with request_capabilities; it is granted without a prompt.';
     }
@@ -474,7 +475,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         tools: new Set((sent.tools ?? []).map(tool => tool.name)),
       }, text => tipsShown.has(text)) : undefined;
       if (tip) { tipsShown.add(tipText(tip)); tipFor.set(toolCall.id, tip.name); }
-      const extra = [note, tip && tipText(tip)].filter((text): text is string => Boolean(text));
+      // A junior stopped by the limit ends without a report, and its instructor learns nothing of what it found.
+      let lastCalls: string | undefined;
+      if (input.junior && !limitWarned && config.policy.limits.maxToolCalls - evidence.toolCalls <= juniorReportMargin) {
+        limitWarned = true;
+        lastCalls = `[host notice] ${Math.max(0, config.policy.limits.maxToolCalls - evidence.toolCalls)} tool calls left: call report now (stuck if unfinished), with what you found and the files it is saved in.`;
+      }
+      const extra = [note, tip && tipText(tip), lastCalls].filter((text): text is string => Boolean(text));
       if (extra.length) return { content: [...content, ...extra.map(text => ({ type: 'text' as const, text }))] };
       return kept ? { content } : undefined;
     },

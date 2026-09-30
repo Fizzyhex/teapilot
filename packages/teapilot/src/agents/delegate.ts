@@ -21,6 +21,10 @@ export interface JuniorRole { name: string; turn: number; root?: string; onRepor
 
 /** Delegation messages one attempt may send across all its juniors, so a small model cannot loop on "try again". */
 export const defaultJuniorTurns = 6;
+/** Tool calls a junior has left when it is told to report, so the report itself still fits under the limit. */
+export const juniorReportMargin = 3;
+/** Play tools a junior does not get: its instructor posts apps, so a request never posts two copies. */
+export const juniorPlayWithheld = ['play_start', 'play_resend', 'play_stop'];
 /** Below this context, a report costs the instructor more than the junior saves it. */
 export const delegationMinContext = 16_384;
 
@@ -55,7 +59,7 @@ export function juniorPrompt(name: string): string {
 }
 
 export function delegationPrompt(): string {
-  return '\n- For a large request, you can hand self-contained parts to a junior with delegate_task: it starts with a clean context and your access, does the work and reports back, so your own context stays small. Write each instruction so it stands alone (the goal, the files involved, and how to check the result), since the junior does not see this conversation. Review each report; continue the same junior (by name) for fixes, answers or follow-ups rather than redoing its work, and dismiss it with done when finished. Small questions and quick edits are faster to do yourself.';
+  return '\n- For a large request, you can hand self-contained parts to a junior with delegate_task: it starts with a clean context and your access, does the work and reports back, so your own context stays small. Write each instruction so it stands alone (the goal, the sources and files to use, and how to check the result), since the junior does not see this conversation. Review each report; continue the same junior (by name) for fixes, answers or follow-ups rather than redoing its work, and dismiss it with done when finished. Small questions and quick edits are faster to do yourself.';
 }
 
 /** The tool a junior ends its turn with; its result stops the junior's attempt. */
@@ -95,7 +99,7 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
     description: 'Hand a self-contained task to a junior agent with a clean context and your access, and wait for its report. Omit junior to start a new one; pass a junior\'s name to continue it (follow-ups, fixes, answers to its questions). done: true dismisses it.',
     parameters: Type.Object({
       junior: Type.Optional(Type.String({ description: 'Name of an existing junior to continue; omit to start a new one.' })),
-      message: Type.String({ description: 'The task, standing alone (goal, files, how to check), or a follow-up to the junior.' }),
+      message: Type.String({ description: 'The task, standing alone (goal, sources and files to use, how to check), or a follow-up to the junior.' }),
       done: Type.Optional(Type.Boolean({ description: 'Dismiss this junior; message is ignored.' })),
     }),
     execute: async (_id, args, signal) => {
@@ -126,7 +130,7 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
           config: parent.config, tier: parent.tier, workload: parent.workload, cwd: parent.cwd, web: parent.web, mode: parent.mode,
           budget: parent.budget, telemetry: parent.telemetry, approve: parent.approve, beforeMutation: parent.beforeMutation,
           authorization: parent.authorization, activePermissions: parent.activePermissions, requestCapabilities: parent.requestCapabilities,
-          workspace: parent.workspace, webController: parent.webController, searchUnavailable: parent.searchUnavailable, attempt: parent.attempt,
+          workspace: parent.workspace, webController: parent.webController, play: parent.play, searchUnavailable: parent.searchUnavailable, attempt: parent.attempt,
           signal: signal ?? parent.signal, history: junior.turns, scratch: junior.scratch, prompt: message, requestText: message,
           // Its words are for the instructor, not the person: only what its tools do is shown.
           onEvent: event => { if (event.type.startsWith('tool_execution_') || event.type === 'compaction_start') parent.onEvent?.({ ...event, junior: name }); },
