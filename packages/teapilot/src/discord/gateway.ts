@@ -102,6 +102,8 @@ export interface GatewayHandlers {
   reply(reply: GatewayReply): void;
   /** A click, selection or form on a discord.play app, from anyone; the runtime decides who may act. */
   component(interaction: PlayInteraction): void;
+  /** Whether a person may use teapilot at all: an operator, or a whitelisted user. Defaults to the operators. */
+  allowed?(userId: string): boolean;
   /** Side answers (/btw) posted compactly or summarised. */
   asides: {
     /** Saves an answer posted compactly, and returns the id its button carries. */
@@ -195,7 +197,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     rest: { agent: restAgent() },
   });
   type CardMessage = BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds };
-  const pending = new Map<string, { text: string; resolve(approved: boolean): void }>();
+  const pending = new Map<string, { text: string; users: boolean; resolve(approved: boolean): void }>();
   const cards = new Map<string, CardControls['press']>();
   const remember = (id: string, controls: CardControls) => {
     cards.delete(id); cards.set(id, controls.press);
@@ -221,8 +223,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   const settle = (text: string, verdict: string) => `${text.slice(0, MESSAGE_LIMIT - verdict.length - 2)}\n\n${verdict}`;
 
   type Payload = { content: string; components: Array<ActionRowBuilder<ButtonBuilder>>; allowedMentions: { parse: [] } };
-  /** Approve/deny buttons under `text`; `post` and `revise` decide whether a channel or an interaction carries them. */
-  const askApproval = (text: string, signal: AbortSignal, post: (payload: Payload) => Promise<{ id: string }>, revise: (id: string, payload: Payload) => Promise<unknown>): Promise<boolean> => {
+  /** Approve/deny buttons under `text`; `post` and `revise` decide whether a channel or an interaction carries them. Operators answer; with `users`, so may whitelisted users. */
+  const askApproval = (text: string, signal: AbortSignal, users: boolean, post: (payload: Payload) => Promise<{ id: string }>, revise: (id: string, payload: Payload) => Promise<unknown>): Promise<boolean> => {
     if (signal.aborted) return Promise.resolve(false);
     const nonce = randomUUID();
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -234,7 +236,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         void revise(message.id, { content: settle(text, '**Denied** (expired or cancelled)'), components: [], ...quiet }).catch(noop);
         resolve(false);
       };
-      pending.set(nonce, { text, resolve: approved => { signal.removeEventListener('abort', expire); resolve(approved); } });
+      pending.set(nonce, { text, users, resolve: approved => { signal.removeEventListener('abort', expire); resolve(approved); } });
       signal.addEventListener('abort', expire, { once: true });
     }));
   };
@@ -271,7 +273,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         return posted;
       },
       typing() { void channel.sendTyping().catch(noop); },
-      askApproval: (text, signal) => askApproval(text, signal, payload => channel.send(payload), async (id, payload) => (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload)),
+      askApproval: (text, signal, users = false) => askApproval(text, signal, users, payload => channel.send(payload), async (id, payload) => (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload)),
     };
   };
 
@@ -321,7 +323,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         return feed.showCard(cardPayload(text, given), given.stop ? cardPayload(text, given, true) : undefined, id);
       },
       typing: noop,
-      askApproval: (text, signal) => askApproval(text, signal, async payload => ({ id: await feed.post(payload) }), (id, payload) => feed.revise(id, payload)),
+      askApproval: (text, signal, users = false) => askApproval(text, signal, users, async payload => ({ id: await feed.post(payload) }), (id, payload) => feed.revise(id, payload)),
       // The runtime stops editing through this interaction once it expires, and uses the app's clicks after that.
       async postApp(payload) {
         if (!feed.live) throw new Error('Discord has stopped the updates of this reply; press Resume on its status card first.');
@@ -797,11 +799,12 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     }
     const [prefix, nonce, verdict] = interaction.customId.split(':');
     if (prefix !== 'teapilot' || !nonce) return;
-    if (!settings.allowedUserIds.includes(interaction.user.id)) {
+    const entry = pending.get(nonce);
+    const mayAnswer = settings.allowedUserIds.includes(interaction.user.id) || (entry?.users === true && handlers.allowed?.(interaction.user.id) === true);
+    if (!mayAnswer) {
       await interaction.reply({ content: 'You are not allowed to approve teapilot actions.', flags: MessageFlags.Ephemeral }).catch(noop);
       return;
     }
-    const entry = pending.get(nonce);
     if (!entry) { await interaction.reply({ content: 'This approval is no longer pending.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
     pending.delete(nonce);
     const approved = verdict === 'approve';

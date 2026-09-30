@@ -38,7 +38,7 @@ Operators add users and grant extra access by asking teapilot, for example "let 
 
 Access works as in the CLI. Sessions start in `ask` mode at the configured repository root, `/mode code` asks for repository access, and shell commands and large overwrites always ask.
 
-Approvals are **Approve** / **Deny** buttons that only operators can click. There is no auto-approve. Unanswered approvals are denied after 10 minutes, or when teapilot stops.
+Approvals are **Approve** / **Deny** buttons that only operators can click, except network requests, which users can answer too. There is no auto-approve. Unanswered approvals are denied after 10 minutes, or when teapilot stops.
 
 ## Setup
 

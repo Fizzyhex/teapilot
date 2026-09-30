@@ -25,8 +25,8 @@ export interface DiscordTransport {
   edit(messageId: string, text: string): Promise<void>;
   /** Posts a turn's status card, or with `id` replaces it. Each press is answered privately with `press`'s reply. */
   card(text: string, controls: CardControls, id?: string): Promise<string>;
-  /** Post approve/deny buttons. Resolves false when `signal` aborts first. */
-  askApproval(text: string, signal: AbortSignal): Promise<boolean>;
+  /** Post approve/deny buttons. Operators may answer; with `users`, so may whitelisted users. Resolves false when `signal` aborts first. */
+  askApproval(text: string, signal: AbortSignal, users?: boolean): Promise<boolean>;
   typing(): void;
   /** Posts files as attachments, with a line of text. */
   sendFiles?(text: string, files: Array<{ name: string; data: Buffer }>): Promise<string>;
@@ -182,7 +182,8 @@ export class Conversation {
     live?.refresh();
     // Show everything; the buttons go on the last part so the whole request is read first.
     for (const part of parts.slice(0, -1)) await this.options.transport.send(part);
-    const approved = await this.options.transport.askApproval(parts.at(-1) ?? 'Approval needed.', signal).finally(() => {
+    // A network request only reaches hosts named in the approval, so anyone using the conversation may answer it.
+    const approved = await this.options.transport.askApproval(parts.at(-1) ?? 'Approval needed.', signal, approval.kind === 'network').finally(() => {
       if (!live || !previous) return;
       // Put the phase back unless something else, such as Stop, changed it meanwhile.
       const current = live.card.set(previous);

@@ -47,6 +47,8 @@ export interface Message {
   reactions: string[];
   /** Set while approve/deny buttons on this message are waiting. */
   approval?: (approved: boolean) => void;
+  /** Whitelisted users may answer the approval too, not only operators. */
+  approvalUsers?: boolean;
 }
 
 /** A mistake in how the simulator was asked to act, such as clicking a control that does not exist. */
@@ -241,7 +243,7 @@ export class World {
         return posted;
       },
       typing: () => this.emit(`… ${bot.name} is typing in ${channel.name}`),
-      askApproval: (text, signal) => {
+      askApproval: (text, signal, users = false) => {
         if (signal.aborted) return Promise.resolve(false);
         const nonce = ++this.counters.approval;
         const message = this.post(channel, bot.name, { content: text, components: [{ type: 1, components: [
@@ -255,6 +257,7 @@ export class World {
             this.update(message, { content: settle(text, '**Denied** (expired or cancelled)'), components: [] });
             resolve(false);
           };
+          message.approvalUsers = users;
           message.approval = approved => { signal.removeEventListener('abort', expire); resolve(approved); };
           signal.addEventListener('abort', expire, { once: true });
         });
@@ -333,10 +336,10 @@ export class World {
     return this.interact(person, message, 'button', custom, `clicked [${this.label(control)}]`);
   }
 
-  /** Like the real gateway: only operators may answer approvals. */
+  /** Like the real gateway: operators may answer approvals, and whitelisted users the ones that allow them. */
   private answerApproval(person: Person, message: Message, approved: boolean): string {
     const note = (content: string) => this.render(this.post(message.channel, bot.name, { content }, person.name));
-    if (!this.operators.includes(person.id)) return note('You are not allowed to approve teapilot actions.');
+    if (!this.operators.includes(person.id) && !(message.approval && message.approvalUsers && this.handlers?.allowed?.(person.id))) return note('You are not allowed to approve teapilot actions.');
     const resolve = message.approval;
     if (!resolve) return note('This approval is no longer pending.');
     message.approval = undefined;

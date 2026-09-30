@@ -486,6 +486,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     command: command => void handleCommand(command).catch(failed('Command handling')),
     complete: completion => void handleComplete(completion).catch(failed('Completion')),
     reply: reply => void handleReply(reply).catch(failed('Reply handling')),
+    allowed,
     component: interaction => void (surface ? play.interact(interaction) : interaction.reply('teapilot is still starting; try again in a moment.')).catch(failed('App interaction')),
     asides: { keep: answer => asides.keep(answer), find: id => asides.find(id), summarise: summariser({ config, root, access, queue, run, signal }) },
   }, log);
