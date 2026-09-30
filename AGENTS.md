@@ -72,4 +72,4 @@ The files are large and grow without limit: read their tails, never the whole fi
 
 ## User-Facing Text
 
-teapilot generally uses a concise, casual lower-case style for it's user-facing text. do so when it doesn't have a tangible impact on legibility.
+teapilot uses a concise, casual lower-case style for it's user-facing text. do so when whenever it doesn't have a tangible impact on usability.
