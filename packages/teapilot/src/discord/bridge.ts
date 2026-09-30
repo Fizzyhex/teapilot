@@ -5,7 +5,7 @@ import { repositoryOffered, repositoryPermissions } from '../execution/grants.js
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
 import type { AccessStore } from './access-store.js';
-import { grantsGone, type GrantPanel } from './grants-panel.js';
+import { grantControls, type GrantPanel } from './grants-panel.js';
 import type { ConversationWorkspace } from '../agents/workspace.js';
 import type { WorkspaceSandbox } from '../workspace/sandbox.js';
 import type { WorkspaceStore } from '../workspace/store.js';
@@ -193,33 +193,13 @@ export class Conversation {
     return approved;
   }
 
-  /**
-   * The session's access for /convo grants. Anyone who may talk to teapilot can revoke; asking works as /grant does,
-   * within what the presser may hold, and an operator's press is its own approval.
-   */
+  /** The session's access for /convo grants; approvals are asked for here, where the conversation is. */
   grantPanel(): GrantPanel | undefined {
     const grants = this.options.request.authorization;
     if (!grants) return undefined;
     const { access, key, log } = this.options;
-    return {
-      state: () => grants.offered(),
-      press: async (permission, userId) => {
-        if (access && access.roleOf(userId) === undefined) return "you can't use teapilot here.";
-        if (this.ended) return grantsGone;
-        const entry = grants.offered().find(offered => offered.permission === permission);
-        if (!entry) return `${permission} isn't available in this convo.`;
-        if (entry.granted) {
-          grants.revoke(permission, this.onEvent);
-          log(`${key}: ${userId} revoked ${permission}`);
-          return undefined;
-        }
-        const approve: Approve = this.operator(userId) ? async () => true : approval => this.ask(approval, false);
-        const approved = await grants.request([permission], 'asked for from /convo grants.', approve, this.options.request.signal,
-          async (type, fields) => { this.onEvent({ type, ...fields }); }, access?.callerFor(userId)());
-        log(`${key}: ${userId} asked for ${permission}: ${approved ? 'granted' : 'not granted'}`);
-        return approved ? undefined : `${permission} wasn't granted - denied or unavailable.`;
-      },
-    };
+    return grantControls({ grants, access, key, log, onEvent: this.onEvent, ask: approval => this.ask(approval, false),
+      signal: this.options.request.signal, ended: () => this.ended });
   }
 
   /** Paints a plan's messages; its buttons are `actions`, none once it is settled or being worked on. */

@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { AccessStore } from '../src/discord/access-store.js';
 import { Conversation, TurnQueue, type CardButton, type CardControls, type ConversationOptions, type DiscordTransport } from '../src/discord/bridge.js';
-import { SessionGrants } from '../src/execution/grants.js';
+import { SessionGrants, type SavedGrants } from '../src/execution/grants.js';
+import { grantControls } from '../src/discord/grants-panel.js';
 import type { HostResult } from '../src/host.js';
 import { WorkspaceStore } from '../src/workspace/store.js';
 import { fixture } from './helpers.js';
@@ -324,4 +325,31 @@ it('lets anyone allowed revoke from /convo grants, and asks an operator before g
   expect(held()).toEqual(['inference', 'web.search']);
   expect(await panel.press('web.search', 'mallory')).toBe("you can't use teapilot here.");
   expect(held()).toEqual(['inference', 'web.search']);
+});
+
+it('grants from an idle /convo grants only what needs no approval, or on an operator\'s press', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  const grants = await SessionGrants.create(f.cwd, f.config, 'ask');
+  const roles = { ...access, callerFor: (id: string) => () => ({ permissions: id === 'op' ? f.config.policy.permissions : ['inference', 'web.search', 'discord.play'], preapproved: ['discord.play'] }) } as unknown as AccessStore;
+  const panel = grantControls({ grants, access: roles, key: 'dm:bob', log: () => undefined });
+  expect(await panel.press('discord.play', 'bob')).toBeUndefined();
+  expect(await panel.press('web.search', 'bob')).toBe("web.search needs an operator's ok. ask one to press it, or send a message and ask for it there.");
+  expect(await panel.press('web.search', 'op')).toBeUndefined();
+  expect(grants.list()).toEqual(['inference', 'web.search', 'discord.play']);
+});
+
+it('saves session grants as they change, and restores them only within the ceiling and the same root', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  const grants = await SessionGrants.create(f.cwd, f.config, 'ask');
+  const saves: SavedGrants[] = [];
+  grants.persist(saved => saves.push(saved));
+  await grants.request(['repository.read'], 'test', async approval => { expect(approval.details).toContain('Access lasts until revoked. '); return true; });
+  grants.revoke('inference');
+  expect(saves.map(saved => saved.granted)).toEqual([['inference', 'repository.read'], ['repository.read']]);
+  expect((await SessionGrants.create(f.cwd, f.config, 'code', false, saves.at(-1))).list()).toEqual(['repository.read']);
+  const elsewhere = join(f.cwd, 'elsewhere');
+  await mkdir(elsewhere);
+  expect((await SessionGrants.create(f.cwd, f.config, 'ask', false, { root: elsewhere, granted: ['inference', 'repository.read'] })).list()).toEqual(['inference']);
+  f.config.policy.permissions = ['inference'];
+  expect((await SessionGrants.create(f.cwd, f.config, 'ask', false, { root: f.cwd, granted: ['inference', 'web.search'] })).list()).toEqual(['inference']);
 });

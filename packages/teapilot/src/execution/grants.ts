@@ -58,23 +58,35 @@ export interface Caller {
   preapproved?: readonly Permission[];
 }
 
-/** Host-owned, in-memory authority. Never deserialize this object from model/client input. */
+/** What a session held when it was saved, and where; repository access only carries over to the same root. */
+export interface SavedGrants { root: string; granted: Permission[] }
+
+/** Host-owned authority. Never deserialize this object from model/client input; `SavedGrants` come from the host's own state. */
 export class SessionGrants {
   private granted = new Set<Permission>();
   private caller?: () => Caller;
   private withheld = new Set<Permission>();
+  private onChange?: (saved: SavedGrants) => void;
   private constructor(private current: string, private readonly ceiling: readonly Permission[]) {}
   get root(): string { return this.current; }
-  /** Code mode grants write and shell up front only in a single repository; elsewhere they are requested on first need. */
-  static async create(cwd: string, config: Config, mode: Mode, web = false): Promise<SessionGrants> {
+  /**
+   * Code mode grants write and shell up front only in a single repository; elsewhere they are requested on first need.
+   * `saved` replaces those defaults with what an earlier session held, within today's ceiling.
+   */
+  static async create(cwd: string, config: Config, mode: Mode, web = false, saved?: SavedGrants): Promise<SessionGrants> {
     const state = new SessionGrants(await realpath(cwd), [...config.policy.permissions]);
     const repository = mode !== 'code' ? [] : await singleRepository(state.root) ? repositoryPermissions : ['repository.read'];
-    for (const permission of ['inference', ...repository, ...(web ? ['web.search'] : [])] as Permission[]) {
+    const initial = saved ? saved.granted.filter(permission => saved.root === state.root || !repositoryPermissions.includes(permission))
+      : ['inference', ...repository, ...(web ? ['web.search'] : [])] as Permission[];
+    for (const permission of initial) {
       if (state.ceiling.includes(permission)) state.granted.add(permission);
     }
     if (!state.granted.has('repository.read')) for (const permission of repositoryPermissions) state.granted.delete(permission);
     return state;
   }
+  /** Calls `listener` with the new state whenever a permission is granted or revoked, so the session can outlive the process. */
+  persist(listener: (saved: SavedGrants) => void): void { this.onChange = listener; }
+  private changed(): void { this.onChange?.({ root: this.current, granted: permissions.filter(permission => this.granted.has(permission)) }); }
   /** Narrow this session to whoever is speaking. Sessions without a caller are limited only by the policy ceiling. */
   setCaller(caller?: () => Caller): void { this.caller = caller; }
   /**
@@ -108,15 +120,16 @@ export class SessionGrants {
     const preapproved = caller?.preapproved ?? [];
     if (missing.every(permission => preapproved.includes(permission))) {
       for (const permission of missing) this.granted.add(permission);
+      this.changed();
       await emit?.('grant_granted', { permissions: missing, cwd: this.root });
       return true;
     }
     await emit?.('grant_requested', { permissions: missing, cwd: this.root });
     const approved = await approve({ kind: 'capability', permissions: missing, cwd: this.root, duration: 'session',
       summary: `Allow ${missing.join(', ')} for this session?`,
-      details: `Repository: ${this.root}\nReason: ${reason}\nAccess lasts until revoked or this session exits. Existing action approvals still apply.`, signal });
+      details: `Repository: ${this.root}\nReason: ${reason}\nAccess lasts until revoked${this.onChange ? '' : ' or this session exits'}. Existing action approvals still apply.`, signal });
     signal?.throwIfAborted();
-    if (approved) for (const permission of missing) this.granted.add(permission);
+    if (approved) { for (const permission of missing) this.granted.add(permission); this.changed(); }
     await emit?.(approved ? 'grant_granted' : 'grant_denied', { permissions: missing, cwd: this.root });
     return approved;
   }
@@ -132,10 +145,13 @@ export class SessionGrants {
     const revoked = repositoryPermissions.filter(value => !keep.includes(value) && this.granted.delete(value));
     const from = this.current;
     this.current = root;
+    this.changed();
     onEvent?.({ type: 'root_changed', from, cwd: root, revoked, permissions: this.list() });
   }
   revoke(permission: Permission, onEvent?: EventSink): void {
     const removed = (permission === 'repository.read' ? repositoryPermissions : [permission]).filter(value => this.granted.delete(value));
-    if (removed.length) onEvent?.({ type: 'grant_revoked', permissions: removed, cwd: this.root });
+    if (!removed.length) return;
+    this.changed();
+    onEvent?.({ type: 'grant_revoked', permissions: removed, cwd: this.root });
   }
 }

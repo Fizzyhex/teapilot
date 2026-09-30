@@ -60,7 +60,7 @@ All the [session commands](02-commands.md#interactive-use) work, except:
 
 - `/stop` cancels the running turn. Edits already made remain on disk.
 - `/convo clear` clears the conversation. If the workspace has files, a button offers to clear them too. `/new` clears both.
-- `/convo grants` posts the conversation's access as buttons: green is granted, grey is not. Press one to revoke it or ask for it; anyone other than an operator needs an operator's approval.
+- `/convo grants` posts the conversation's access as buttons: green is granted, grey is not. Press one to revoke it or ask for it; anyone other than an operator needs an operator's approval. Access lasts until revoked, restarts included, and can be set before the conversation continues.
 - `/cd` is unavailable. Change the root with `teapilot discord setup`.
 - `/btw` at the start of a message asks a side question. The answer is public in a message, and only visible to you through `/prompt` or `/reply`, with a menu to post it as is, compactly behind a button, or summarised.
 - `/plan` at the start of a message asks for an implementation plan, and `/rfc` for a design proposal. Nothing is changed until you say "go ahead". A plan arrives as an embed with buttons to approve it, assign juniors, or request a change; the embed updates as the plan is refined.

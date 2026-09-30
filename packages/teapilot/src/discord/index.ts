@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { realpath, rm } from 'node:fs/promises';
 import { isAside, proposalRequest } from '../chat.js';
 import { loadConfig, type Config } from '../config.js';
-import { SessionGrants } from '../execution/grants.js';
+import { repositoryOffered, repositoryPermissions, SessionGrants } from '../execution/grants.js';
 import { runHost, type HostRequest } from '../host.js';
 import { headlessTeachat, openHeadlessTeachat } from '../teachat/session.js';
 import type { SetupUI } from '../setup/terminal.js';
@@ -10,6 +10,8 @@ import { route, routeReply } from './access.js';
 import { AccessStore } from './access-store.js';
 import { AsideStore } from './aside-store.js';
 import { HistoryStore } from './history-store.js';
+import { GrantStore } from './grant-store.js';
+import { grantControls, type GrantPanel } from './grants-panel.js';
 import { SeatStore, type Seat } from './seat-store.js';
 import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
 import { pictures } from './files.js';
@@ -79,6 +81,25 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   const queue = new TurnQueue();
   const conversations = new Map<string, Conversation>();
   const histories = HistoryStore.at(stateDir);
+  /**
+   * Each history's access, one object for all its conversations, so one-shots and restarts carry it on and /convo grants
+   * works on it while nothing runs. It is kept on disk until revoked or the history is left for good.
+   */
+  const grantStore = GrantStore.at(stateDir);
+  const sessions = new Map<string, Promise<SessionGrants>>();
+  const grantsFor = (historyKey: string): Promise<SessionGrants> => {
+    let grants = sessions.get(historyKey);
+    if (!grants) {
+      grants = SessionGrants.create(root, config, settings.startMode, false, grantStore.load(historyKey)).then(created => {
+        created.persist(saved => { try { grantStore.save(historyKey, saved); } catch (error) { log(`${historyKey}: grants not saved: ${error instanceof Error ? error.message : String(error)}`); } });
+        return created;
+      });
+      grants.catch(() => sessions.delete(historyKey));
+      sessions.set(historyKey, grants);
+    }
+    return grants;
+  };
+  const forgetGrants = (historyKey: string) => { sessions.delete(historyKey); grantStore.save(historyKey, undefined); };
   /** Side answers posted compactly, which their buttons show for as long as the post stays up. */
   const asides = AsideStore.at(stateDir);
   /**
@@ -141,7 +162,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     if (seat === 'collab' && seats.collaborators(channelId)) return Promise.resolve();
     return enqueue(historyKey, async () => {
       histories.save(historyKey, []); clearScratch(historyKey);
-      seats.remember(historyKey, undefined);
+      seats.remember(historyKey, undefined); forgetGrants(historyKey);
     });
   };
   const switchNote =
@@ -156,7 +177,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   const open = async (key: string, transport: DiscordTransport, { channelId, oneShot = false, timeLimited = false, setup = {}, historyKey = key }: { channelId?: string; oneShot?: boolean; timeLimited?: boolean; setup?: PromptSetup; historyKey?: string } = {}): Promise<Conversation> => {
     const existing = conversations.get(key);
     if (existing?.active) return existing;
-    const authorization = await SessionGrants.create(root, config, settings.startMode);
+    // A side question reads the history's access as it is, and its own requests never outlast it.
+    const authorization = key.startsWith('btw:') ? await SessionGrants.create(root, config, settings.startMode, false, grantStore.load(historyKey)) : await grantsFor(historyKey);
     const conversation = new Conversation({
       key, transport, queue, redact, log, access, files, sandbox,
       once: oneShot,
@@ -290,6 +312,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     seats.sit(channelId, authorId, 'solo');
     const copied = enqueue(collabKey, async () => {
       histories.save(soloKey, histories.load(collabKey));
+      forgetGrants(soloKey); grantStore.save(soloKey, grantStore.load(collabKey));
       await files.copy(collabKey, soloKey);
       seats.remember(soloKey, undefined); seats.remember(soloKey, setup);
       log(`${soloKey}: forked from ${collabKey}`);
@@ -298,9 +321,22 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     void enqueue(soloKey, () => copied.catch(() => undefined));
     void copied.then(() => {
       // Leaving after the copy: if this person was the last one in, the collab is cleared only now.
-      if (!seats.collaborators(channelId)) return enqueue(collabKey, async () => { histories.save(collabKey, []); clearScratch(collabKey); seats.remember(collabKey, undefined); });
+      if (!seats.collaborators(channelId)) return enqueue(collabKey, async () => { histories.save(collabKey, []); clearScratch(collabKey); seats.remember(collabKey, undefined); forgetGrants(collabKey); });
     }).catch(failed('Forking'));
     await command.respond('Forked the collab: you have your own copy of its conversation and workspace, and /prompt and /reply go to it. The collab carries on for everyone else.');
+  };
+
+  /**
+   * /convo grants for a history, whether or not it is running. While a turn runs, presses go through its conversation,
+   * which can post approvals; otherwise only what needs no approval, or an operator's press, is granted.
+   */
+  const grantPanelFor = async (historyKey: string): Promise<GrantPanel> => {
+    const grants = await grantsFor(historyKey);
+    const live = () => [conversations.get(historyKey), runningOneShots.get(historyKey)].find(conversation => conversation?.active)?.grantPanel();
+    // Idle, nothing has narrowed it for a turn, so withhold what the next turn would: a workspace keeps repository access out of all but Code mode.
+    if (!live()) grants.withhold(await repositoryOffered(root, seats.setup(historyKey).mode ?? settings.startMode) ? [] : repositoryPermissions);
+    const idle = grantControls({ grants, access, key: historyKey, log, signal });
+    return { state: () => grants.offered(), press: (permission, userId) => (live() ?? idle).press(permission, userId) };
   };
 
   const handleCommand = async (command: GatewayCommand): Promise<void> => {
@@ -318,14 +354,12 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       if ('note' in view) await command.respond(view.note); else await command.browse(view.text, browser, view.dir);
       return;
     }
-    const conversation = target && conversations.get(target.key);
     if (command.text === '/convo grants') {
-      // Grants belong to a running session; where teapilot answers through the command, each prompt starts afresh.
-      const panel = !seat && conversation?.active ? conversation.grantPanel() : undefined;
-      if (panel) await command.grants(panel);
-      else await command.respond(command.oneShot ? "each /prompt here starts with fresh access, so there's nothing to grant." : 'no active conversation here. send a message to start one.');
+      if (!key) await command.respond(target ? 'no conversation here yet. send a message to start one.' : "you're not in a conversation with teapilot here.");
+      else await command.grants(await grantPanelFor(key));
       return;
     }
+    const conversation = target && conversations.get(target.key);
     if (target && conversation?.active) {
       log(`${target.key}: ${command.text}`);
       // /convo clear is answered privately, with a button to clear the workspace too.

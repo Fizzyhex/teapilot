@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { DiscordTransport } from '../src/discord/bridge.js';
@@ -71,7 +72,7 @@ async function oneShots() {
   /** Messages answered as replies to them. */
   const replies: string[] = [];
   const asides = (count: number) => vi.waitFor(() => expect(sent.filter(text => /-# this is an aside/.test(text))).toHaveLength(count), { timeout: 20_000 });
-  return { typed: () => typed, prompts, tools, sent, replies, reply, message, reactions, results, asides, command, complete, notes, panels, press: (index: number) => { pick = index; } };
+  return { stateDir: join(f.cwd, 'discord'), typed: () => typed, prompts, tools, sent, replies, reply, message, reactions, results, asides, command, complete, notes, panels, press: (index: number) => { pick = index; } };
 }
 
 it('continues one history per person per channel across one-shot replies, and /convo clear ends it', async () => {
@@ -243,20 +244,32 @@ it('answers a /btw message in a DM publicly without adding it to the conversatio
   expect(prompts[2]).not.toContain('what is the secret word');
 }, 60_000);
 
-it('shows the access of a running conversation under /convo grants, and changes it from the buttons', async () => {
-  const { message, results, command, panels } = await oneShots();
-  expect(await command('op', '/convo grants', false, 'dm-op')).toBe('no active conversation here. send a message to start one.');
+it('keeps a conversation\'s access under /convo grants, running or not, and on disk', async () => {
+  const { message, reply, results, command, panels, stateDir } = await oneShots();
+  // Before the first message, access can already be set.
+  expect(await command('op', '/convo grants', false, 'dm-op')).toMatch(/^session access: green is granted/);
+  const idle = panels[0]!;
+  // A conversation with a workspace is offered its repository only in Code mode.
+  expect(idle.state().map(entry => entry.permission)).toEqual(['inference', 'web.search', 'discord.play']);
+  const held = (panel: typeof idle, permission: string) => panel.state().find(entry => entry.permission === permission)!.granted;
+  expect(held(idle, 'web.search')).toBe(false);
+  expect(await idle.press('web.search', 'op')).toBeUndefined();
+  expect(await idle.press('web.search', 'stranger')).toBe("you can't use teapilot here.");
+  expect(await idle.press('discord.play', 'friend')).toBeUndefined();
+  expect(await idle.press('inference', 'friend')).toBeUndefined();
+  expect(await idle.press('inference', 'friend')).toBeUndefined();
+  const saved = () => JSON.parse(readFileSync(join(stateDir, 'discord-grants', 'dm_dm-op.json'), 'utf8')) as { granted: string[] };
+  expect(saved().granted).toEqual(['inference', 'web.search', 'discord.play']);
+  // The conversation starts with what was set, and a panel on it shows the same access.
   message('op', 'hello');
   await results(1);
-  expect(await command('op', '/convo grants', false, 'dm-op')).toMatch(/^session access: green is granted/);
-  const panel = panels[0]!;
-  // A conversation with a workspace is offered its repository only in Code mode.
-  expect(panel.state().map(entry => entry.permission)).toEqual(['inference', 'web.search', 'discord.play']);
-  const held = () => panel.state().find(entry => entry.permission === 'web.search')!.granted;
-  const before = held();
-  expect(await panel.press('web.search', 'op')).toBeUndefined();
-  expect(held()).toBe(!before);
-  expect(await panel.press('web.search', 'stranger')).toBe("you can't use teapilot here.");
-  expect(held()).toBe(!before);
-  expect(await command('op', '/convo grants')).toBe("each /prompt here starts with fresh access, so there's nothing to grant.");
+  expect(await command('op', '/convo grants', false, 'dm-op')).toMatch(/^session access/);
+  expect(await panels[1]!.press('discord.play', 'op')).toBeUndefined();
+  expect(held(idle, 'discord.play')).toBe(false);
+  expect(saved().granted).toEqual(['inference', 'web.search']);
+  // Where teapilot answers through the command, the panel is for the history the person's prompts go to.
+  expect(await command('op', '/convo grants')).toBe("you're not in a conversation with teapilot here.");
+  reply('op', 'hi');
+  await results(2);
+  expect(await command('op', '/convo grants')).toMatch(/^session access/);
 }, 60_000);
