@@ -1,8 +1,31 @@
 # teapilot
 
-hi, teapilot is a small personal agent for coding and questions, for windows or linux.
+![aaa](./media/typing-7-loops.webp)
 
-**capabilities:**
+hi, teapilot is a small (but not) personal agent for coding and questions, for windows or linux.
+
+**weird but practical**
+
+- rather than offer lots of models, teapilot prefers you use the ones it provides, with routing systems that control its personality.
+- `teachat` allows teapilot to be the first agentic ✨ gossiper... when you chat, they gossip there and ask each other questions. keep that in mind :).
+
+**for your friends**
+
+teapilot's discord support is *really good*. it works great with interactions to allow usage in dms, group chats and servers without needing to invite teapilot. `discord.play` enables teapilot to create hot-reloadable games that are playable through embeds. you ca join convos at the same time as your friends, and chat with teapilot at the same time.
+
+**pretty capable**
+
+teapilot is based on [`pi`](https://github.com/earendil-works/pi)'s core, rather than wasting time maintaining a proprietary foundation.
+
+if you want extensibility, use the deeply extendable pi harness. i designed teapilot to be use-case focused to make it easy to spin up anywhere.
+
+**fine-tuned**
+
+- agents always [use bash instead of powershell](https://developer.microsoft.com/blog/the-hidden-variables-in-your-agent-eval/)
+  - big difference in my experience.
+- automatic loops refine teapilot, fix bugs and cut down context bloat, see `./feedback`
+
+**some commands:**
 
 - `ask` for questions and planning
 - `code` to work in a repository
@@ -50,7 +73,7 @@ The setup wizard will walk you through model installation, and if you plan on us
 ```sh
 teapilot ask --web "what are the hardware specs of the steam frame?"
 teapilot code --cwd "path/to/repository" "fix the failing tests"
-teapilot chat "help me think through an idea"
+teapilot chat "is mc dungoens playable on steam frame?"
 # having problems?
 teapilot doctor
 ```
@@ -65,10 +88,8 @@ TeaPilot uses Qwen3.5-9B for cheap standalone work and one persistent Qwen3.8-27
 
 ## Documentation
 
-1. [Setup](docs/01-setup.md) — install, choose a model, check readiness, and enable optional search
-2. [Commands](docs/02-commands.md) — choose a request mode, use interactive features, and interpret results
-3. [Configuration](docs/03-configuration.md) — profiles, local endpoints, providers, models, and policies
-4. [Discord](docs/04-discord.md) — optional: use teapilot from Discord DMs or a channel
-5. [NVIDIA Runtime](docs/05-nvidia-runtime.md) — benches & trade-offs for the `Optimized NVIDIA` runtime
-
-See [project status](https://github.com/fizzyhex/teapilot/blob/main/STATUS.md) for known limits and remaining work.
+1. [Setup](docs/01-setup.md) - install, choose a model, check readiness, and enable optional search
+2. [Commands](docs/02-commands.md) - choose a request mode, use interactive features, and interpret results
+3. [Configuration](docs/03-configuration.md) - profiles, local endpoints, providers, models, and policies
+4. [Discord](docs/04-discord.md) - optional: use teapilot from Discord DMs or a channel
+5. [NVIDIA Runtime](docs/05-nvidia-runtime.md) - benches & trade-offs for the `Optimized NVIDIA` runtime
