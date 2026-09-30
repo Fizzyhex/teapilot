@@ -149,7 +149,7 @@ export class StatusCard {
     const last = this.steps.at(-1);
     const preview = this.phase === 'writing' && this.answer.trim() ? `-# ${escapeMarkdown(tail(this.redact(this.answer), 160))}`
       : this.phase === 'thinking' && last && 'reasoning' in last && last.reasoning.trim() ? `-# 💭 ${escapeMarkdown(tail(last.reasoning, 160))}` : undefined;
-    const tools = this.steps.flatMap(step => 'reasoning' in step ? [] : [line(step)]).map(text => `-# ${escapeMarkdown(text.length > 150 ? `${text.slice(0, 147)}...` : text)}`);
+    const tools = this.steps.flatMap(step => 'reasoning' in step ? [] : [line(step)]).map(step => step.replace(/\s+/g, ' ').trim()).map(text => `-# ${escapeMarkdown(text.length > 150 ? `${text.slice(0, 147)}...` : text)}`);
     let shown = tools.slice(-(this.options.maxSteps ?? 8));
     const compose = () => [header, ...(tools.length > shown.length ? [`-# … ${tools.length - shown.length} earlier`] : []), ...shown, ...(preview ? [preview] : [])].join('\n');
     while (shown.length && compose().length > MESSAGE_LIMIT) shown = shown.slice(1);

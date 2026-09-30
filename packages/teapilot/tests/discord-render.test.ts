@@ -123,6 +123,12 @@ it('notes when the reply chain goes back further than could be fetched', () => {
   expect(quoteMessage({ author: 'bob', text: 'why?' }, { messages: [], truncated: true })).toMatch(/^Reply chain, oldest first:\nNote: .*\n\nMessage from @bob:\nwhy\?$/);
 });
 
+it('keeps a multi-line command on one small-text line', () => {
+  const card = new StatusCard(text => text);
+  card.push({ type: 'tool_execution_end', tool: 'bash', command: 'python -c "\nimport sys\nprint(1)\n"' });
+  expect(card.render()).toBe('🫖 thinking. · 0s\n-# shell: python -c " import sys print(1) "');
+});
+
 it('lists a tip among the steps as a light bulb and its name', () => {
   const card = new StatusCard(text => text);
   card.push({ type: 'tool_execution_end', tool: 'write', path: 'bot.py' });
