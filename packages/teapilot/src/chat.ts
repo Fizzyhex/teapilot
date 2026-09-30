@@ -6,10 +6,11 @@ import type { ChatPromptState } from './composer.js';
 import { isMode, modes, permissions, repositoryPermissions, workloadFor, type Mode } from './execution/grants.js';
 import type { Approve } from './execution/policy.js';
 import type { EventSink } from './integration/events.js';
+import { keptNote, workspaceCommand, workspaceHelp, type WorkspaceControls } from './workspace/commands.js';
 import type { SessionWorkspace } from './workspace/terminal.js';
 import { isTierPreference, tierPreferences, type Tier, type TierPreference } from './config.js';
 
-const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /btw <question>, /plan <idea>, /rfc <idea>, /exit, /quit`;
+const sessionHelp = `Commands: /mode ${modes.join('|')}, /tier ${tierPreferences.join('|')}, /convo clear, ${workspaceHelp}, /new, /cd <path>, /permissions, /grant <permission>, /revoke <permission>, /btw <question>, /plan <idea>, /rfc <idea>, /exit, /quit`;
 
 const keptSteps = 6;
 
@@ -141,6 +142,8 @@ export async function runSession(options: {
   onHistory?: (history: ConversationTurn[]) => void;
   /** Files the session works on outside Code mode: @mentioned files come in, and files sent back land beside the user. */
   workspace?: SessionWorkspace;
+  /** /workspace, /convo clear and /new for a session whose files are kept by its surface rather than `workspace`. */
+  files?: WorkspaceControls;
 }): Promise<number> {
   const extension = options.extension;
   const help = sessionHelp + (extension?.help ? `, ${extension.help}` : '');
@@ -155,6 +158,12 @@ export async function runSession(options: {
   let exitCode = 0;
   let spentUsd = 0;
   let lastModel: string | undefined;
+  const files = options.workspace ?? options.files;
+  /** /convo clear: the conversation starts over; access, spending and the workspace's files stay. */
+  const clearConvo = async () => {
+    history = []; options.onHistory?.(history); correction = undefined; relatedTier = undefined; tier = 'auto';
+    await extension?.reset?.(); await files?.clearScratch();
+  };
   while (!options.request.signal?.aborted) {
     if (!prompt.trim()) {
       try { prompt = await options.input({ spentUsd, lastModel, tier, ...(grants ? { mode, grants: grants.list(), cwd: grants.root } : {}) }); }
@@ -223,8 +232,17 @@ export async function runSession(options: {
         options.log?.(`Session access: ${grants?.list().join(', ') || 'none'}`);
       } else if (command === '/tier' && !extra && isTierPreference(value)) {
         tier = value; options.log?.(`Tier preference: ${tier}`);
-      } else if (command === '/new' && !value) {
-        history = []; options.onHistory?.(history); correction = undefined; relatedTier = undefined; tier = 'auto'; await extension?.reset?.(); await options.workspace?.reset(); options.log?.('Started a new task. Session access and spending remain available.');
+      } else if (command === '/convo') {
+        if (value === 'clear' && !extra) {
+          await clearConvo();
+          options.log?.(['Cleared the conversation.', keptNote(files?.count() ?? 0)].filter(Boolean).join(' '));
+        } else options.log?.('Conversation commands: /convo clear');
+      } else if (command === '/workspace') options.log?.((await workspaceCommand(files, prompt))!);
+      else if (command === '/new' && !value) {
+        await clearConvo();
+        if (options.workspace) await options.workspace.reset();
+        else if (files) { await files.clearFiles(); files.name(''); }
+        options.log?.('Started a new task with an empty workspace. Session access and spending remain available.');
       } else if (command === '/mode' && !extra && isMode(value)) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,

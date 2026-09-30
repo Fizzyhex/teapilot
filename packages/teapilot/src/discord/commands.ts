@@ -4,7 +4,7 @@ import { reasoningTier } from '../routing/execution.js';
 
 type Choice = { name: string; value: string };
 /** 3 = string, 5 = boolean, 11 = attachment. */
-type Option = { type: 3; name: string; description: string; required: boolean; choices?: Choice[] }
+type Option = { type: 3; name: string; description: string; required: boolean; choices?: Choice[]; autocomplete?: boolean }
   | { type: 5 | 11; name: string; description: string; required: boolean };
 /** Discord application-command JSON; kept free of discord.js so it can be tested and registered from anywhere. */
 export type CommandDefinition = Placement & (
@@ -21,10 +21,10 @@ export const interactionLifetimeMs = 14 * 60_000;
 /** Commands that start or continue a conversation instead of controlling one; the gateway handles them itself. */
 export const replyCommand = 'reply';
 export const promptCommand = 'prompt';
-/** Like /prompt, but where teapilot answers through the interaction, everyone in the channel shares one history. */
+/** Joins, leaves or forks the conversation everyone in a channel shares, where teapilot answers through the interaction. */
 export const collabCommand = 'collab';
-/** Ends the conversation and its history: the session's /exit, or leaving a collab. */
-export const clearCommand = 'clear';
+/** /workspace tree's folder, which Discord completes as it is typed. */
+export const treeOption = 'dir';
 export const replyMenu = 'Reply';
 
 const value = (description: string, values: readonly string[]): Option =>
@@ -33,12 +33,11 @@ const optional = (name: string, description: string, values: readonly string[]):
   ({ type: 3, name, description, required: false, choices: values.map(item => ({ name: item, value: item })) });
 const choice = (name: string, description: string, values: readonly string[]): CommandDefinition =>
   ({ name, description, options: [value(description, values)] });
-/** How many files /prompt and /collab take: `attachment1` to `attachment4`. */
+/** How many files /prompt takes: `attachment1` to `attachment4`. */
 export const promptAttachments = 4;
 export const attachmentOption = (index: number) => `attachment${index + 1}`;
 // Each runs its own tier; medium picks deep, which runs xhigh only when the policy opts in.
 const promptEfforts: readonly ReasoningLevel[] = reasoningLevels.filter(level => level !== 'xhigh');
-/** /prompt and /collab take the same options. */
 const promptOptions: Option[] = [
   { type: 3, name: 'prompt', description: 'What to ask teapilot', required: true },
   optional('mode', 'Session mode for this and later turns', modes),
@@ -66,10 +65,28 @@ export const commandDefinitions: CommandDefinition[] = [
     ...everywhere,
   },
   { name: promptCommand, description: 'Talk to teapilot with a chosen mode and reasoning', options: promptOptions, ...everywhere },
-  { name: collabCommand, description: 'Talk to teapilot in a conversation everyone here shares', options: promptOptions, ...everywhere },
+  {
+    name: collabCommand, description: 'The conversation everyone in this channel shares',
+    options: [
+      subcommand('join', 'Join it: /prompt and /reply go there until you leave'),
+      subcommand('leave', 'Leave it and go back to your own conversation'),
+      subcommand('fork', 'Leave it, taking a copy of its conversation and workspace as your own'),
+    ],
+    ...everywhere,
+  },
   { type: 3, name: replyMenu, ...everywhere },
-  // Also where teapilot is not invited, where they act on the conversation /reply, /prompt or /collab keeps there.
-  { name: clearCommand, description: 'End your conversation here and clear its history', ...everywhere },
+  // Also where teapilot is not invited, where they act on the conversation /reply or /prompt keeps there.
+  { name: 'convo', description: 'Your conversation with teapilot here', options: [subcommand('clear', 'Clear its context; the workspace keeps its files')], ...everywhere },
+  {
+    name: 'workspace', description: 'The files this conversation works on',
+    options: [
+      subcommand('clear', 'Delete every file in the workspace'),
+      subcommand('name', 'Give the workspace a name', [{ type: 3, name: 'name', description: 'The name', required: true }]),
+      subcommand('tree', 'List the files in the workspace', [{ type: 3, name: treeOption, description: 'Only this folder', required: false, autocomplete: true }]),
+    ],
+    ...everywhere,
+  },
+  { name: 'new', description: 'Clear the conversation and the workspace', ...everywhere },
   { name: 'stop', description: 'Cancel the running turn', ...everywhere },
   { name: 'help', description: 'Show teapilot commands' },
 ];
@@ -81,16 +98,21 @@ export const withoutUserInstall = (definitions: CommandDefinition[]): CommandDef
 /** The session text equivalent to an invocation, or undefined for anything teapilot does not define. */
 export function commandText(name: string, subcommandName?: string | null, argument?: string | null): string | undefined {
   const definition = commandDefinitions.find(candidate => candidate.name === name);
-  if (!definition || !('description' in definition) || [replyCommand, promptCommand, collabCommand].includes(name)) return undefined;
+  if (!definition || !('description' in definition) || [replyCommand, promptCommand].includes(name)) return undefined;
   if (name === 'permissions') {
     if (subcommandName === 'list') return '/permissions';
     return (subcommandName === 'grant' || subcommandName === 'revoke') && argument ? `/${subcommandName} ${argument}` : undefined;
   }
-  if (name === clearCommand) return '/exit';
+  const subcommands = definition.options?.filter(option => option.type === 1) ?? [];
+  if (subcommands.length) {
+    const chosen = subcommands.find(option => option.name === subcommandName);
+    if (!chosen) return undefined;
+    return [`/${name}`, chosen.name, ...(argument ? [argument] : [])].join(' ');
+  }
   return definition.options ? (argument ? `/${name} ${argument}` : undefined) : `/${name}`;
 }
 
-/** The mode and tier /prompt or /collab asks for; either is left out when not chosen or not recognised. */
+/** The mode and tier /prompt asks for; either is left out when not chosen or not recognised. */
 export interface PromptSetup { mode?: Mode; tier?: TierPreference }
 
 export function promptSetup(mode?: string | null, reasoning?: string | null): PromptSetup {

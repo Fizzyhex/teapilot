@@ -4,17 +4,18 @@ import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'nod
 import type { ConversationWorkspace } from '../agents/workspace.js';
 import type { Approve } from '../execution/policy.js';
 import { receiveFiles, type Incoming } from './attach.js';
+import { storeControls, type WorkspaceControls } from './commands.js';
 import type { WorkspaceSandbox } from './sandbox.js';
 import { fileName, type WorkspaceStore } from './store.js';
 
 /** The files an ask or chat session works on; the session loop hands it each turn outside Code mode. */
-export interface SessionWorkspace {
+export interface SessionWorkspace extends WorkspaceControls {
   context(cwd: string): ConversationWorkspace;
   /** Copies the files a prompt @mentions into the workspace and returns the prompt with notes on what arrived. */
   attach(prompt: string, cwd: string, room: number): Promise<string>;
   /** The session's scratchpad, in every mode: Code mode keeps its working files here rather than in the repository. */
   scratch(): string;
-  /** /new starts a new task with an empty workspace. */
+  /** /new starts a new task with an empty workspace, and without its name. */
   reset(): Promise<void>;
   /** The session ended: its workspace goes too, since files sent back are already beside the user. */
   close(): Promise<void>;
@@ -26,7 +27,16 @@ const mentions = /(?:^|\s)@(?:"([^"\n]+)"|([^\s"@]+))/g;
 /** A terminal session's workspace: @mentioned files come in, and files the agent sends are saved into the current folder. */
 export class TerminalWorkspace implements SessionWorkspace {
   private conversation = `terminal:${randomUUID()}`;
-  constructor(private readonly store: WorkspaceStore, private readonly sandbox: WorkspaceSandbox | undefined, private readonly approve: Approve, private readonly user = 'user') {}
+  private readonly controls: WorkspaceControls;
+  constructor(private readonly store: WorkspaceStore, private readonly sandbox: WorkspaceSandbox | undefined, private readonly approve: Approve, private readonly user = 'user') {
+    this.controls = storeControls(store, () => this.conversation);
+  }
+
+  count(): number { return this.controls.count(); }
+  clearFiles(): Promise<number> { return this.controls.clearFiles(); }
+  clearScratch(): Promise<void> { return this.controls.clearScratch(); }
+  name(label?: string): string | undefined { return this.controls.name(label); }
+  tree(dir?: string): string | undefined { return this.controls.tree(dir); }
 
   context(cwd: string): ConversationWorkspace {
     return { store: this.store, conversation: this.conversation, sandbox: this.sandbox, delivery: 'save', send: (_text, files) => this.save(cwd, files) };

@@ -59,7 +59,7 @@ Settings are stored as `DISCORD_*` values in the profile's private `.env`. The t
 All the [session commands](02-commands.md#interactive-use) work, except:
 
 - `/stop` cancels the running turn. Edits already made remain on disk.
-- `/clear` ends the conversation and its history. Your next message starts a new session.
+- `/convo clear` clears the conversation. If the workspace has files, a button offers to clear them too. `/new` clears both.
 - `/cd` is unavailable. Change the root with `teapilot discord setup`.
 - `/btw` at the start of a message asks a side question. The answer is public in a message, and only visible to you through `/prompt` or `/reply`, with a menu to post it as is, compactly behind a button, or summarised.
 - `/plan` at the start of a message asks for an implementation plan, and `/rfc` for a design proposal. Nothing is changed until you say "go ahead". A plan arrives as an embed with buttons to approve it, assign juniors, or request a change; the embed updates as the plan is refined.
@@ -80,14 +80,14 @@ Operators and users can reach teapilot from any channel:
 | --- | --- |
 | `/prompt` | Ask something, optionally choosing the `mode` and `reasoning`, attaching up to four files, or setting `yolo` to approve every action it asks for (operators only) |
 | `/reply` | Ask something |
-| `/collab` | A conversation everyone in the channel shares |
+| `/collab join` | Send your `/prompt` and `/reply` to a conversation everyone in the channel shares. `/collab leave` goes back to your own, and `/collab fork` leaves with a copy of it |
 | Right-click a message → **Apps → Reply** | Have teapilot respond to that message |
 
 With the Reply menu, only the answer and approvals are posted; progress and results go to the terminal.
 
 Where the bot can post, it starts a thread, and that thread is one session. Otherwise it answers through the interaction, which has limits:
 
-- There are no threads. Run the command again to continue; teapilot remembers your conversation in that channel until you `/clear` it.
+- There are no threads. Run the command again to continue; teapilot remembers your conversation in that channel until you `/convo clear` it.
 - It stops after 15 minutes, when Discord expires the interaction. Pending approvals are denied.
 - There is no typing indicator.
 

@@ -202,7 +202,7 @@ Expected: one diagnostic invocation, bounded tool preview, complete retained out
 
 For the primary condition, force the actual compaction mechanism at a safe boundary after capture and stage-1 completion. Record the trigger and resulting context. Apply the validity gates above.
 
-For the restart variant, use the driver's `restart` operation and verify restored identity/history directly; help text may lag implementation. Never use `/new` or `/clear` as a substitute: those intentionally discard task/conversation state.
+For the restart variant, use the driver's `restart` operation and verify restored identity/history directly; help text may lag implementation. Never use `/new` or `/convo clear` as a substitute: those intentionally discard task/conversation state.
 
 ### 3. Targeted investigation
 

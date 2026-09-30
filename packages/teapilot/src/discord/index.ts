@@ -16,11 +16,12 @@ import { pictures } from './files.js';
 import { receiveFiles } from '../workspace/attach.js';
 import { SrtSandbox } from '../workspace/sandbox.js';
 import { WorkspaceStore } from '../workspace/store.js';
+import { keptNote, storeControls, workspaceCommand } from '../workspace/commands.js';
 import { consultant } from './play/consult.js';
 import { summariser } from './summarise.js';
 import { PlayRuntime, type Clock, type PlaySurface } from './play/runtime.js';
 import { PlayStore } from './play/store.js';
-import type { connect, Gateway, GatewayCommand, GatewayMessage, GatewayReply } from './gateway.js';
+import type { connect, Gateway, GatewayCommand, GatewayCompletion, GatewayMessage, GatewayReply } from './gateway.js';
 import { interactionLifetimeMs, setupCommands, type PromptSetup } from './commands.js';
 import { quoteMessage } from './render.js';
 import { StatusPresence } from './presence.js';
@@ -142,10 +143,8 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       seats.remember(historyKey, undefined);
     });
   };
-  const seatName = (seat: Seat) => seat === 'solo' ? 'your own conversation' : 'the collab';
-  const switchNote = (from: Seat) => from === 'solo'
-    ? 'You already have your own conversation with teapilot in this channel. Run /clear to end it before joining the collab, or switch here: your conversation and its history are cleared.'
-    : 'You are in this channel\'s collab. Run /clear to leave it before starting your own conversation, or switch here: the collab carries on for everyone else.';
+  const switchNote =
+    'You already have your own conversation with teapilot in this channel. Joining the collab clears it; /collab fork later takes a copy of the collab as your own.';
 
   /**
    * `channelId` is where discord.play apps run; a one-shot posts them through its interaction. `setup` only shapes a new
@@ -228,39 +227,147 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     log(`${key} @${message.authorName}: ${message.content.split('\n')[0]!.slice(0, 80)}`);
     (await open(key, transport, { channelId })).push(prompt, { sender: message.authorId, senderName: message.authorName });
   };
+  /** Offers to clear a workspace the conversation kept, after /convo clear. */
+  const offerClearFiles = async (command: GatewayCommand, workspace: string, done: string) => {
+    const note = keptNote(files.list(workspace).length);
+    if (!note) { await command.respond(done); return; }
+    const click = await command.choose(`${done} ${note}`, ['clear workspace too!', 'keep it']);
+    if (!click) return;
+    if (click.choice !== 0) { await click.settle(`${done} The workspace kept its files.`); return; }
+    const count = await files.clearFiles(workspace);
+    log(`${workspace}: ${command.authorId} cleared the workspace (${count} files)`);
+    await click.settle(`${done} Cleared the workspace too.`);
+  };
+  /** Asks before clearing something everyone in a collab shares; true once confirmed. */
+  const confirmShared = async (command: GatewayCommand, what: string): Promise<{ settle(note: string): Promise<void> } | undefined> => {
+    const click = await command.choose(`this clears ${what} for everyone in this channel's collab.`, ['clear it', 'cancel']);
+    if (!click) return undefined;
+    if (click.choice !== 0) { await click.settle('Nothing was cleared.'); return undefined; }
+    return click;
+  };
+
+  const handleCollab = async (command: GatewayCommand, seat: Seat | undefined): Promise<void> => {
+    const [, action] = command.text.split(/\s+/);
+    if (!command.oneShot) {
+      await command.respond(!command.guildId ? '/collab is for server channels! a DM is between you and teapilot.'
+        : !command.parentId ? 'teapilot can post here, so /prompt starts a thread everyone can follow. /collab is for channels where it answers through the command.'
+          : 'Everyone in this thread already shares its conversation.');
+      return;
+    }
+    const { channelId, authorId } = command;
+    if (action === 'join') {
+      if (seat === 'collab') {
+        const click = await command.choose('You are in this channel\'s collab. /prompt and /reply go to it.', ['Leave the collab', 'Stay']);
+        if (!click || click.choice !== 0) { await click?.settle('You stayed in the collab.'); return; }
+        void leave(channelId, authorId, 'collab').catch(failed('Leaving'));
+        await click.settle('You left the collab. /prompt and /reply go to your own conversation again.');
+        return;
+      }
+      if (seat === 'solo') {
+        const click = await command.choose(switchNote, ['Clear it and join the collab', 'Stay']);
+        if (!click || click.choice !== 0) { await click?.settle('You stayed in your own conversation.'); return; }
+        void leave(channelId, authorId, 'solo').catch(failed('Switching'));
+        seats.sit(channelId, authorId, 'collab');
+        await click.settle('You joined this channel\'s collab. /prompt and /reply go to it until you /collab leave.');
+        return;
+      }
+      seats.sit(channelId, authorId, 'collab');
+      log(`${historyKeyOf(channelId, authorId, 'collab')}: ${authorId} joined`);
+      await command.respond('You joined this channel\'s collab. /prompt and /reply go to it until you /collab leave.');
+      return;
+    }
+    if (seat !== 'collab') { await command.respond('You are not in this channel\'s collab. /collab join joins it.'); return; }
+    if (action === 'leave') {
+      void leave(channelId, authorId, 'collab').catch(failed('Leaving'));
+      await command.respond(seats.collaborators(channelId) ? 'Left the collab. Its history stays for everyone still in it.' : 'Left the collab. You were the last one in it, so its history was cleared.');
+      return;
+    }
+    // Fork: a copy of the collab, taken once its running turn ends, becomes this person's own conversation.
+    const collabKey = historyKeyOf(channelId, authorId, 'collab');
+    const soloKey = historyKeyOf(channelId, authorId, 'solo');
+    const setup = seats.setup(collabKey);
+    seats.sit(channelId, authorId, 'solo');
+    const copied = enqueue(collabKey, async () => {
+      histories.save(soloKey, histories.load(collabKey));
+      await files.copy(collabKey, soloKey);
+      seats.remember(soloKey, undefined); seats.remember(soloKey, setup);
+      log(`${soloKey}: forked from ${collabKey}`);
+    });
+    // Their next prompt waits for the copy.
+    void enqueue(soloKey, () => copied.catch(() => undefined));
+    void copied.then(() => {
+      // Leaving after the copy: if this person was the last one in, the collab is cleared only now.
+      if (!seats.collaborators(channelId)) return enqueue(collabKey, async () => { histories.save(collabKey, []); clearScratch(collabKey); seats.remember(collabKey, undefined); });
+    }).catch(failed('Forking'));
+    await command.respond('Forked the collab: you have your own copy of its conversation and workspace, and /prompt and /reply go to it. The collab carries on for everyone else.');
+  };
+
   const handleCommand = async (command: GatewayCommand): Promise<void> => {
+    if (command.authorIsBot || !allowed(command.authorId)) { await command.respond('You are not allowed to use teapilot here.'); return; }
     const target = route(command, settings, allowed);
+    // Seats hold where teapilot answers through the interaction, and /reply, /prompt keep a conversation per seat there.
+    const seat = seats.seat(command.channelId, command.authorId);
+    if (command.text.startsWith('/collab')) { await handleCollab(command, seat); return; }
     const conversation = target && conversations.get(target.key);
     if (target && conversation?.active) {
       log(`${target.key}: ${command.text}`);
-      conversation.push(command.text, { sender: command.authorId });
-      await command.respond();
+      // /convo clear is answered privately, with a button to clear the workspace too.
+      const clearing = command.text === '/convo clear';
+      conversation.push(command.text, { sender: command.authorId, quiet: clearing });
+      if (clearing) await offerClearFiles(command, target.key, 'Cleared the conversation.');
+      else await command.respond();
       return;
     }
-    if (command.authorIsBot || !allowed(command.authorId)) { await command.respond('You are not allowed to use teapilot here.'); return; }
-    // Nothing runs here, so /clear and /stop act on the conversation /reply, /prompt or /collab keeps for this person.
-    const seat = seats.seat(command.channelId, command.authorId);
-    if (command.text === '/exit' && seat) {
-      void leave(command.channelId, command.authorId, seat).catch(failed('Clearing'));
-      log(`${historyKeyOf(command.channelId, command.authorId, seat)}: ${command.authorId} cleared ${seat}`);
-      await command.respond(seat === 'solo' ? 'Ended your conversation here and cleared its history.'
-        : seats.collaborators(command.channelId) ? 'Left the collab. Its history stays for everyone still in it.' : 'Left the collab. You were the last one in it, so its history was cleared.');
-      return;
-    }
-    if (command.text === '/exit' && target?.key) {
-      // A conversation that is not running, such as one from before a restart, still has saved history to clear.
-      histories.save(target.key, []); clearScratch(target.key);
-      await command.respond('Cleared this conversation\'s history.');
-      return;
-    }
-    if (command.text === '/stop' && seat) {
-      const turn = runningOneShots.get(historyKeyOf(command.channelId, command.authorId, seat));
+    const key = seat ? historyKeyOf(command.channelId, command.authorId, seat) : target?.key || undefined;
+    if (!key) { await command.respond(target ? 'No active conversation here. Send a message to start one.' : 'You are not in a conversation with teapilot here.'); return; }
+    if (command.text === '/stop') {
+      const turn = runningOneShots.get(key);
       if (!turn?.active) { await command.respond('Nothing is running.'); return; }
       turn.push('/stop', { sender: command.authorId });
       await command.respond();
       return;
     }
-    await command.respond(target ? 'No active conversation here. Send a message to start one.' : 'You are not in a conversation with teapilot here.');
+    if (runningOneShots.get(key)?.active) { await command.respond('teapilot is answering here right now. Wait for it, or /stop it first.'); return; }
+    /** Clears a conversation that is not running: its history and scratchpad, and with `withFiles` its workspace. */
+    const clear = async (withFiles: boolean) => {
+      histories.save(key, []); clearScratch(key); seats.remember(key, undefined);
+      if (withFiles) { await files.clearFiles(key); files.rename(key, ''); }
+      log(`${key}: ${command.authorId} ran ${command.text}`);
+    };
+    if (command.text === '/convo clear' || command.text === '/new') {
+      const withFiles = command.text === '/new';
+      if (seat === 'collab') {
+        const click = await confirmShared(command, withFiles ? 'the conversation and its workspace' : 'the conversation');
+        if (!click) return;
+        await clear(withFiles);
+        await click.settle(withFiles ? 'Cleared the collab\'s conversation and workspace.' : 'Cleared the collab\'s conversation. Its workspace kept its files.');
+        return;
+      }
+      await clear(withFiles);
+      if (withFiles) await command.respond('Started over with an empty workspace.');
+      else await offerClearFiles(command, key, 'Cleared the conversation.');
+      return;
+    }
+    if (command.text.startsWith('/workspace')) {
+      if (command.text === '/workspace clear' && seat === 'collab') {
+        const click = await confirmShared(command, 'the workspace');
+        if (!click) return;
+        await click.settle((await workspaceCommand(storeControls(files, () => key), command.text))!);
+        return;
+      }
+      await command.respond(await workspaceCommand(storeControls(files, () => key), command.text) ?? 'Unknown teapilot command.');
+      return;
+    }
+    await command.respond('No active conversation here. Send a message to start one.');
+  };
+  /** Folders of the workspace /workspace tree is about to show, for Discord to offer as they are typed. */
+  const handleComplete = async (completion: GatewayCompletion): Promise<void> => {
+    if (completion.text !== '/workspace tree' || completion.authorIsBot || !allowed(completion.authorId)) { await completion.respond([]); return; }
+    const target = route(completion, settings, allowed);
+    const seat = seats.seat(completion.channelId, completion.authorId);
+    const key = seat ? historyKeyOf(completion.channelId, completion.authorId, seat) : target?.key || undefined;
+    const typed = completion.typed.replace(/\\/g, '/').toLowerCase();
+    await completion.respond(key ? files.folders(key).filter(folder => folder.toLowerCase().includes(typed)) : []);
   };
   const handleReply = async (reply: GatewayReply): Promise<void> => {
     const target = routeReply(reply, settings, allowed);
@@ -280,21 +387,10 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       return;
     }
     if (reply.oneShot) {
-      const seat: Seat = reply.collab ? 'collab' : 'solo';
-      const current = seats.seat(reply.channelId, reply.authorId);
-      let transport: DiscordTransport;
-      if (current && current !== seat) {
-        // Nobody is in both: offer to leave the current conversation, then send the prompt where it was meant to go.
-        const click = await reply.choose(switchNote(current), [current === 'solo' ? 'Clear it and join the collab' : 'Leave the collab', 'Stay']);
-        if (!click) return;
-        if (click.choice !== 0) { await click.settle(`You stayed in ${seatName(current)}. Your prompt was not sent.`); return; }
-        void leave(reply.channelId, reply.authorId, current).catch(failed('Switching'));
-        await click.settle(`You left ${seatName(current)}. Your prompt goes to ${seatName(seat)}.`).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
-        transport = click.transport();
-      } else {
-        await reply.respond();
-        transport = reply.transport();
-      }
+      // /collab join and leave choose where prompts go; without a seat, it is this person's own conversation.
+      const seat: Seat = seats.seat(reply.channelId, reply.authorId) ?? 'solo';
+      await reply.respond();
+      const transport = reply.transport();
       seats.sit(reply.channelId, reply.authorId, seat);
       const historyKey = historyKeyOf(reply.channelId, reply.authorId, seat);
       const setup = seats.remember(historyKey, reply.setup);
@@ -338,6 +434,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   const gateway = await connect(settings, {
     message: message => void handle(message).catch(failed('Message handling')),
     command: command => void handleCommand(command).catch(failed('Command handling')),
+    complete: completion => void handleComplete(completion).catch(failed('Completion')),
     reply: reply => void handleReply(reply).catch(failed('Reply handling')),
     component: interaction => void (surface ? play.interact(interaction) : interaction.reply('teapilot is still starting; try again in a moment.')).catch(failed('App interaction')),
     asides: { keep: answer => asides.keep(answer), find: id => asides.find(id), summarise: summariser({ config, root, access, queue, run, signal }) },

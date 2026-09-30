@@ -8,6 +8,7 @@ import type { AccessStore } from './access-store.js';
 import type { ConversationWorkspace } from '../agents/workspace.js';
 import type { WorkspaceSandbox } from '../workspace/sandbox.js';
 import type { WorkspaceStore } from '../workspace/store.js';
+import { storeControls } from '../workspace/commands.js';
 import type { MessagePayload } from './play/render.js';
 import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
 import { approvePrompt, changePrompt, extractPlan, juniorsPrompt, planMessages, type PlanAction, type PlanControls, type PlanEmbed } from './plan.js';
@@ -91,16 +92,18 @@ export interface ConversationOptions {
   lineDelayMs?: () => number;
 }
 
-const discordHelp = '`/stop` - cancel the running turn\n`/clear` - end the conversation and clear the context window\n`/btw` - ask a question without polluting the context window.\n`/plan` - get an implementation plan to discuss before anything is changed.\n`/rfc` - get a design proposal to discuss before anything is changed.';
+const discordHelp = '`/stop` - cancel the running turn\n`/convo clear` - clear the context window; the workspace keeps its files\n`/workspace clear|name|tree` - delete, name or list the workspace\'s files\n`/new` - clear both\n`/btw` - ask a question without polluting the context window.\n`/plan` - get an implementation plan to discuss before anything is changed.\n`/rfc` - get a design proposal to discuss before anything is changed.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
-  private readonly inbox: Array<{ text: string; sender?: string; senderName?: string; yolo?: boolean }> = [];
+  private readonly inbox: Array<{ text: string; sender?: string; senderName?: string; yolo?: boolean; quiet?: boolean }> = [];
   /** Who sent the message the current turn is answering; a thread can have several people. */
   private speaker?: string;
   private speakerName?: string;
   /** The message being answered asked for every approval to pass without asking; honoured for operators only. */
   private yolo = false;
+  /** The message being handled was answered privately already, so what the session says about it only goes to the log. */
+  private quiet = false;
   private waiting?: { resolve(text: string): void; reject(error: Error): void };
   private turn?: AbortController;
   private sink?: EventSink;
@@ -120,13 +123,12 @@ export class Conversation {
   }
 
   /** Deliver a message from an allowed person. Local commands take effect immediately. */
-  push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string; yolo?: boolean } = {}): void {
+  push(text: string, options: { answerOnly?: boolean; sender?: string; senderName?: string; yolo?: boolean; quiet?: boolean } = {}): void {
     // Only the next turn is answer-only, and only if nothing is running to change mid-turn.
     if (options.answerOnly && !this.turn) this.answerOnly = true;
-    // Discord's /clear is the session's /exit: the conversation ends and its history goes with it.
-    if (text.trim() === '/clear') text = '/exit';
     const trimmed = text.trim();
     const [command] = trimmed.split(/\s+/);
+    if (trimmed === '/clear') { void this.say('Use /convo clear to clear the conversation, or /new to clear the workspace as well.', true); return; }
     if (command === '/stop') {
       if (this.turn && !this.turn.signal.aborted) { this.stop(); void this.say('Stopping the current turn. Edits already made remain on disk.', true); }
       else void this.say('Nothing is running.', true);
@@ -135,21 +137,21 @@ export class Conversation {
     if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.', true); return; }
     if (command === '/help') void this.say(discordHelp, true);
     if (this.turn && !['/exit', '/quit'].includes(command ?? '')) void this.say('Queued as your next message.', true);
-    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; this.speakerName = options.senderName; this.yolo = options.yolo === true; waiting.resolve(text); }
-    else this.inbox.push({ text, sender: options.sender, senderName: options.senderName, yolo: options.yolo });
+    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; this.speaker = options.sender; this.speakerName = options.senderName; this.yolo = options.yolo === true; this.quiet = options.quiet === true; waiting.resolve(text); }
+    else this.inbox.push({ text, sender: options.sender, senderName: options.senderName, yolo: options.yolo, quiet: options.quiet });
   }
 
   get active(): boolean { return !this.ended; }
 
   /** `direct` text always goes to Discord; anything else stays in the terminal during an answer-only turn. */
   private async say(text: string, direct = false): Promise<void> {
-    if (this.answerOnly && !direct) { this.options.log(`${this.options.key}: ${this.options.redact(text)}`); return; }
+    if ((this.answerOnly || this.quiet) && !direct) { this.options.log(`${this.options.key}: ${this.options.redact(text)}`); return; }
     for (const part of chunk(this.options.redact(text))) await this.options.transport.send(part).catch(error => this.options.log(`${this.options.key}: send failed: ${error instanceof Error ? error.message : error}`));
   }
 
   private input = (): Promise<string> => {
     const next = this.inbox.shift();
-    if (next) { this.speaker = next.sender; this.speakerName = next.senderName; this.yolo = next.yolo === true; return Promise.resolve(next.text); }
+    if (next) { this.speaker = next.sender; this.speakerName = next.senderName; this.yolo = next.yolo === true; this.quiet = next.quiet === true; return Promise.resolve(next.text); }
     const signal = this.options.request.signal;
     return new Promise((resolve, reject) => {
       const closed = () => reject(Object.assign(new Error('closed'), { name: 'TerminalClosedError' }));
@@ -367,7 +369,8 @@ export class Conversation {
   private async start(): Promise<void> {
     try {
       await runSession({ request: this.options.request, once: this.options.once, maxPromptChars: this.options.maxPromptChars, input: this.input, run: this.run,
-        approve: this.approve, log: text => void this.say(text), onEvent: this.onEvent, extension: this.options.extension, onHistory: this.options.onHistory });
+        approve: this.approve, log: text => void this.say(text), onEvent: this.onEvent, extension: this.options.extension, onHistory: this.options.onHistory,
+        ...(this.options.files ? { files: storeControls(this.options.files, () => this.options.play?.conversation ?? this.options.key) } : {}) });
       if (!this.options.request.signal?.aborted && !this.options.once) await this.say('Session ended. Send a message to start a new one.');
     } catch (error) {
       if (!this.options.request.signal?.aborted) {

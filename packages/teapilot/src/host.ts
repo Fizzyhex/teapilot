@@ -154,7 +154,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
       provider_error: 'Run teapilot doctor --live with this configuration to check the models. A very large single reply can also hit the output token cap and be rejected by the server; ask for large files in smaller pieces, or raise maxOutputTokens in the models config.',
       unsupported: 'Check model context and tool support with teapilot doctor --live.',
-      context_limit: 'Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
+      context_limit: 'Type /convo clear to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
       payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',
       budget: 'Review spending and remaining request/day limits before retrying.',
       ineffective_calls: usedRepository ? 'Inspect the current files, then retry with a narrower concrete change.' : 'Retry with a narrower question, or check the search service with teapilot doctor --live.',

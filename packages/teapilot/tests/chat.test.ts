@@ -205,3 +205,28 @@ it('/rfc asks for a design proposal in the RFC format', async () => {
   expect(proposed).not.toContain('<plan>');
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/rfc <idea>/));
 });
+
+it('/convo clear keeps the workspace and says so, /workspace clears it, and /new clears both', async () => {
+  const files = { list: ['notes.txt'], scratch: 1, label: undefined as string | undefined };
+  const controls = {
+    count: () => files.list.length,
+    clearFiles: async () => { const count = files.list.length; files.list = []; return count; },
+    clearScratch: async () => { files.scratch = 0; },
+    name: (label?: string) => { if (label !== undefined) files.label = label || undefined; return files.label; },
+    tree: () => files.list.join('\n') || undefined,
+  };
+  const onHistory = vi.fn(), log = vi.fn();
+  const input = vi.fn().mockResolvedValueOnce('/convo clear').mockResolvedValueOnce('/workspace name tea').mockResolvedValueOnce('/workspace tree')
+    .mockResolvedValueOnce('/new').mockResolvedValueOnce('/workspace tree').mockResolvedValueOnce('/exit');
+  const run = vi.fn(async () => result);
+  await runChat({ request: { prompt: 'First', cwd: '.' }, maxPromptChars: 2000, input, run, log, onHistory, files: controls });
+  expect(log.mock.calls.map(call => call[0])).toEqual([
+    'Cleared the conversation. The workspace still has 1 file. /workspace clear removes them; /new clears both.',
+    'Workspace: tea',
+    'tea (workspace, not the repository)\nnotes.txt',
+    expect.stringContaining('Started a new task with an empty workspace'),
+    '(workspace, not the repository)\nNo files yet.',
+  ]);
+  expect(onHistory.mock.calls.filter(call => call[0].length === 0).length).toBeGreaterThanOrEqual(2);
+  expect(files).toEqual({ list: [], scratch: 0, label: undefined });
+});

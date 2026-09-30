@@ -520,3 +520,29 @@ it('keeps teapilot\'s Python packages apart per interpreter ABI, and has a pinne
   }
   expect(pandocAsset('win32', 'arm64')).toBeUndefined();
 });
+
+it('clears a workspace\'s files but not its scratchpad or name, copies it for a fork, and lists it as a tree', async () => {
+  const store = WorkspaceStore.at(await directory('teapilot-workspace-'));
+  await store.saveAt('a', 'notes.txt', Buffer.from('tea'), 'op');
+  await store.saveAt('a', 'src/app.js', Buffer.from('x'), 'op');
+  await mkdir(store.scratch('a'), { recursive: true });
+  await writeFile(join(store.scratch('a'), 'plan.md'), 'plan');
+  store.rename('a', '  tea notes ');
+  expect(store.name('a')).toBe('tea notes');
+  expect(store.tree('a')).toBe('notes.txt (3 B)\nsrc/\n  app.js (1 B)');
+  expect(store.tree('a', 'src')).toBe('app.js (1 B)');
+  expect(store.tree('a', 'nope')).toBeUndefined();
+  expect(store.folders('a')).toEqual(['src']);
+
+  await store.copy('a', 'b');
+  expect(store.list('b').map(file => file.name)).toEqual(store.list('a').map(file => file.name));
+  expect(await readFile(join(store.scratch('b'), 'plan.md'), 'utf8')).toBe('plan');
+  expect(store.name('b')).toBe('tea notes');
+
+  expect(await store.clearFiles('a')).toBe(2);
+  expect(store.list('a')).toEqual([]);
+  expect(existsSync(join(store.folder('a'), 'src'))).toBe(false);
+  expect(await readFile(join(store.scratch('a'), 'plan.md'), 'utf8')).toBe('plan');
+  expect(store.name('a')).toBe('tea notes');
+  expect(store.list('b')).toHaveLength(2);
+});

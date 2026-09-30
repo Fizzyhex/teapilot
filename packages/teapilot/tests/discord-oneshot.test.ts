@@ -39,15 +39,20 @@ async function oneShots() {
   /** Switch notes shown so far; `pick` is the button pressed on the next one. */
   const notes: string[] = [];
   let pick = 0;
-  const reply = (authorId: string, text: string, collab = false, attachments: GatewayReply['attachments'] = []) => handlers!.reply({
+  const reply = (authorId: string, text: string, attachments: GatewayReply['attachments'] = []) => handlers!.reply({
     authorId, authorIsBot: false, authorName: authorId, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false,
-    content: text, title: text, id: `interaction-${++invocations}`, oneShot: true, answerOnly: false, setup: {}, yolo: false, attachments, collab, side: text.startsWith('/btw'),
+    content: text, title: text, id: `interaction-${++invocations}`, oneShot: true, answerOnly: false, setup: {}, yolo: false, attachments, side: text.startsWith('/btw'),
     transport: () => transport, startThread: () => Promise.reject(new Error('no threads')), respond: async () => undefined,
     choose: async note => { notes.push(note); return { choice: pick, settle: async settled => { notes.push(settled); }, transport: () => transport }; },
   } satisfies GatewayReply);
   const results = (count: number) => vi.waitFor(() => expect(sent.filter(text => text.includes('Result: completed'))).toHaveLength(count), { timeout: 20_000 });
-  const command = (authorId: string, text: string) => new Promise<string | undefined>(resolve => handlers!.command({
-    authorId, authorIsBot: false, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false, text, respond: async note => resolve(note),
+  /** A slash command; resolves with its private note, or with the note its buttons settle on after `pick` is pressed. */
+  const command = (authorId: string, text: string, oneShot = true) => new Promise<string | undefined>(resolve => handlers!.command({
+    authorId, authorIsBot: false, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false, text, oneShot, respond: async note => resolve(note),
+    choose: async note => { notes.push(note); return { choice: pick, settle: async settled => { notes.push(settled); resolve(settled); }, transport: () => transport }; },
+  }));
+  const complete = (authorId: string, text: string, typed: string) => new Promise<string[]>(resolve => handlers!.complete!({
+    authorId, authorIsBot: false, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false, text, typed, respond: async choices => resolve(choices),
   }));
   /** A direct message, which is its own conversation and answers in the channel. */
   const message = (authorId: string, text: string) => handlers!.message({
@@ -61,10 +66,10 @@ async function oneShots() {
   /** Messages answered as replies to them. */
   const replies: string[] = [];
   const asides = (count: number) => vi.waitFor(() => expect(sent.filter(text => /-# this is an aside/.test(text))).toHaveLength(count), { timeout: 20_000 });
-  return { typed: () => typed, prompts, tools, sent, replies, reply, message, reactions, results, asides, command, notes, press: (index: number) => { pick = index; } };
+  return { typed: () => typed, prompts, tools, sent, replies, reply, message, reactions, results, asides, command, complete, notes, press: (index: number) => { pick = index; } };
 }
 
-it('continues one history per person per channel across one-shot replies, and /clear ends it', async () => {
+it('continues one history per person per channel across one-shot replies, and /convo clear ends it', async () => {
   const { prompts, reply, results, command } = await oneShots();
   // Sent together: the second waits for the first, so it sees that turn.
   reply('op', 'my name is oolong');
@@ -76,44 +81,88 @@ it('continues one history per person per channel across one-shot replies, and /c
   await results(3);
   expect(prompts[2]).not.toContain('oolong');
 
-  expect(await command('op', '/exit')).toMatch(/cleared its history/);
+  expect(await command('op', '/convo clear')).toBe('Cleared the conversation.');
   reply('op', 'what is my name?');
   await results(4);
   expect(prompts[3]).not.toContain('oolong');
 }, 60_000);
 
-it('shares a collab between everyone in the channel, and moves people between it and their own conversation', async () => {
+it('shares a collab between everyone who joins it, and moves people between it and their own conversation', async () => {
   const { prompts, reply, results, command, notes, press } = await oneShots();
   reply('op', 'my name is oolong');
   await results(1);
 
-  // In their own conversation, /collab asks first; switching clears it and sends the prompt to the collab.
-  reply('op', 'the secret word is matcha', true);
+  // Joining from their own conversation asks first; switching clears it, and prompts go to the collab from then on.
+  expect(await command('op', '/collab join')).toBe('You joined this channel\'s collab. /prompt and /reply go to it until you /collab leave.');
+  expect(notes[0]).toMatch(/Joining the collab clears it/);
+  reply('op', 'the secret word is matcha');
   await results(2);
-  expect(notes).toEqual([expect.stringMatching(/Run \/clear to end it before joining the collab/), 'You left your own conversation. Your prompt goes to the collab.']);
-  reply('friend', 'what is the secret word?', true);
+  expect(prompts[1]).not.toContain('oolong');
+  expect(await command('friend', '/collab join')).toBe('You joined this channel\'s collab. /prompt and /reply go to it until you /collab leave.');
+  reply('friend', 'what is the secret word?');
   await results(3);
   expect(prompts[2]).toContain('matcha');
-  expect(prompts[2]).not.toContain('oolong');
 
-  // Staying sends nothing.
+  // Joining again offers to leave; staying keeps them in.
   press(1);
-  await reply('friend', 'just me', false);
-  expect(notes.at(-1)).toBe('You stayed in the collab. Your prompt was not sent.');
-  expect(prompts).toHaveLength(3);
+  expect(await command('friend', '/collab join')).toBe('You stayed in the collab.');
+  press(0);
 
-  expect(await command('friend', '/exit')).toBe('Left the collab. Its history stays for everyone still in it.');
-  expect(await command('op', '/exit')).toBe('Left the collab. You were the last one in it, so its history was cleared.');
-  expect(await command('op', '/exit')).toBe('You are not in a conversation with teapilot here.');
-  reply('op', 'what is the secret word?', true);
+  // A fork takes the collab's conversation along, and the collab carries on without them.
+  expect(await command('friend', '/collab fork')).toMatch(/^Forked the collab/);
+  reply('friend', 'what was the secret word again?');
   await results(4);
-  expect(prompts[3]).not.toContain('matcha');
+  expect(prompts[3]).toContain('matcha');
+  reply('op', 'and now?');
+  await results(5);
+  expect(prompts[4]).toContain('matcha');
+  expect(prompts[4]).not.toContain('secret word again');
+
+  expect(await command('friend', '/collab leave')).toBe('You are not in this channel\'s collab. /collab join joins it.');
+  expect(await command('op', '/collab leave')).toBe('Left the collab. You were the last one in it, so its history was cleared.');
+  expect(await command('op', '/collab join')).toMatch(/^You joined/);
+  reply('op', 'what is the secret word?');
+  await results(6);
+  expect(prompts[5]).not.toContain('matcha');
+}, 60_000);
+
+it('points /collab at /prompt where teapilot can post', async () => {
+  const { command } = await oneShots();
+  expect(await command('op', '/collab join', false)).toMatch(/\/prompt starts a thread/);
+}, 30_000);
+
+it('clears the conversation and the workspace separately, and asks before clearing a collab\'s', async () => {
+  const { reply, results, command, complete, notes, press } = await oneShots();
+  const data = Buffer.from('oolong\n');
+  reply('op', 'keep this', [{ name: 'notes.txt', size: data.length, contentType: 'text/plain', download: async () => data }]);
+  await results(1);
+  expect(await command('op', '/workspace tree')).toMatch(/notes\.txt/);
+  expect(await command('op', '/workspace name tea notes')).toBe('Workspace: tea notes');
+  expect(await command('op', '/workspace tree')).toMatch(/^tea notes \(workspace, not the repository\)/);
+  expect(await complete('op', '/workspace tree', '')).toEqual([]);
+
+  // Clearing the conversation offers to clear the workspace; keeping it keeps the file.
+  press(1);
+  expect(await command('op', '/convo clear')).toBe('Cleared the conversation. The workspace kept its files.');
+  expect(notes.at(-2)).toMatch(/The workspace still has 1 file\./);
+  expect(await command('op', '/workspace tree')).toMatch(/notes\.txt/);
+  press(0);
+  expect(await command('op', '/convo clear')).toBe('Cleared the conversation. Cleared the workspace too.');
+  expect(await command('op', '/workspace tree')).toMatch(/No files yet\./);
+
+  // In a collab, clearing what everyone shares asks first.
+  await command('op', '/collab join');
+  press(1);
+  expect(await command('op', '/workspace clear')).toBe('Nothing was cleared.');
+  expect(notes.at(-2)).toMatch(/for everyone in this channel's collab/);
+  press(0);
+  expect(await command('op', '/new')).toBe('Cleared the collab\'s conversation and workspace.');
 }, 60_000);
 
 it('keeps files attached to /prompt and tells teapilot about them', async () => {
   const { prompts, reply, results } = await oneShots();
   const data = Buffer.from('oolong is a partly oxidised tea\n');
-  reply('op', 'what does notes.txt say?', false, [{ name: 'notes.txt', size: data.length, contentType: 'text/plain', download: async () => data }]);
+  reply('op', 'what does notes.txt say?', [{ name: 'notes.txt', size: data.length, contentType: 'text/plain', download: async () => data }]);
   await results(1);
   expect(prompts[0]).toContain('notes.txt');
 }, 30_000);

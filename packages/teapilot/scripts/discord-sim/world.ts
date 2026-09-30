@@ -410,6 +410,56 @@ ${this.render(this.post(form.message.channel, bot.name, { content: note }, perso
     return this.interact(person, form.message, 'modal', form.payload.custom_id, `submitted "${form.payload.title}"`, undefined, Object.fromEntries(ids.map(key => [key, fields[key] ?? ''])));
   }
 
+  /**
+   * A slash command as the session text the gateway makes of it, such as "/convo clear" or "/collab join". Its notes
+   * show to that person alone; a note with buttons is answered with button `choice`, or left to expire without one.
+   * `oneShot` acts as a channel teapilot cannot post in, where /collab applies.
+   */
+  async slash(name: string, text: string, where?: string, choice?: number, oneShot = false): Promise<string> {
+    const person = this.person(name);
+    const handlers = this.handlers;
+    if (!handlers) throw new SimError('teapilot is not connected.');
+    const channel = where ? this.channel(where) : this.dm(person);
+    const thread = channel.kind === 'thread' ? channel : undefined;
+    const seen: string[] = [`${person.name} ran ${text} in #${channel.name}.`];
+    const note = (content: string, components: Row[] = []) => seen.push(this.render(this.post(channel, bot.name, { content, components }, person.name)));
+    let answered = false;
+    const first = () => { if (answered) throw new Error('This interaction was already answered.'); answered = true; };
+    await new Promise<void>(done => {
+      const timer = setTimeout(() => { seen.push('(no response after 15 s)'); done(); }, 15_000);
+      const finish = () => { clearTimeout(timer); done(); };
+      handlers.command({
+        authorId: person.id, authorIsBot: false, guildId: channel.kind === 'dm' ? undefined : guildId, channelId: channel.id, parentId: thread?.parent,
+        ownThread: Boolean(thread), mentionsBot: false, text, oneShot,
+        respond: async content => { if (answered) { if (content) note(content); return; } first(); if (content) note(content); finish(); },
+        choose: async (content, labels) => {
+          first();
+          note(content, [{ type: 1, components: labels.map((label, index) => ({ type: 2, style: index ? 2 : 1, label, custom_id: `teapilot-choice:sim:${index}` })) }]);
+          if (choice === undefined || !labels[choice]) { seen.push(`(no button pressed; run again with --choose 0-${labels.length - 1})`); finish(); return undefined; }
+          seen.push(`${person.name} pressed "${labels[choice]}".`);
+          return { choice, settle: async settled => { note(settled); finish(); }, transport: () => this.transport(channel) };
+        },
+      });
+    });
+    await this.quiet(150, 1000);
+    return seen.join('\n');
+  }
+
+  /** What Discord would offer while `name` types `typed` into the option of `text`'s command, such as "/workspace tree". */
+  async complete(name: string, text: string, typed: string, where?: string): Promise<string> {
+    const person = this.person(name);
+    const handlers = this.handlers;
+    if (!handlers?.complete) throw new SimError('teapilot does not complete options.');
+    const channel = where ? this.channel(where) : this.dm(person);
+    const thread = channel.kind === 'thread' ? channel : undefined;
+    const choices = await new Promise<string[]>(resolve => handlers.complete!({
+      authorId: person.id, authorIsBot: false, guildId: channel.kind === 'dm' ? undefined : guildId, channelId: channel.id, parentId: thread?.parent,
+      ownThread: Boolean(thread), mentionsBot: false, text, typed, respond: async offered => resolve(offered),
+    }));
+    if (choices.length > 25) this.warn(`teapilot offered ${choices.length} completions; Discord takes at most 25.`);
+    return choices.length ? choices.map(choice => `  ${choice}`).join('\n') : '(no suggestions)';
+  }
+
   /** One component interaction, held to Discord's rules: one first response within 3 s, and edits only after it. */
   private async interact(person: Person, message: Message, kind: PlayInteraction['kind'], custom: string, action: string, values?: string[], fields?: Record<string, string>): Promise<string> {
     const handlers = this.handlers;

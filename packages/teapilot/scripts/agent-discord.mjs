@@ -35,6 +35,13 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
                                      succeeds; --trace records what each model call was sent
   say <name> <text> [--as P] [--in C] [--attach FILE]...
                                      send a message; @op, @user, @stranger and @teapilot become mentions
+  slash <name> <command> [--as P] [--in C] [--choose N] [--one-shot]
+                                     a slash command as its session text, e.g. "/convo clear",
+                                     "/workspace tree src", "/collab join"; --choose N presses button N on
+                                     a note that offers some; --one-shot acts as a channel teapilot cannot
+                                     post in, where /collab applies
+  complete <name> <command> [<typed>] [--as P] [--in C]
+                                     what Discord offers while typing an option, e.g. complete d "/workspace tree" sr
   click <name> <message> <control> [--as P]
   select <name> <message> <control> <value...> [--as P]
   submit <name> [--field id=value ...] [--as P]      the form P has open
@@ -45,7 +52,7 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
   app <name> <id>                    one app: state, view, timers, recent actions and its source
   advance <name> <duration>          move the clock ahead, e.g. 30s, 5m, 25h
   restart <name>                     restart teapilot; apps and conversation history are recovered
-                                     (say "/clear" to start a conversation over)
+                                     (say "/convo clear" to start a conversation over)
   log <name> [--last N]              teapilot's operator log
   scratch <name> [--last N]          each conversation's scratchpad files, and the scratchpad,
                                      fixture, history and retry events since the session started
@@ -152,7 +159,7 @@ async function client(argv) {
   const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
     as: { type: 'string', default: 'op' }, in: { type: 'string' }, for: { type: 'string' }, idle: { type: 'string' }, timeout: { type: 'string', default: '120' },
     last: { type: 'string' }, field: { type: 'string', multiple: true, default: [] }, deny: { type: 'boolean', default: false },
-    attach: { type: 'string', multiple: true, default: [] },
+    attach: { type: 'string', multiple: true, default: [] }, choose: { type: 'string' }, 'one-shot': { type: 'boolean', default: false },
   } });
   const [name, ...args] = positionals;
   if (!name) throw new UsageError(`${command} needs a session name.\n\n${usage}`);
@@ -165,6 +172,12 @@ async function client(argv) {
     for (const path of attach) if (!existsSync(path)) throw new UsageError(`No file ${path} to attach.`);
     body = { op: 'say', as: values.as, in: values.in, text: args[0] ?? '', attach };
   }
+  else if (command === 'slash') {
+    need(1, '<command>');
+    if (values.choose !== undefined && !/^\d+$/.test(values.choose)) throw new UsageError('--choose takes a button number, from 0.');
+    body = { op: 'slash', as: values.as, in: values.in, text: args[0], choose: values.choose === undefined ? undefined : Number(values.choose), oneShot: values['one-shot'] };
+  }
+  else if (command === 'complete') { need(1, '<command> [<typed>]'); body = { op: 'complete', as: values.as, in: values.in, text: args[0], typed: args[1] ?? '' }; }
   else if (command === 'click') { need(2, '<message> <control>'); body = { op: 'click', as: values.as, message: args[0], control: args[1] }; }
   else if (command === 'select') { need(3, '<message> <control> <value...>'); body = { op: 'select', as: values.as, message: args[0], control: args[1], values: args.slice(2) }; }
   else if (command === 'submit') {

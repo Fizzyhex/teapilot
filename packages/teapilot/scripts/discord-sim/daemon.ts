@@ -174,6 +174,8 @@ async function handle(body: Body): Promise<Record<string, unknown>> {
       const message = world.say(as, String(body.text ?? ''), body.in as string | undefined, files);
       return { text: `${message.id} sent by ${as} in #${message.channel.name}${files.length ? ` with ${files.map(file => file.name).join(', ')}` : ''}.` };
     }
+    case 'slash': input(); return { text: await world.slash(as, String(body.text), body.in as string | undefined, body.choose as number | undefined, body.oneShot === true) };
+    case 'complete': return { text: await world.complete(as, String(body.text), String(body.typed ?? ''), body.in as string | undefined) };
     case 'click': input(); return { text: await world.click(as, String(body.message), String(body.control)) };
     case 'select': input(); return { text: await world.select(as, String(body.message), String(body.control), body.values as string[]) };
     case 'submit': input(); return { text: await world.submit(as, body.fields as Record<string, string>) };

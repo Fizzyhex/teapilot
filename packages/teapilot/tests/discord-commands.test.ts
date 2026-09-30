@@ -53,12 +53,19 @@ it('maps /prompt mode and reasoning to a starting mode and tier', () => {
   expect(setupCommands({})).toEqual([]);
 });
 
-it('offers /collab with /prompt\'s options, and /clear in place of /new and /exit', () => {
+it('offers /convo, /workspace and /new in place of /clear, and /collab as join, leave and fork', () => {
   const find = (name: string) => commandDefinitions.find(command => command.name === name) as Extract<typeof commandDefinitions[number], { options?: unknown }> | undefined;
-  expect(find('collab')?.options).toEqual(find('prompt')?.options);
-  expect(commandText('collab', null, 'hello')).toBeUndefined();
-  expect(commandText('clear')).toBe('/exit');
-  expect(find('new')).toBeUndefined();
+  expect(find('clear')).toBeUndefined();
   expect(find('exit')).toBeUndefined();
-  for (const name of ['collab', 'clear', 'stop']) expect(find(name)).toMatchObject({ integration_types: [0, 1], contexts: [0, 1, 2] });
+  expect(commandText('convo', 'clear')).toBe('/convo clear');
+  expect(commandText('convo')).toBeUndefined();
+  expect(commandText('workspace', 'clear')).toBe('/workspace clear');
+  expect(commandText('workspace', 'name', 'tea notes')).toBe('/workspace name tea notes');
+  expect(commandText('workspace', 'tree')).toBe('/workspace tree');
+  expect(commandText('workspace', 'tree', 'src')).toBe('/workspace tree src');
+  expect(commandText('new')).toBe('/new');
+  for (const action of ['join', 'leave', 'fork']) expect(commandText('collab', action)).toBe(`/collab ${action}`);
+  expect(commandText('collab', null, 'hello')).toBeUndefined();
+  expect(find('workspace')?.options).toContainEqual(expect.objectContaining({ name: 'tree', options: [expect.objectContaining({ name: 'dir', autocomplete: true })] }));
+  for (const name of ['collab', 'convo', 'workspace', 'new', 'stop']) expect(find(name)).toMatchObject({ integration_types: [0, 1], contexts: [0, 1, 2] });
 });

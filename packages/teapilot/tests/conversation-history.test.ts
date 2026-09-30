@@ -174,6 +174,25 @@ it('reports each turn with its steps, and clears the history on /new', async () 
   await vi.waitFor(() => expect(histories.at(-1)).toEqual([]));
 });
 
+it('clears the history on /convo clear, and leaves the channel quiet when the command was answered privately', async () => {
+  const controller = new AbortController();
+  const histories: ConversationTurn[][] = [];
+  const log = vi.fn(), send = vi.fn(async () => '1');
+  const chat = new Conversation({
+    key: 'dm:test', queue: new TurnQueue(), maxPromptChars: 20_000, log, redact: text => text, run: vi.fn(),
+    transport: { send, edit: vi.fn(async () => undefined), card: vi.fn(async () => 'card'), typing: vi.fn(), askApproval: vi.fn(async () => false) },
+    request: { prompt: '', cwd: '.', mode: 'ask', signal: controller.signal, history: [{ user: 'earlier', assistant: 'before a restart' }] },
+    onHistory: history => histories.push(history),
+  });
+  cleanups.push(async () => { controller.abort(); await chat.done; });
+  chat.push('/convo clear', { quiet: true });
+  await vi.waitFor(() => expect(histories.at(-1)).toEqual([]));
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith('dm:test: Cleared the conversation.'));
+  expect(send).not.toHaveBeenCalled();
+  chat.push('/convo clear');
+  await vi.waitFor(() => expect(send).toHaveBeenCalledWith('Cleared the conversation.'));
+});
+
 it('never cuts an earlier turn through the middle of an emoji', () => {
   // A long result made of emoji is compacted to its first 400 characters, which here falls inside one.
   const result = { role: 'toolResult', toolCallId: 'c1', toolName: 'play_inspect', content: [{ type: 'text', text: 'x' + '🌽'.repeat(300) }], isError: false, timestamp: 0 } as unknown as Message;

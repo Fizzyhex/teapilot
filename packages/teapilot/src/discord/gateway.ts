@@ -4,7 +4,7 @@ import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, Attachm
 import type { IncomingMessage } from './access.js';
 import type { SideAnswer } from './aside-store.js';
 import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
-import { attachmentOption, collabCommand, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, withoutUserInstall, type PromptSetup } from './commands.js';
+import { attachmentOption, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, treeOption, withoutUserInstall, type PromptSetup } from './commands.js';
 import { isAside } from '../chat.js';
 import { InteractionFeed, type FeedLink } from './feed.js';
 import { planButtons, planModal, type PlanAction, type PlanControls } from './plan.js';
@@ -41,6 +41,17 @@ export interface GatewayCommand extends IncomingMessage {
   text: string;
   /** Answer only the invoker: with text it shows a private note, without it the invocation is dismissed quietly. */
   respond(text?: string): Promise<void>;
+  /** Instead of `respond()`: a private note with buttons, as for a reply. */
+  choose(note: string, labels: string[]): Promise<GatewayChoice | undefined>;
+  /** teapilot cannot post here, so /reply and /prompt answer through their interactions, one person or collab at a time. */
+  oneShot: boolean;
+}
+/** Discord asking for completions of an option being typed; `text` is the command it belongs to, without the option. */
+export interface GatewayCompletion extends IncomingMessage {
+  text: string;
+  typed: string;
+  /** Up to 25 suggestions; the first ones win. */
+  respond(choices: string[]): Promise<void>;
 }
 /** /reply or the Reply context menu: `content` is what teapilot receives, `title` names a new thread. */
 export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'replyTransport' | 'react'> {
@@ -55,12 +66,10 @@ export interface GatewayReply extends Omit<GatewayMessage, 'replyChain' | 'reply
   oneShot: boolean;
   /** From the Reply menu: only teapilot's answer (and approval buttons) go to Discord; the rest is logged in the terminal. */
   answerOnly: boolean;
-  /** The mode and tier chosen with /prompt or /collab, applied before `content`. */
+  /** The mode and tier chosen with /prompt, applied before `content`. */
   setup: PromptSetup;
-  /** From /prompt or /collab: every approval this prompt asks for passes without asking, if an operator sent it. */
+  /** From /prompt: every approval this prompt asks for passes without asking, if an operator sent it. */
   yolo: boolean;
-  /** From /collab: where the answer comes through the interaction, everyone in the channel shares the conversation. */
-  collab: boolean;
   /** A side question (/btw): `respond()` keeps a private reply open, and `transport()` answers there, for the asker alone. */
   side: boolean;
   respond(text?: string): Promise<void>;
@@ -82,6 +91,7 @@ export interface GatewayChoice {
 export interface GatewayHandlers {
   message(message: GatewayMessage): void;
   command(command: GatewayCommand): void;
+  complete?(completion: GatewayCompletion): void;
   reply(reply: GatewayReply): void;
   /** A click, selection or form on a discord.play app, from anyone; the runtime decides who may act. */
   component(interaction: PlayInteraction): void;
@@ -338,6 +348,18 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     const channel = interaction.channel ?? await client.channels.fetch(interaction.channelId).catch(() => null);
     return channel?.isSendable() ? channel : undefined;
   };
+  /** Where teapilot cannot post, so it answers through each interaction instead. */
+  const placement = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction) => {
+    const channel = await sendable(interaction);
+    const thread = channel?.isThread() ? channel : undefined;
+    // Servers where teapilot is only user-installed, or where it lacks Send Messages, still allow interaction replies.
+    // A user install reports the user's default permissions, which can look like the right to post, so the install type decides first.
+    const guildInstalled = interaction.authorizingIntegrationOwners[ApplicationIntegrationType.GuildInstall] !== undefined;
+    const cannotPost = interaction.inGuild()
+      ? !guildInstalled || !interaction.appPermissions?.has([PermissionFlagsBits.ViewChannel, thread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages])
+      : interaction.context === InteractionContextType.PrivateChannel;
+    return { channel, thread, oneShot: !channel || cannotPost };
+  };
   const strip = (text: string, id: string) => text.replace(new RegExp(`<@!?${id}>`, 'g'), '').trim();
   /**
    * The message each Reply-menu target replies to, by interaction id, from the raw payload. discord.js
@@ -348,6 +370,21 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   const sideAnswers = new Map<string, PendingAside>();
   /** Open `choose()` notes by nonce: who may press them, and what the press resolves. */
   const choices = new Map<string, { userId: string; resolve(click: GatewayChoice | undefined): void }>();
+  /** A private note with a button per label, the first one primary; resolves with the invoker's click, or undefined once it expires. */
+  const offer = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction, note: string, labels: string[]): Promise<GatewayChoice | undefined> => {
+    const nonce = randomUUID();
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(labels.map((label, index) =>
+      new ButtonBuilder().setCustomId(`${choicePrefix}${nonce}:${index}`).setLabel(label).setStyle(index ? ButtonStyle.Secondary : ButtonStyle.Primary)));
+    await interaction.reply({ content: note, components: [row], flags: MessageFlags.Ephemeral, ...quiet });
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        if (!choices.delete(nonce)) return;
+        void interaction.editReply({ content: `${note}\n\n-# Expired.`.slice(0, MESSAGE_LIMIT), components: [] }).catch(noop);
+        resolve(undefined);
+      }, interactionLifetimeMs);
+      choices.set(nonce, { userId: interaction.user.id, resolve: click => { clearTimeout(timer); resolve(click); } });
+    });
+  };
 
   /** The side answer behind a menu or preview, if it is still the clicker's to post; otherwise a private note says why not. */
   const pendingAside = async (interaction: ButtonInteraction | StringSelectMenuInteraction, nonce: string): Promise<PendingAside | undefined> => {
@@ -443,18 +480,9 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   /** /reply and the Reply context menu: both start or continue a conversation wherever the bot may post. */
   const reply = async (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction, self: NonNullable<typeof client.user>) => {
     let answered = false;
-    const channel = await sendable(interaction);
-    const thread = channel?.isThread() ? channel : undefined;
-    // Servers where teapilot is only user-installed, or where it lacks Send Messages, still allow interaction replies.
-    // A user install reports the user's default permissions, which can look like the right to post, so the install type decides first.
-    const guildInstalled = interaction.authorizingIntegrationOwners[ApplicationIntegrationType.GuildInstall] !== undefined;
-    const cannotPost = interaction.inGuild()
-      ? !guildInstalled || !interaction.appPermissions?.has([PermissionFlagsBits.ViewChannel, thread ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages])
-      : interaction.context === InteractionContextType.PrivateChannel;
-    const oneShot = !channel || cannotPost;
+    const { channel, thread, oneShot } = await placement(interaction);
     const target = interaction.isMessageContextMenuCommand() ? interaction.targetMessage : undefined;
-    const collab = interaction.isChatInputCommand() && interaction.commandName === collabCommand;
-    const isPrompt = interaction.isChatInputCommand() && (interaction.commandName === promptCommand || collab);
+    const isPrompt = interaction.isChatInputCommand() && interaction.commandName === promptCommand;
     const text = interaction.isChatInputCommand() ? interaction.options.getString(isPrompt ? 'prompt' : 'message', true).trim() : strip(target?.content ?? '', self.id);
     // The Reply menu quotes someone's message; only a person's own /btw is a side question.
     const side = !target && isAside(text);
@@ -475,20 +503,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     const choose = async (note: string, labels: string[]): Promise<GatewayChoice | undefined> => {
       if (answered) throw new Error('This interaction was already answered.');
       answered = true;
-      const nonce = randomUUID();
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(labels.map((label, index) =>
-        new ButtonBuilder().setCustomId(`${choicePrefix}${nonce}:${index}`).setLabel(label).setStyle(index ? ButtonStyle.Secondary : ButtonStyle.Primary)));
-      await interaction.reply({ content: note, components: [row], flags: MessageFlags.Ephemeral, ...quiet });
-      return new Promise(resolve => {
-        const timer = setTimeout(() => {
-          if (!choices.delete(nonce)) return;
-          void interaction.editReply({ content: `${note}
-
--# Expired.`.slice(0, MESSAGE_LIMIT), components: [] }).catch(noop);
-          resolve(undefined);
-        }, interactionLifetimeMs);
-        choices.set(nonce, { userId: interaction.user.id, resolve: click => { clearTimeout(timer); resolve(click); } });
-      });
+      return offer(interaction, note, labels);
     };
     const setup = interaction.isChatInputCommand() && isPrompt ? promptSetup(interaction.options.getString('mode'), interaction.options.getString('reasoning')) : {};
     const yolo = interaction.isChatInputCommand() && isPrompt && interaction.options.getBoolean('yolo') === true;
@@ -515,7 +530,6 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       setup,
       yolo,
       attachments: files,
-      collab,
       side,
       transport: () => side ? sideTransport(interaction, text) : channel && !oneShot ? transport(channel) : interactionTransport(interaction),
       startThread: name => spawn(async () => {
@@ -543,7 +557,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   client.on(Events.InteractionCreate, async interaction => {
     // Only the Reply menu reads this; drop it for every other interaction so the map stays empty.
     if (!(interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu)) interactionReplies.delete(interaction.id);
-    if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && [replyCommand, promptCommand, collabCommand].includes(interaction.commandName)) {
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && [replyCommand, promptCommand].includes(interaction.commandName)) {
       const self = client.user;
       if (self && (interaction.isMessageContextMenuCommand() || interaction.isChatInputCommand())) await reply(interaction, self).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
       return;
@@ -551,13 +565,18 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     if (interaction.isChatInputCommand()) {
       const self = client.user;
       const channel = interaction.channel;
-      const text = commandText(interaction.commandName, interaction.options.getSubcommand(false), interaction.options.getString('value'));
+      const argument = interaction.options.getString('value') ?? interaction.options.getString('name') ?? interaction.options.getString(treeOption);
+      const text = commandText(interaction.commandName, interaction.options.getSubcommand(false), argument);
+      let answered = false;
       const respond = async (note?: string) => {
+        if (answered) { if (note) await interaction.followUp({ content: note, flags: MessageFlags.Ephemeral }); return; }
+        answered = true;
         if (note) await interaction.reply({ content: note, flags: MessageFlags.Ephemeral });
         else { await interaction.deferReply({ flags: MessageFlags.Ephemeral }); await interaction.deleteReply(); }
       };
       if (!self || !text) { await respond('Unknown teapilot command.').catch(noop); return; }
       const thread = channel?.isThread() ? channel : undefined;
+      const { oneShot } = await placement(interaction);
       handlers.command({
         authorId: interaction.user.id,
         authorIsBot: interaction.user.bot,
@@ -567,7 +586,35 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         ownThread: thread?.ownerId === self.id,
         mentionsBot: false,
         text,
+        oneShot,
         respond: note => respond(note).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`)),
+        choose: async (note, labels) => {
+          if (answered) throw new Error('This interaction was already answered.');
+          answered = true;
+          return offer(interaction, note, labels);
+        },
+      });
+      return;
+    }
+    if (interaction.isAutocomplete()) {
+      const self = client.user;
+      const thread = interaction.channel?.isThread() ? interaction.channel : undefined;
+      const text = commandText(interaction.commandName, interaction.options.getSubcommand(false));
+      const respond = async (choices: string[]) => {
+        await interaction.respond(choices.slice(0, 25).map(choice => ({ name: choice.slice(0, 100), value: choice.slice(0, 100) })));
+      };
+      if (!self || !text || !handlers.complete) { await respond([]).catch(noop); return; }
+      handlers.complete({
+        authorId: interaction.user.id,
+        authorIsBot: interaction.user.bot,
+        guildId: interaction.guildId ?? undefined,
+        channelId: interaction.channelId,
+        parentId: thread?.parentId ?? undefined,
+        ownThread: thread?.ownerId === self.id,
+        mentionsBot: false,
+        text,
+        typed: String(interaction.options.getFocused()),
+        respond: choices => respond(choices).catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`)),
       });
       return;
     }

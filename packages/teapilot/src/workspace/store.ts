@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { lstat, readdir, rm } from 'node:fs/promises';
+import { cp, lstat, readdir, rm } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { z } from 'zod';
 import { imageInfo } from '../discord/images.js';
@@ -18,7 +18,8 @@ const entrySchema = z.object({
   mtimeMs: z.number().optional(),
 });
 export type StoredFile = z.infer<typeof entrySchema>;
-const indexSchema = z.object({ files: z.array(entrySchema), domains: z.array(z.string()).default([]) });
+/** `name` is the label people give the workspace with /workspace name. */
+const indexSchema = z.object({ files: z.array(entrySchema), domains: z.array(z.string()).default([]), name: z.string().optional() });
 type Index = z.infer<typeof indexSchema>;
 
 /** A name safe on every filesystem and in attachment:// URLs, keeping its extension. */
@@ -275,6 +276,66 @@ export class WorkspaceStore {
     const index = this.index(conversation);
     index.domains = [...new Set([...index.domains, ...hosts])];
     this.write(conversation, index);
+  }
+
+  /** The label given with /workspace name; an empty one removes it. */
+  name(conversation: string): string | undefined { return this.index(conversation).name; }
+  rename(conversation: string, name: string): void {
+    const index = this.index(conversation);
+    const label = name.trim().slice(0, 100);
+    if (label) index.name = label; else delete index.name;
+    this.write(conversation, index);
+  }
+
+  /** Deletes the files, packages and caches, keeping the scratchpad, the name and the approved hosts. */
+  async clearFiles(conversation: string): Promise<number> {
+    const folder = this.folder(conversation);
+    const entries = await readdir(folder).catch(() => [] as string[]);
+    for (const entry of entries) if (entry !== '.scratch') await rm(join(folder, entry), { recursive: true, force: true });
+    const index = this.index(conversation);
+    const count = index.files.length;
+    index.files = [];
+    this.write(conversation, index);
+    return count;
+  }
+
+  /** Copies a workspace, scratchpad included, over another's, for a conversation forked from it. */
+  async copy(from: string, to: string): Promise<void> {
+    await this.remove(to);
+    const source = this.folder(from);
+    // Links planted by sandboxed commands are copied as links and never followed, so they reach nothing new.
+    await cp(source, this.folder(to), { recursive: true, verbatimSymlinks: true });
+    this.write(to, this.index(from));
+  }
+
+  /** The listed files as an indented outline, optionally under one folder; undefined when that folder has none. */
+  tree(conversation: string, dir = '', limit = fileLimits.listed): string | undefined {
+    const prefix = dir.replace(/\\/g, '/').replace(/^\.?\/+|\/+$/g, '');
+    const files = this.list(conversation).filter(file => !prefix || file.name.toLowerCase().startsWith(`${prefix.toLowerCase()}/`));
+    if (!files.length) return undefined;
+    const lines: string[] = [];
+    const shown = new Set<string>();
+    for (const file of [...files].sort((a, b) => a.name.localeCompare(b.name))) {
+      const parts = (prefix ? file.name.slice(prefix.length + 1) : file.name).split('/');
+      parts.forEach((part, depth) => {
+        const path = parts.slice(0, depth + 1).join('/');
+        if (shown.has(path)) return;
+        shown.add(path);
+        const last = depth === parts.length - 1;
+        lines.push(`${'  '.repeat(depth)}${last ? `${part} (${size(file.size)})` : `${part}/`}`);
+      });
+    }
+    return (lines.length > limit ? [...lines.slice(0, limit), `… and ${lines.length - limit} more`] : lines).join('\n');
+  }
+
+  /** Folders holding listed files, for completing a path someone is typing. */
+  folders(conversation: string): string[] {
+    const found = new Set<string>();
+    for (const file of this.list(conversation)) {
+      const parts = file.name.split('/');
+      for (let depth = 1; depth < parts.length; depth++) found.add(parts.slice(0, depth).join('/'));
+    }
+    return [...found].sort();
   }
 
   /** Deletes the workspace and its index, for sessions that end with their files. */

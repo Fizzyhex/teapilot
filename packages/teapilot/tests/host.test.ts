@@ -427,7 +427,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     f.config.models.capable.contextTokens = 16384;
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'x!'.repeat(6000) }, { approve: async () => false });
     expect(result.status).toBe('context_limit');
-    expect(result.text).toContain('Next: Type /new to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.');
+    expect(result.text).toContain('Next: Type /convo clear to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.');
   });
 
   it('asks the first routing call which teachat identity fits and returns the answer', async () => {

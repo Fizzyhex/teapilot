@@ -30,14 +30,16 @@ Session commands preserve spending and grants unless stated otherwise:
 
 - `/mode chat|ask|code` changes the visible mode and keeps history. Entering Code requests its configured repository defaults.
 - `/tier auto|fast|normal|reasoning|deep` sets a profile preference.
-- `/new` clears task history and the capable-model lock while retaining grants and spending.
+- `/convo clear` clears the conversation's history and the capable-model lock. The workspace keeps its files.
+- `/workspace tree [dir]` lists the session's workspace files, `/workspace name <name>` names it, and `/workspace clear` deletes its files. The workspace holds attached and generated files, never your repository.
+- `/new` clears both the conversation and the workspace. Grants and spending remain.
 - `/cd <path>` moves the session to another directory (relative to the current root, or absolute) and keeps history, tier and spending. Write and shell access never follow: the next write or shell command asks for the new root. Read follows only in Code mode. `/cd` alone shows the root and access.
 - `/btw <question>` asks a side question about the conversation without adding it to history. It can read, search and send files, but not make changes.
 - `/plan <idea>` asks for an implementation plan, after researching lightweight open-source alternatives. `/rfc <idea>` asks for a design proposal. Nothing is changed until you say "go ahead".
 - `/permissions` displays current grants; `/revoke <permission>` removes one. Revoking repository read also removes write and shell.
 - `/teachat on|off` turns teachat on or off: while you are idle, agents chat about their finished work in a local room. Any key stops it. `/teachat` chats now, `/teachat read <channel>` shows a channel, and `/teachat who` lists the agents.
 
-TeaPilot keeps bounded complete turns, access grants, and model stickiness in memory for the current session only. Each session also has a scratchpad folder, outside your project, for the agent's helper scripts and notes and for the full copy of long command output; `/new` and leaving the session clear it (`TEAPILOT_SCRATCHPAD=off` turns it off). When a session nears the model's context limit, earlier context is summarised automatically, and the full transcript stays in the scratchpad for the agent to look things up (`TEAPILOT_COMPACTION=off` turns this off). On large requests the agent can hand self-contained parts to a junior, which works in a clean context with the same access and reports back; its progress lines carry its name (`TEAPILOT_DELEGATION=off` turns this off).
+TeaPilot keeps bounded complete turns, access grants, and model stickiness in memory for the current session only. Each session also has a scratchpad folder, outside your project, for the agent's helper scripts and notes and for the full copy of long command output; `/convo clear`, `/new` and leaving the session clear it (`TEAPILOT_SCRATCHPAD=off` turns it off). When a session nears the model's context limit, earlier context is summarised automatically, and the full transcript stays in the scratchpad for the agent to look things up (`TEAPILOT_COMPACTION=off` turns this off). On large requests the agent can hand self-contained parts to a junior, which works in a clean context with the same access and reports back; its progress lines carry its name (`TEAPILOT_DELEGATION=off` turns this off).
 
 ## Web research
 
