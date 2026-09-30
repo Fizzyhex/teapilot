@@ -333,6 +333,6 @@ function playPrompt(repository: boolean, writable: boolean, running: Array<{ id:
     // Available capabilities
     writable
       ? '- Repository session: the SDK is a convenience, not a boundary. You may inspect, extend or bypass it, add dependencies, change the runtime, and run an app from a repository file with play_start({ path, trusted: true }) for raw Discord API work (ctx.discord.request); that needs repository.shell and an operator approval.'
-      : '- Apps run sandboxed; for anything beyond the SDK the user must grant repository access.',
+      : '- Workspace session: the SDK is a convenience, not a boundary. The workspace is yours to work in (write helper scripts, prepare data or images with the shell when it can run) and apps run sandboxed from workspace files; only raw Discord API access (ctx.discord.request) needs a repository session.',
   ].join('\n');
 }
