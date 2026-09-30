@@ -36,5 +36,6 @@ In practice, a coding session feels about twice as fast, and long written answer
   - (but did you have the performance headroom to handle multiple anyway? :P)
 - The first setup downloads about **6.5 GB** of runtime and **21 GB** of models.
   - The first model load also takes about a minute longer while the GPU kernels are compiled.
+- If generation is suddenly much slower than the table above, run `teapilot doctor`. Setting **CUDA - Sysmem Fallback Policy** to **Prefer No Sysmem Fallback** in the NVIDIA Control Panel makes running out of GPU memory fail visibly instead of slowing to a crawl.
 
 [Back to README](../README.md)

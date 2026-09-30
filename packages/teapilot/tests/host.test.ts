@@ -78,7 +78,9 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     const receipt = JSON.parse(await readFile(result.receipts[0]!, 'utf8'));
     expect(receipt.provenance.candidate_snapshot_hash).toMatch(/^sha256:/);
     expect(receipt.raw_jev.answers.tool.choice).toBe('ask.normal');
-    expect((await events(f.config)).find(e => e.type === 'usage' && e.stage === 'inference').usage.totalTokens).toBe(140);
+    const usage = (await events(f.config)).find(e => e.type === 'usage' && e.stage === 'inference');
+    expect(usage.usage.totalTokens).toBe(140);
+    expect(usage.firstTokenMs).toEqual(expect.any(Number));
   });
 
   it('coder uses pi read/write tools and receives AGENTS.md', async () => {

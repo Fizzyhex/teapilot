@@ -27,6 +27,7 @@ export async function manageRuntimes(action: string, config: Config, ui: SetupUI
   for (const { driver, state } of serving) {
     if (action === 'status') {
       ui.log(`${driver.label}: ${state.ready ? 'running' : 'not running'}${state.version ? ` (${state.version})` : ''}${state.detail ? `; ${state.detail}` : ''}`);
+      for (const warning of state.warnings ?? []) ui.log(`${driver.label}: WARNING ${warning}`);
       ok &&= state.ready;
     } else if (action === 'start') {
       await (driver.start ?? driver.ensure).call(driver, { ui, signal });

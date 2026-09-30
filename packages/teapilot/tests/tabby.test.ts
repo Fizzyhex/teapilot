@@ -53,9 +53,11 @@ async function tabbyServer(root: string) {
     if (path === '/v1/models') { response.end(JSON.stringify({ object: 'list', data: state.loaded ? [{ id: state.loaded.id }] : [] })); return; }
     if (path === '/v1/model') {
       if (!state.loaded) { response.writeHead(503); response.end('{}'); return; }
-      response.end(JSON.stringify({ id: state.loaded.id, parameters: { max_seq_len: state.loaded.max_seq_len, draft: state.loaded.draft ? { id: state.loaded.draft } : undefined } }));
+      // Like the ExLlamaV3 backend, the card never names the drafter.
+      response.end(JSON.stringify({ id: state.loaded.id, parameters: { max_seq_len: state.loaded.max_seq_len }, draft: null }));
       return;
     }
+    if (path === '/v1/model/draft/list') { response.end(JSON.stringify({ object: 'list', data: state.loaded?.draft ? [{ id: state.loaded.draft }] : [] })); return; }
     if (!admin && ['/v1/download', '/v1/model/load'].includes(path)) { response.writeHead(401); response.end('{}'); return; }
     if (path === '/v1/download') {
       if (state.downloadError) { response.writeHead(400); response.end(JSON.stringify({ detail: state.downloadError })); return; }
@@ -87,6 +89,8 @@ async function harness(overrides: Partial<TabbyBoundaries> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'teapilot-tabby-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const tabby = await tabbyServer(root);
+  // Where TabbyAPI goes when the port is taken; down unless a test starts a stray there.
+  const stray = await tabbyServer(root);
   const commands: string[][] = [];
   const launches: Array<{ executable: string; args: string[]; options: { cwd: string; env: NodeJS.ProcessEnv; log: string } }> = [];
   const run: ProcessRun = vi.fn(async (executable, args, _signal, options) => {
@@ -103,12 +107,12 @@ async function harness(overrides: Partial<TabbyBoundaries> = {}) {
     return loopbackFetch(input, init);
   });
   const boundaries: Partial<TabbyBoundaries> = {
-    root, port: tabby.port, platform: 'win32', run, fetch, readyTimeoutMs: 3000,
-    detect: async () => rtx3090, freeBytes: async () => 1e12,
+    root, port: tabby.port, fallbackPort: stray.port, platform: 'win32', run, fetch, readyTimeoutMs: 3000,
+    detect: async () => rtx3090, freeBytes: async () => 1e12, listening: async () => tabby.state.up,
     launch: async (executable, args, options) => { launches.push({ executable, args, options }); tabby.state.up = true; return 4242; },
     ...overrides,
   };
-  return { root, tabby, commands, launches, run, fetch, boundaries, driver: tabbyDriver(boundaries) };
+  return { root, tabby, stray, commands, launches, run, fetch, boundaries, driver: tabbyDriver(boundaries) };
 }
 const context = (setupUI: SetupUI = ui()): RuntimeContext => ({ ui: setupUI, signal: signal() });
 const install = async (root: string) => JSON.parse(await readFile(join(root, 'teapilot-install.json'), 'utf8')) as TabbyInstall;
@@ -131,11 +135,12 @@ it('installs a pinned runtime, starts it, downloads and loads the preset as sepa
   expect(tabbyRequirements).toMatch(/^exllamav3 @ https:\/\/github\.com\/turboderp-org\/exllamav3\/releases\/download\/v1\.5\.1\//m);
   // Server: started once on the chosen GPU, without credentials in its environment.
   expect(h.launches).toHaveLength(1);
-  expect(h.launches[0]).toMatchObject({ executable: join(h.root, 'venv', 'Scripts', 'python.exe'), args: ['main.py'], options: { cwd: join(h.root, 'tabbyAPI'), env: { CUDA_DEVICE_ORDER: 'PCI_BUS_ID', CUDA_VISIBLE_DEVICES: '0' } } });
+  expect(h.launches[0]).toMatchObject({ executable: join(h.root, 'venv', 'Scripts', 'python.exe'), args: ['main.py'], options: { cwd: join(h.root, 'tabbyAPI'), env: { CUDA_DEVICE_ORDER: 'PCI_BUS_ID', CUDA_VISIBLE_DEVICES: '0', PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' } } });
   expect(h.launches[0]!.options.env.SOME_API_KEY).toBeUndefined();
   const config = await readFile(join(h.root, 'tabbyAPI', 'config.yml'), 'utf8');
   expect(config).toContain(`port: ${h.tabby.port}`);
   expect(config).toContain('host: 127.0.0.1');
+  expect(config).toContain('cache_size: 32768');
   expect(config).not.toContain('model_name');
   expect(h.tabby.state.requests.filter(item => item.path === '/v1/download')).toEqual([]);
 
@@ -247,7 +252,8 @@ it('reports state cheaply, gives hints for its own endpoint, and stops only its 
   expect(await h.driver.inspect(signal())).toMatchObject({ ready: false, detail: 'not installed' });
   await h.driver.ensure(context()); const [provisioned] = await h.driver.provision(context());
   const model = { ...(await loadConfig(h.root, {})).models.capable, ...provisioned!.model };
-  expect(await h.driver.inspect(signal())).toMatchObject({ ready: true, version: `TabbyAPI ${preset.runtimeRevision.slice(0, 7)}`, detail: `model ${preset.model.folder} loaded; NVIDIA GeForce RTX 3090 (GPU 0, 24 GB, driver 610.60)` });
+  expect(await h.driver.inspect(signal())).toMatchObject({ ready: true, version: `TabbyAPI ${preset.runtimeRevision.slice(0, 7)}`, detail: `model ${preset.model.folder} loaded with drafter ${preset.drafter!.folder}; NVIDIA GeForce RTX 3090 (GPU 0, 24 GB, driver 610.60)` });
+  expect((await h.driver.inspect(signal())).warnings).toBeUndefined();
   expect(h.tabby.state.requests.map(item => item.path)).not.toContain('/v1/chat/completions');
   expect(await h.driver.hint(model, signal())).toBeUndefined();
   expect(await h.driver.hint({ ...model, baseUrl: 'http://127.0.0.1:1/v1' }, signal())).toBeUndefined();
@@ -263,6 +269,78 @@ it('reports state cheaply, gives hints for its own endpoint, and stops only its 
   await writeFile(join(h.root, 'server.pid'), '999');
   await h.driver.stop(signal());
   expect(h.commands).toHaveLength(before);
+});
+
+it('waits for a busy or still-loading server instead of loading a second copy of the model', async () => {
+  const h = await harness();
+  await h.driver.ensure(context()); await h.driver.provision(context());
+  const launch = vi.fn(async () => { h.tabby.state.up = true; return 1; });
+  const comesBack = () => setTimeout(() => { h.tabby.state.up = true; }, 1200);
+
+  // The port is held, but /health does not answer in time.
+  h.tabby.state.up = false; comesBack();
+  await tabbyDriver({ ...h.boundaries, launch, listening: async () => true }).start(context());
+  // Not bound yet: the recorded server is still loading its model.
+  h.tabby.state.up = false; comesBack();
+  const run: ProcessRun = async executable => ({ code: 0, stdout: executable === 'tasklist' ? '"python.exe","4242","Console","1","31,000,000 K"' : '' });
+  await tabbyDriver({ ...h.boundaries, launch, run }).ensure(context());
+  expect(launch).not.toHaveBeenCalled();
+
+  // A stale process ID that now belongs to another program does not block a start.
+  h.tabby.state.up = false;
+  await tabbyDriver({ ...h.boundaries, launch, run: async () => ({ code: 0, stdout: '"notepad.exe","4242"' }) }).start(context());
+  expect(launch).toHaveBeenCalledTimes(1);
+});
+
+it('reports and stops a second server of its own on the fallback port, never a foreign one', async () => {
+  const h = await harness();
+  await h.driver.ensure(context()); await h.driver.provision(context());
+  h.stray.state.up = true;
+  const warnings = async () => (await h.driver.inspect(signal())).warnings ?? [];
+  expect(await warnings()).toEqual([expect.stringContaining(`second Optimized NVIDIA server is running on port ${h.stray.port}`)]);
+
+  const listeners: Record<string, string> = { [h.tabby.port]: '4242\r\n', [h.stray.port]: '5151\r\n' };
+  const commands: string[][] = [];
+  const run: ProcessRun = async (executable, args) => { commands.push([executable, ...args]); return { code: 0, stdout: executable === 'powershell' ? listeners[/-LocalPort (\d+)/.exec(args.at(-1)!)![1]!]! : '' }; };
+  await tabbyDriver({ ...h.boundaries, run }).stop(signal());
+  expect(commands.filter(command => command[0] === 'taskkill')).toEqual([['taskkill', '/PID', '4242', '/T', '/F'], ['taskkill', '/PID', '5151', '/T', '/F']]);
+
+  commands.length = 0;
+  h.stray.state.foreign = true;
+  expect(await warnings()).toEqual([]);
+  await tabbyDriver({ ...h.boundaries, run }).stop(signal());
+  expect(commands.filter(command => command[0] === 'taskkill')).toEqual([['taskkill', '/PID', '4242', '/T', '/F']]);
+});
+
+it('stops the server holding the port even when the recorded process ID is from a launch that failed', async () => {
+  const h = await harness();
+  await h.driver.ensure(context());
+  await writeFile(join(h.root, 'server.pid'), '38616');
+  const commands: string[][] = [];
+  const run: ProcessRun = async (executable, args) => { commands.push([executable, ...args]); return { code: 0, stdout: executable === 'powershell' ? '32664\r\n' : '' }; };
+  await tabbyDriver({ ...h.boundaries, run }).stop(signal());
+  expect(commands.filter(command => command[0] === 'taskkill')).toEqual([['taskkill', '/PID', '32664', '/T', '/F']]);
+});
+
+it('reloads a model running without its drafter, and warns about it and about a log full of errors', async () => {
+  const h = await harness();
+  await h.driver.ensure(context()); await h.driver.provision(context());
+  h.tabby.state.loaded!.draft = undefined;
+  await writeFile(join(h.root, 'server.log'), 'UnicodeEncodeError\n--- Logging error in Loguru Handler #1 ---\n');
+  expect((await h.driver.inspect(signal())).warnings).toEqual([expect.stringContaining('drafter is not loaded'), expect.stringContaining('logging errors')]);
+  h.tabby.state.requests.length = 0;
+  await h.driver.start(context());
+  expect(h.tabby.state.requests.find(item => item.path === '/v1/model/load')?.body).toMatchObject({ draft_model: { draft_model_name: preset.drafter!.folder } });
+  expect((await h.driver.inspect(signal())).warnings).toEqual([expect.stringContaining('logging errors')]);
+});
+
+it('sets a large server log aside before starting the server', async () => {
+  const h = await harness();
+  await mkdir(h.root, { recursive: true });
+  await writeFile(join(h.root, 'server.log'), Buffer.alloc(20_000_001));
+  await h.driver.ensure(context());
+  expect(existsSync(join(h.root, 'server.log.1'))).toBe(true);
+  expect(existsSync(join(h.root, 'server.log'))).toBe(false);
 });
 
 it('sets up Optimized NVIDIA end to end: only verified reasoning tiers are enabled, and fast stays separate', async () => {

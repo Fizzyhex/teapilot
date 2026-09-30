@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
+import { connect } from 'node:net';
 import { mkdir, open, readdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -42,7 +43,11 @@ export interface TabbyInstall {
 /** Process, file system and network boundaries, replaced in tests. */
 export interface TabbyBoundaries {
   root: string; port: number; platform: NodeJS.Platform; preset: TabbyPreset;
+  /** Where TabbyAPI silently moves when its port is taken (port + 1 in its main.py). */
+  fallbackPort: number;
   run: ProcessRun;
+  /** Whether something accepts TCP connections on a local port. */
+  listening(port: number): Promise<boolean>;
   /** Start a detached server process whose output goes to log; resolves with its process ID. */
   launch(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; log: string }): Promise<number>;
   detect(signal: AbortSignal): Promise<NvidiaDetection>;
@@ -84,6 +89,16 @@ export function loopbackFetch(input: string | URL | Request, init: RequestInit =
   });
 }
 
+function listening(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = connect({ host: '127.0.0.1', port });
+    const done = (open: boolean) => { socket.destroy(); resolve(open); };
+    socket.setTimeout(1000, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
 async function freeBytes(path: string): Promise<number> {
   while (!await exists(path)) { const parent = dirname(path); if (parent === path) break; path = parent; }
   const disk = await statfs(path);
@@ -110,7 +125,8 @@ const gb = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
 const short = (revision: string) => revision.slice(0, 7);
 const lockOf = (revision: string) => createHash('sha256').update(`${revision}\n${tabbyPython}\n${tabbyRequirements}`).digest('hex');
 
-interface ModelCard { id?: string; parameters?: { max_seq_len?: number; draft?: { id?: string } } }
+// The ExLlamaV3 backend never fills the card's draft field; /v1/model/draft/list names the loaded drafter.
+interface ModelCard { id?: string; parameters?: { max_seq_len?: number } }
 
 /**
  * TabbyAPI with ExLlamaV3 on one NVIDIA GPU, installed by TeaPilot into a
@@ -162,17 +178,66 @@ export class TabbyDriver implements RuntimeDriver {
       && await exists(this.paths.python) && await exists(join(this.paths.source, 'main.py'));
   }
 
-  private async request(path: string, options: { signal: AbortSignal; key?: string; body?: unknown; timeoutMs?: number }): Promise<Response> {
-    return this.io.fetch(`http://127.0.0.1:${this.io.port}${path}`, {
+  private async request(path: string, options: { signal: AbortSignal; key?: string; body?: unknown; timeoutMs?: number; port?: number }): Promise<Response> {
+    return this.io.fetch(`http://127.0.0.1:${options.port ?? this.io.port}${path}`, {
       method: options.body === undefined ? 'GET' : 'POST', redirect: 'error',
       headers: { ...options.key ? { Authorization: `Bearer ${options.key}` } : {}, ...options.body === undefined ? {} : { 'Content-Type': 'application/json' } },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? 10000)]),
     });
   }
-  private async healthy(signal: AbortSignal): Promise<boolean> {
-    try { const response = await this.request('/health', { signal, timeoutMs: 3000 }); await response.body?.cancel(); return response.ok; }
+  private async healthy(signal: AbortSignal, port?: number): Promise<boolean> {
+    try { const response = await this.request('/health', { signal, timeoutMs: 3000, port }); await response.body?.cancel(); return response.ok; }
     catch { signal.throwIfAborted(); return false; }
+  }
+  /** A server that accepts this install's admin key is one TeaPilot started. */
+  private async owns(install: TabbyInstall, port: number, signal: AbortSignal): Promise<boolean> {
+    try { const response = await this.request('/v1/model/list', { signal, key: install.keys.admin, port }); await response.body?.cancel(); return response.ok; }
+    catch { signal.throwIfAborted(); return false; }
+  }
+  private async loadedDrafter(install: TabbyInstall, signal: AbortSignal): Promise<string | undefined> {
+    try {
+      const response = await this.request('/v1/model/draft/list', { signal, key: install.keys.api });
+      return response.ok ? (await response.json() as { data?: Array<{ id?: string }> }).data?.[0]?.id : (await response.body?.cancel(), undefined);
+    } catch { signal.throwIfAborted(); return undefined; }
+  }
+  /**
+   * The port is held, or the recorded server is still loading its model (TabbyAPI
+   * binds only after loading). Launching then would load a second copy onto the GPU.
+   */
+  private async occupied(signal: AbortSignal): Promise<boolean> {
+    if (await this.io.listening(this.io.port)) return true;
+    const pid = Number(await readFile(this.paths.pid, 'utf8').catch(() => ''));
+    if (!pid) return false;
+    const found = await this.io.run('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], signal).catch(() => undefined);
+    return /^"python\.exe"/im.test(found?.stdout ?? '');
+  }
+  private async waitHealthy(signal: AbortSignal): Promise<void> {
+    const deadline = Date.now() + this.io.readyTimeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.healthy(signal)) return;
+      await delay(1000, undefined, { signal });
+    }
+    throw new RuntimeError('not-ready', `The Optimized NVIDIA server did not become ready. Its log is ${this.paths.log}.`, await this.logTail());
+  }
+  /** Waits for a busy or loading server instead of starting another; false when none is there. */
+  private async awaitRunning(signal: AbortSignal): Promise<boolean> {
+    if (await this.healthy(signal)) return true;
+    if (!await this.occupied(signal)) return false;
+    await this.waitHealthy(signal);
+    return true;
+  }
+  private async kill(pid: number, signal: AbortSignal): Promise<void> {
+    const result = this.io.platform === 'win32'
+      ? await this.io.run('taskkill', ['/PID', String(pid), '/T', '/F'], signal)
+      : (process.kill(pid), { code: 0, stdout: '' });
+    if (result.code !== 0) throw new RuntimeError('runtime', 'The Optimized NVIDIA server could not be stopped.', result.stdout);
+  }
+  /** The process listening on a local port. */
+  private async listener(port: number, signal: AbortSignal): Promise<number | undefined> {
+    const result = await this.io.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue).OwningProcess`], signal);
+    const pid = Number(/^\s*(\d+)\s*$/m.exec(result.stdout)?.[1]);
+    return pid > 0 ? pid : undefined;
   }
   private async currentModel(install: TabbyInstall, signal: AbortSignal): Promise<ModelCard | undefined> {
     try {
@@ -265,7 +330,7 @@ export class TabbyDriver implements RuntimeDriver {
       'network:', '  host: 127.0.0.1', `  port: ${this.io.port}`, '  disable_auth: false',
       'model:', `  model_dir: ${models}`, '  inline_model_loading: false',
       ...loaded ? [`  model_name: ${quote(preset.model.folder)}`] : [],
-      `  max_seq_len: ${preset.context}`, `  cache_mode: ${preset.load.cache_mode}`, `  max_batch_size: ${preset.load.max_batch_size}`,
+      `  max_seq_len: ${preset.context}`, `  cache_size: ${preset.context}`, `  cache_mode: ${preset.load.cache_mode}`, `  max_batch_size: ${preset.load.max_batch_size}`,
       '  use_as_default: ["max_batch_size"]',
       'draft_model:', `  draft_model_dir: ${models}`,
       ...loaded && preset.drafter ? [`  draft_model_name: ${quote(preset.drafter.folder)}`] : [],
@@ -275,18 +340,16 @@ export class TabbyDriver implements RuntimeDriver {
   }
 
   private async startServer(install: TabbyInstall, signal: AbortSignal): Promise<void> {
+    if (((await stat(this.paths.log).catch(() => undefined))?.size ?? 0) > 20_000_000) await rename(this.paths.log, `${this.paths.log}.1`);
     const pid = await this.io.launch(this.paths.python, ['main.py'], {
       cwd: this.paths.source, log: this.paths.log,
       // nvidia-smi numbers GPUs in PCI bus order; CUDA must use the same order to run on the chosen one.
-      env: childEnvironment({ CUDA_DEVICE_ORDER: 'PCI_BUS_ID', CUDA_VISIBLE_DEVICES: String(install.gpu), PYTHONUNBUFFERED: '1' }),
+      // Output goes to a file, whose default Windows code page cannot encode the server's box drawing;
+      // every line would then add a logging traceback.
+      env: childEnvironment({ CUDA_DEVICE_ORDER: 'PCI_BUS_ID', CUDA_VISIBLE_DEVICES: String(install.gpu), PYTHONUNBUFFERED: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }),
     }).catch(async error => { throw new RuntimeError('runtime', 'The Optimized NVIDIA server could not start.', String(error)); });
     await writeFile(this.paths.pid, String(pid));
-    const deadline = Date.now() + this.io.readyTimeoutMs;
-    while (Date.now() < deadline) {
-      if (await this.healthy(signal)) return;
-      await delay(1000, undefined, { signal });
-    }
-    throw new RuntimeError('not-ready', `The Optimized NVIDIA server did not become ready. Its log is ${this.paths.log}.`, await this.logTail());
+    await this.waitHealthy(signal);
   }
 
   /** Install or reuse the runtime, then start the server or reuse the running one. */
@@ -305,7 +368,7 @@ export class TabbyDriver implements RuntimeDriver {
       await this.stop(signal);
       install = await this.install(ui, signal, previous, assessment.gpu.index);
     }
-    if (await this.healthy(signal)) {
+    if (await during(ui, 'Checking for a running Optimized NVIDIA server...', () => this.awaitRunning(signal))) {
       await this.folders(install, signal);
       ui.log('Using the running Optimized NVIDIA server.');
       return;
@@ -342,7 +405,7 @@ export class TabbyDriver implements RuntimeDriver {
   private async load(install: TabbyInstall, ui: SetupUI, signal: AbortSignal): Promise<void> {
     const preset = this.io.preset;
     const current = await this.currentModel(install, signal);
-    if (current?.id === preset.model.folder && current.parameters?.max_seq_len === preset.context && current.parameters?.draft?.id === preset.drafter?.folder) {
+    if (current?.id === preset.model.folder && current.parameters?.max_seq_len === preset.context && await this.loadedDrafter(install, signal) === preset.drafter?.folder) {
       ui.log('The model is already loaded.');
       return;
     }
@@ -410,26 +473,27 @@ export class TabbyDriver implements RuntimeDriver {
   async start({ ui, signal }: RuntimeContext): Promise<void> {
     const install = await this.readInstall();
     if (!install || !await this.installed(install)) throw new RuntimeError('runtime', 'The Optimized NVIDIA runtime is not installed. Run teapilot setup and choose Optimized NVIDIA.');
-    if (await this.healthy(signal)) await this.folders(install, signal);
+    if (await during(ui, 'Checking for a running Optimized NVIDIA server...', () => this.awaitRunning(signal))) await this.folders(install, signal);
     else {
       await this.configure(install);
       await during(ui, 'Starting the Optimized NVIDIA server...', () => this.startServer(install, signal));
     }
-    const current = await this.currentModel(install, signal);
-    if (current?.id !== this.io.preset.model.folder) await during(ui, 'Loading the model onto the GPU...', () => this.load(install, ui, signal));
+    await during(ui, 'Loading the model onto the GPU...', () => this.load(install, ui, signal));
     ui.log(`Optimized NVIDIA is running at ${this.baseUrl}.`);
   }
 
   async stop(signal: AbortSignal): Promise<void> {
     const install = await this.readInstall();
-    const pid = Number(await readFile(this.paths.pid, 'utf8').catch(() => ''));
-    // Only a server that accepts this install's admin key is stopped; a stale process ID is never trusted alone.
-    if (install && pid && await this.healthy(signal)) {
-      await this.folders(install, signal);
-      const result = this.io.platform === 'win32'
-        ? await this.io.run('taskkill', ['/PID', String(pid), '/T', '/F'], signal)
-        : (process.kill(pid), { code: 0, stdout: '' });
-      if (result.code !== 0) throw new RuntimeError('runtime', 'The Optimized NVIDIA server could not be stopped.', result.stdout);
+    const recorded = Number(await readFile(this.paths.pid, 'utf8').catch(() => '')) || undefined;
+    // Only a server that accepts this install's admin key is stopped, and it is found by the port it
+    // holds: the recorded process ID can belong to a later launch that failed. A second server started
+    // while the first was busy moves to the fallback port and holds its own copy of the model.
+    if (install) for (const port of [this.io.port, this.io.fallbackPort]) {
+      if (!await this.healthy(signal, port)) continue;
+      if (port === this.io.port) await this.folders(install, signal);
+      else if (!await this.owns(install, port, signal)) continue;
+      const pid = await this.listener(port, signal) ?? (port === this.io.port ? recorded : undefined);
+      if (pid) await this.kill(pid, signal);
     }
     await rm(this.paths.pid, { force: true });
   }
@@ -442,9 +506,21 @@ export class TabbyDriver implements RuntimeDriver {
     const hardware = gpu ? describeGpu(gpu) : 'GPU unavailable';
     const healthy = await this.healthy(signal);
     const current = healthy ? await this.currentModel(install, signal) : undefined;
+    const drafter = current?.id ? await this.loadedDrafter(install, signal) : undefined;
+    const warnings: string[] = [];
+    if (current?.id && this.io.preset.drafter && drafter !== this.io.preset.drafter.folder) {
+      warnings.push('The drafter is not loaded, so generation is about 3x slower. Load it with teapilot runtime start.');
+    }
+    if (await this.healthy(signal, this.io.fallbackPort) && await this.owns(install, this.io.fallbackPort, signal)) {
+      warnings.push(`A second Optimized NVIDIA server is running on port ${this.io.fallbackPort} and competing for GPU memory, which makes generation very slow. Stop both with teapilot runtime stop, then run teapilot runtime start.`);
+    }
+    if ((await this.logTail()).includes('--- Logging error')) {
+      warnings.push(`The server log (${this.paths.log}) is filling with logging errors, which slows the server. Restart it with teapilot runtime stop, then teapilot runtime start.`);
+    }
     return {
       ownership: 'managed', ready: Boolean(current?.id), version: `TabbyAPI ${short(install.revision)}`, baseUrl: this.baseUrl,
-      detail: `${healthy ? current?.id ? `model ${current.id} loaded` : 'no model loaded' : 'stopped'}; ${hardware}`,
+      detail: `${healthy ? current?.id ? `model ${current.id} loaded${drafter ? ` with drafter ${drafter}` : ''}` : 'no model loaded' : 'stopped'}; ${hardware}`,
+      ...warnings.length ? { warnings } : {},
     };
   }
 
@@ -459,9 +535,10 @@ export class TabbyDriver implements RuntimeDriver {
 }
 
 export function tabbyDriver(overrides: Partial<TabbyBoundaries> = {}): TabbyDriver {
+  const port = overrides.port ?? 5310;
   return new TabbyDriver({
-    root: join(homedir(), '.teapilot', 'runtimes', 'tabbyapi'), port: 5310, platform: process.platform, preset: tabbyPresets[0]!,
-    run: runProcess, launch: launchDetached, detect: signal => detectNvidia(signal), fetch: loopbackFetch, freeBytes,
+    root: join(homedir(), '.teapilot', 'runtimes', 'tabbyapi'), port, fallbackPort: port + 1, platform: process.platform, preset: tabbyPresets[0]!,
+    run: runProcess, listening, launch: launchDetached, detect: signal => detectNvidia(signal), fetch: loopbackFetch, freeBytes,
     readyTimeoutMs: 10 * 60 * 1000,
     ...overrides,
   });

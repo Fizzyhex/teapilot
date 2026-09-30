@@ -97,11 +97,12 @@ it('doctor reports runtime state and runtime hints from drivers, without generat
   f.config.models.fast.enabled = false;
   f.config.models.capable.baseUrl = 'http://127.0.0.1:1/v1';
   const hint = vi.fn(async () => 'Fake runtime is stopped; start it.');
-  const runtimes: Runtimes = { ollama: fake({ inspect: async () => ({ ownership: 'managed', ready: false, baseUrl: 'http://127.0.0.1:1/v1', detail: 'installed' }), hint }) };
+  const runtimes: Runtimes = { ollama: fake({ inspect: async () => ({ ownership: 'managed', ready: false, baseUrl: 'http://127.0.0.1:1/v1', detail: 'installed', warnings: ['A second server holds the GPU.'] }), hint }) };
   const log = vi.fn();
   expect(await doctor(f.config, f.cwd, { log, consent: async () => false, runtimes })).toBe(false);
   const output = log.mock.calls.map(call => call[0]).join('\n');
   expect(output).toContain('Runtime: Fake runtime: NOT RUNNING; installed');
+  expect(output).toContain('Runtime: Fake runtime: WARNING A second server holds the GPU.');
   expect(output).toContain('Fake runtime is stopped; start it.');
   expect(hint).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: 'http://127.0.0.1:1/v1' }), expect.anything());
   // Reasoning tiers the model has not verified are reported, not probed.

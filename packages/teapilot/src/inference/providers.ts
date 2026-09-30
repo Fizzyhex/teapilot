@@ -118,7 +118,19 @@ function errorMessage(model: Model<'openai-completions'>, message: string): Assi
 
 // Observe just provider billing metadata while pi parses the model/tool stream.
 // Forward the original bytes without retaining text, prompts, or tool arguments.
-function observeBilling(response: Response, observed: { cost?: number; model?: string; completeUsage?: boolean }): Response {
+interface Observed { cost?: number; model?: string; completeUsage?: boolean; sent?: number; firstChoice?: number; lastChoice?: number }
+
+/** Decode speed, and the wait for the first token (mostly prompt reading), from when stream chunks arrived. */
+export function streamSpeed(observed: Observed, outputTokens: number | undefined): { firstTokenMs?: number; outputTokensPerSecond?: number } {
+  const { sent, firstChoice, lastChoice } = observed;
+  if (sent === undefined || firstChoice === undefined || lastChoice === undefined) return {};
+  const decoding = (lastChoice - firstChoice) / 1000;
+  // The first token opens the interval; the rest were decoded within it.
+  const rate = outputTokens && outputTokens > 1 && decoding > 0 ? Math.round((outputTokens - 1) / decoding * 10) / 10 : undefined;
+  return { firstTokenMs: Math.round(firstChoice - sent), ...rate === undefined ? {} : { outputTokensPerSecond: rate } };
+}
+
+function observeBilling(response: Response, observed: Observed): Response {
   if (!response.body || !response.ok) return response;
   const decoder = new TextDecoder();
   let pending = '';
@@ -131,8 +143,9 @@ function observeBilling(response: Response, observed: { cost?: number; model?: s
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
         try {
-          const value = JSON.parse(line.slice(5)) as { model?: unknown; usage?: { cost?: unknown; prompt_tokens?: unknown; completion_tokens?: unknown } };
+          const value = JSON.parse(line.slice(5)) as { model?: unknown; choices?: unknown; usage?: { cost?: unknown; prompt_tokens?: unknown; completion_tokens?: unknown } };
           if (typeof value.model === 'string') observed.model = value.model;
+          if (Array.isArray(value.choices) && value.choices.length) { observed.lastChoice = performance.now(); observed.firstChoice ??= observed.lastChoice; }
           if (typeof value.usage?.cost === 'number' && Number.isFinite(value.usage.cost) && value.usage.cost >= 0) observed.cost = value.usage.cost;
           if (value.usage) observed.completeUsage = [value.usage.prompt_tokens, value.usage.completion_tokens].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
         } catch { /* pi owns protocol parsing; [DONE] is not JSON. */ }
@@ -180,7 +193,7 @@ export function guardedStream(
       let sent = false;
       let lexicalTokens: number | undefined;
       let maxTokens = cap;
-      const observed: { cost?: number; model?: string; completeUsage?: boolean } = {};
+      const observed: Observed = {};
       // requestTimeoutMs bounds a stall, not a whole stream: long local generations keep
       // producing tokens, and attemptTimeoutMs already bounds the attempt overall.
       const stalled = new AbortController();
@@ -227,6 +240,7 @@ export function guardedStream(
             try { reservation = await governor.reserve(callCeiling(spec), `${tier}:${spec.id}`); }
             catch (error) { if (error instanceof BudgetError) state.stop = 'budget'; throw error; }
             sent = true;
+            observed.sent = performance.now();
             const response = await fetch(input, { ...init, redirect: 'error', signal });
             if (response.status === 400 || response.status === 404 || response.status === 422) state.stop = 'unsupported';
             if (!response.ok) {
@@ -259,7 +273,7 @@ export function guardedStream(
           const cost = reported !== undefined ? reported : 0;
           const basis = reported !== undefined ? 'provider-reported' : validUsage ? 'configured-rates' : 'reserved-maximum';
           const charged = await governor.settle(reservation, cost, basis);
-          await telemetry.event('usage', { stage: 'inference', tier, model: spec.id, providerModel: observed.model, usage, chargedUsd: charged, basis });
+          await telemetry.event('usage', { stage: 'inference', tier, model: spec.id, providerModel: observed.model, usage, chargedUsd: charged, basis, ...complete ? streamSpeed(observed, usage?.output) : {} });
         }
       }
       if (!completed) throw new Error('Provider returned no final response');

@@ -78,6 +78,7 @@ async function runtimeStatus(config: Config, log: (text: string) => void, signal
     const state = await driver.inspect(signal).catch(() => { signal.throwIfAborted(); return undefined; });
     if (!state?.baseUrl || !urls.has(state.baseUrl.replace(/\/$/, ''))) continue;
     log(`Runtime: ${driver.label}: ${state.ready ? `running${state.version ? ` (${state.version})` : ''}` : 'NOT RUNNING'}${state.detail ? `; ${state.detail}` : ''}`);
+    for (const warning of state.warnings ?? []) log(`Runtime: ${driver.label}: WARNING ${warning}`);
   }
 }
 

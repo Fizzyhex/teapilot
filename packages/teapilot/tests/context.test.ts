@@ -6,7 +6,14 @@ import { runAttempt } from '../src/agents/run.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { calibratedTokens, estimateInputTokens, estimateTextTokens, MAX_PAYLOAD_BYTES } from '../src/inference/context.js';
-import { wellFormed } from '../src/inference/providers.js';
+import { streamSpeed, wellFormed } from '../src/inference/providers.js';
+
+it('measures decode speed from the first to the last streamed token, apart from the wait for the first', () => {
+  // 101 tokens: the first at 900 ms, the last one second later.
+  expect(streamSpeed({ sent: 100, firstChoice: 1000, lastChoice: 2000 }, 101)).toEqual({ firstTokenMs: 900, outputTokensPerSecond: 100 });
+  expect(streamSpeed({ sent: 100, firstChoice: 1000, lastChoice: 1000 }, 1)).toEqual({ firstTokenMs: 900 });
+  expect(streamSpeed({ sent: 100 }, 50)).toEqual({});
+});
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });

@@ -56,7 +56,11 @@ export interface ProvisionedModel {
   apiKey?: string | null;
 }
 
-export interface RuntimeInspection { ownership: RuntimeOwnership; ready: boolean; version?: string; baseUrl?: string; detail?: string }
+export interface RuntimeInspection {
+  ownership: RuntimeOwnership; ready: boolean; version?: string; baseUrl?: string; detail?: string;
+  /** Problems that leave the runtime working but slow or wasteful. */
+  warnings?: string[];
+}
 
 export interface RuntimeContext { ui: SetupUI; signal: AbortSignal; verbose?: boolean }
 
