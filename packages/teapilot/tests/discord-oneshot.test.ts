@@ -49,6 +49,7 @@ async function oneShots() {
   /** A slash command; resolves with its private note, or with the note its buttons settle on after `pick` is pressed. */
   const command = (authorId: string, text: string, oneShot = true) => new Promise<string | undefined>(resolve => handlers!.command({
     authorId, authorIsBot: false, guildId: 'guild', channelId: 'channel', ownThread: false, mentionsBot: false, text, oneShot, respond: async note => resolve(note),
+    browse: async text => resolve(text),
     choose: async note => { notes.push(note); return { choice: pick, settle: async settled => { notes.push(settled); resolve(settled); }, transport: () => transport }; },
   }));
   const complete = (authorId: string, text: string, typed: string) => new Promise<string[]>(resolve => handlers!.complete!({
@@ -148,7 +149,7 @@ it('clears the conversation and the workspace separately, and asks before cleari
   expect(await command('op', '/workspace tree')).toMatch(/notes\.txt/);
   press(0);
   expect(await command('op', '/convo clear')).toBe('Cleared the conversation. Cleared the workspace too.');
-  expect(await command('op', '/workspace tree')).toMatch(/No files yet\./);
+  expect(await command('op', '/workspace tree')).toMatch(/no files yet\./);
 
   // In a collab, clearing what everyone shares asks first.
   await command('op', '/collab join');
@@ -179,7 +180,7 @@ it('answers /btw from the conversation, with read-only tools, and keeps it out o
   expect(prompts[1]).toContain('Side question (/btw)');
   expect(tools[0]).toEqual(expect.arrayContaining(['write', 'file_send']));
   expect(tools[1]).toEqual(expect.arrayContaining(['read', 'file_send']));
-  expect(tools[1]!.filter(name => ['write', 'edit', 'bash', 'powershell'].includes(name) || /^(play|access)_/.test(name))).toEqual([]);
+  expect(tools[1]!.filter(name => ['write', 'edit', 'bash'].includes(name) || /^(play|access)_/.test(name))).toEqual([]);
   // One quiet answer: no status card or result line.
   expect(sent.slice(before)).toHaveLength(1);
   expect(sent.at(-1)).toMatch(/^answer 2\n-# this is an aside/);

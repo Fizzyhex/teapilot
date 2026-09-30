@@ -33,7 +33,7 @@ export const keptNote = (count: number): string | undefined =>
   count ? `note: the workspace still contains ${files(count)}.` : undefined;
 
 /** Runs `/workspace …`; the reply to show, or undefined when the text is not a workspace command. */
-export async function workspaceCommand(controls: WorkspaceControls | undefined, text: string, options: { fence?: boolean } = {}): Promise<string | undefined> {
+export async function workspaceCommand(controls: WorkspaceControls | undefined, text: string): Promise<string | undefined> {
   const match = /^\/workspace(?:\s+(\S+))?(?:\s+([\s\S]*))?$/i.exec(text.trim());
   if (!match) return undefined;
   if (!controls) return 'This session has no workspace.';
@@ -50,7 +50,7 @@ export async function workspaceCommand(controls: WorkspaceControls | undefined, 
   if (action === 'tree') {
     const name = controls.name();
     const tree = controls.tree(argument || undefined);
-    const body = tree ? (options.fence ? `\`\`\`py\n${tree}\n\`\`\`` : tree) : argument ? 'No files there.' : 'No files yet.';
+    const body = tree ?? (argument ? 'No files there.' : 'No files yet.');
     return name ? `${name}\n${body}` : body;
   }
   return `Workspace commands: ${workspaceHelp}`;

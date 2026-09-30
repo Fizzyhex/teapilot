@@ -154,7 +154,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       // Rebuild declarations after additional grants without rereading instructions
       // or reinventorying. Tool execution still checks the current effective policy.
       setup.tools.push(...repositorySetup.tools.filter(tool => effectiveConfig.policy.permissions.includes(
-        ['write', 'edit'].includes(tool.name) ? 'repository.write' : ['bash', 'powershell'].includes(tool.name) ? 'repository.shell' : 'repository.read')));
+        ['write', 'edit'].includes(tool.name) ? 'repository.write' : tool.name === 'bash' ? 'repository.shell' : 'repository.read')));
       setup.systemPrompt += '\n' + repositorySetup.systemPrompt;
     }
     const mode = input.mode ?? modeFor(input.workload);
@@ -453,7 +453,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         if (size !== undefined) evidence.fileSizes.set(data.path, size);
         toolDetails.set(toolCall.id, { path: shownPath(data.path), size });
       } else if (toolCall.name === 'read' && data.path) toolDetails.set(toolCall.id, { path: shownPath(data.path) });
-      else if (['bash', 'powershell'].includes(toolCall.name) && data.command) toolDetails.set(toolCall.id, { command: data.command });
+      else if (toolCall.name === 'bash' && data.command) toolDetails.set(toolCall.id, { command: data.command });
       else if (toolCall.name === 'web_read' && typeof data.url === 'string') toolDetails.set(toolCall.id, { url: shortUrl(data.url) });
       else if (toolCall.name === 'delegate_task' && typeof (result.details as { junior?: unknown } | undefined)?.junior === 'string') toolDetails.set(toolCall.id, { to: (result.details as { junior: string }).junior });
       const note = evidence.warning ?? continueNote;

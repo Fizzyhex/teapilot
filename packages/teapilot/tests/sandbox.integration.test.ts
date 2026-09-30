@@ -18,7 +18,6 @@ if (existsSync(installed)) cpSync(installed, toolsFolder(state), { recursive: tr
 const sandbox = new SrtSandbox(state);
 const status = await sandbox.status();
 const store = WorkspaceStore.at(state);
-const shell = process.platform === 'win32';
 const offline: RunOptions = { timeoutSeconds: 60, network: async () => false };
 const tool = (kind: string) => status.tools.find(entry => entry.kind === kind)?.name;
 const python = status.tools.find(entry => entry.kind === 'python')?.name;
@@ -34,19 +33,19 @@ describe.skipIf(!status.available)('sandboxed workspace commands', () => {
   afterAll(async () => { await sandbox.close(); await rm(state, { recursive: true, force: true }); });
 
   it('reads and writes its own workspace by relative names', async () => {
-    const result = await sandbox.run(mine, shell ? 'echo hello > out.txt; Get-Content out.txt' : 'echo hello > out.txt && cat out.txt', offline);
+    const result = await sandbox.run(mine, 'echo hello > out.txt && cat out.txt', offline);
     expect(result).toMatchObject({ exitCode: 0, timedOut: false });
     expect(result.output).toContain('hello');
   }, 60_000);
 
   it('cannot read another conversation\'s workspace or teapilot\'s state, nor write outside its own', async () => {
-    const read = (path: string) => sandbox.run(mine, shell ? `type "${path}"` : `cat "${path}"`, offline);
+    const read = (path: string) => sandbox.run(mine, `cat "${path}"`, offline);
     expect((await read(join(other, 'secret.txt'))).output).not.toContain('other conversation');
     expect((await read(join(state, 'host-secret.txt'))).output).not.toContain('teapilot state');
     const escape = join(state, 'escaped.txt');
-    await sandbox.run(mine, shell ? `echo x> "${escape}"` : `echo x > "${escape}"`, offline);
+    await sandbox.run(mine, `echo x > "${escape}"`, offline);
     expect(existsSync(escape)).toBe(false);
-    await sandbox.run(mine, shell ? `echo x> "${join(other, 'planted.txt')}"` : `echo x > "${join(other, 'planted.txt')}"`, offline);
+    await sandbox.run(mine, `echo x > "${join(other, 'planted.txt')}"`, offline);
     expect(existsSync(join(other, 'planted.txt'))).toBe(false);
   }, 120_000);
 
@@ -85,9 +84,7 @@ describe.skipIf(!status.available)('sandboxed workspace commands', () => {
   }, 60_000);
 
   it('names the proxy for websockets too, so clients that look it up by scheme still go through it', async () => {
-    const result = await sandbox.run(mine, shell
-      ? 'Write-Output "https=$env:HTTPS_PROXY"; Write-Output "wss=$env:WSS_PROXY"; Write-Output "http=$env:HTTP_PROXY"; Write-Output "ws=$env:WS_PROXY"'
-      : 'echo "https=$HTTPS_PROXY"; echo "wss=$WSS_PROXY"; echo "http=$HTTP_PROXY"; echo "ws=$WS_PROXY"', offline);
+    const result = await sandbox.run(mine, 'echo "https=$HTTPS_PROXY"; echo "wss=$WSS_PROXY"; echo "http=$HTTP_PROXY"; echo "ws=$WS_PROXY"', offline);
     const value = (name: string) => result.output.match(new RegExp(`^${name}=(.*)$`, 'm'))?.[1]?.trim();
     expect(value('https'), result.output).toMatch(/^http:\/\//);
     expect(value('wss')).toBe(value('https'));

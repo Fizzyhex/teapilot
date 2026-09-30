@@ -46,6 +46,7 @@ const mediaTypes: Record<string, string> = {
 const typeOf = (name: string) => mediaTypes[extname(name).toLowerCase()] ?? 'application/octet-stream';
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 
+export { size as formatBytes };
 const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 interface TreeFolder { folders: Map<string, TreeFolder>; files: { name: string; size: string }[] }
@@ -360,7 +361,7 @@ export class WorkspaceStore {
     const cells = (row: TreeRow) => row.left.length + (row.icon ? 3 : 0) + row.text.length;
     const width = Math.max(...rows.map(cells)) + 2;
     const sizes = Math.max(...rows.map(row => row.size?.length ?? 0));
-    const lines = [`📂 ${prefix ? prefix.split('/').pop() : 'workspace'}/`, ...rows.map(row =>
+    const lines = [`📂 ${prefix || 'workspace'}/`, ...rows.map(row =>
       `${row.left}${row.icon ? `${row.icon} ` : ''}${row.text}${row.size ? `${' '.repeat(width - cells(row) + sizes - row.size.length)}${row.size}` : ''}`)];
     return (lines.length > limit ? [...lines.slice(0, limit), `… and ${lines.length - limit} more`] : lines).join('\n');
   }

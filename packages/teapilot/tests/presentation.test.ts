@@ -35,7 +35,7 @@ it('describes a completed tool call for the progress trail', () => {
   expect(describeTool({ type: 'tool_execution_end', tool: 'write', path: 'index.html', size: 13312 })).toBe('write index.html (13 KB)');
   expect(describeTool({ type: 'tool_execution_end', tool: 'edit', path: 'index.html', size: 200 })).toBe('edit index.html (200 B)');
   expect(describeTool({ type: 'tool_execution_end', tool: 'read', path: 'index.html' })).toBe('read index.html');
-  expect(describeTool({ type: 'tool_execution_end', tool: 'powershell', command: 'mkdir x', isError: true })).toBe('shell: mkdir x — failed');
+  expect(describeTool({ type: 'tool_execution_end', tool: 'bash', command: 'mkdir x', isError: true })).toBe('shell: mkdir x — failed');
   expect(describeTool({ type: 'tool_execution_end', tool: 'bash', command: 'npm test' })).toBe('shell: npm test');
   expect(describeTool({ type: 'tool_execution_end', tool: 'grep' })).toBe('grep');
   expect(describeTool({ type: 'tool_execution_end', tool: 'web_search', isError: true, refused: true })).toBe('web_search — refused');

@@ -1,4 +1,4 @@
-import { createBashTool, createPowerShellTool, type BashOperations } from '@earendil-works/pi-coding-agent';
+import { createBashTool, type BashOperations } from '@earendil-works/pi-coding-agent';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { Type } from '@earendil-works/pi-ai';
 import { PolicyDenied, type Approve, type ExecutionPolicy } from '../execution/policy.js';
@@ -75,7 +75,7 @@ function sandboxShell(context: ConversationWorkspace, status: SandboxStatus, app
       return { exitCode: result.exitCode };
     },
   };
-  const tool = (status.shell === 'powershell' ? createPowerShellTool : createBashTool)(folder, { exposeSessionEnvironment: false, operations });
+  const tool = createBashTool(folder, { exposeSessionEnvironment: false, operations });
   return { ...tool, execute: async (id, params, signal, update) => {
     refused = [];
     const before = await store.snapshot(conversation);
@@ -168,12 +168,11 @@ function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus |
   const shown = files.slice(-context.store.limits.listed);
   const deliver = context.delivery === 'save' ? 'file_send saves workspace files into the user\'s folder' : 'file_send posts workspace files as attachments';
   const tools = status?.tools.length ? status.tools.map(tool => `${tool.name} ${tool.version}`).join(', ') : 'only the shell\'s own commands';
-  const legacy = status?.shell === 'powershell' ? ' It is Windows PowerShell 5.1: no && or ||; use ; or if ($?) {}.' : '';
   return [
     '- This conversation has a workspace folder: files people attach are kept there by name, next to what you make. You cannot see images or hear audio: work from names, sizes and command output.',
     ...rooted ? ['- read, write, edit, ls, find and grep take workspace file names. Create files, scripts included, with write; change part of one with edit rather than writing all of it again.'] : [],
     ...rooted && status?.available ? [
-      `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed.${legacy} Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
+      `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed. Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
       '- Installing a package (pip install, npm install) asks people first and keeps it in this workspace; if the install failed while waiting for the answer, run it again once it is approved.',
       '- Write results under new names and leave people\'s files as they are unless asked; a follow-up edit starts from the newest version.',
     ] : rooted ? [`- Commands cannot run here${status?.reason ? ` (${status.reason})` : ''}, so you cannot convert or inspect media files beyond their names; say so if asked.`] : [],

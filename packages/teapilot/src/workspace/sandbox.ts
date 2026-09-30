@@ -7,6 +7,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
 import type { SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import { cleanChildEnvironment } from '../execution/policy.js';
+import { gitBash, gitForWindows, msysPath, shellQuote } from '../execution/shell.js';
 import { packagesFolder, pandocFolder, pythonAbi, pythonPackages, toolsFolder, type PythonInfo } from './toolchain.js';
 
 /** How workspace commands are sandboxed: WORKSPACE_SANDBOX, WORKSPACE_ALLOWED_DOMAINS and WORKSPACE_DENIED_DOMAINS. */
@@ -26,7 +27,7 @@ export interface Tool { name: string; kind: string; version: string }
 export interface SandboxStatus {
   available: boolean;
   reason?: string;
-  shell: 'bash' | 'powershell';
+  shell: 'bash';
   tools: Tool[];
   /** The Python commands run, which teapilot's own packages must be installed for. */
   python?: PythonInfo;
@@ -93,6 +94,8 @@ export class SrtSandbox implements WorkspaceSandbox {
   /** Network questions waiting for a person; a command's time does not run out while it waits for one. */
   private asking = 0;
   private srtWin?: { path: string };
+  /** Windows: Git Bash, which srt needs by its full path. */
+  private bash = '/bin/bash';
   /** teapilot's own tools and Python packages, when installed: before the system's on PATH, and on PYTHONPATH. */
   private toolPath: string[] = [];
   private pythonPath?: string;
@@ -105,7 +108,7 @@ export class SrtSandbox implements WorkspaceSandbox {
   status(): Promise<SandboxStatus> { return this.checked ??= this.check(); }
 
   private async check(): Promise<SandboxStatus> {
-    const shell = windows ? 'powershell' : 'bash';
+    const shell = 'bash';
     const unavailable = (reason: string): SandboxStatus => ({ available: false, reason, shell, tools: [] });
     if (this.settings.sandbox === 'off') return unavailable('Workspace commands are turned off (WORKSPACE_SANDBOX=off).');
     let srt: typeof import('@anthropic-ai/sandbox-runtime');
@@ -167,6 +170,11 @@ export class SrtSandbox implements WorkspaceSandbox {
    * starts srt's helper, so the helper must sit where the account can read it: a copy in teapilot's tools folder.
    */
   private async prepareWindows(srt: typeof import('@anthropic-ai/sandbox-runtime')): Promise<string | undefined> {
+    // The sandbox account cannot see a per-user install, so Git Bash must be one for all users, under Program Files.
+    const bash = gitBash();
+    const shared = [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean).map(folder => `${folder!.toLowerCase()}\\`);
+    if (!bash || !shared.some(folder => bash.toLowerCase().startsWith(folder))) return `Git Bash was not found for all users. Install Git for Windows (${gitForWindows}), then run \`teapilot doctor\`.`;
+    this.bash = bash;
     const vendored = { path: srt.VENDORED_SRT_WIN_EXE };
     const user = await srt.getWindowsSandboxUserStatusAsync({ srtWin: srt.resolveSrtWin(vendored) });
     if (!user.provisioned || !user.credPresent || !user.sid) return 'The Windows sandbox account is not set up. Run `teapilot doctor` for the one-time install (one administrator prompt).';
@@ -236,23 +244,19 @@ export class SrtSandbox implements WorkspaceSandbox {
     };
     // Windows starts the command from the sandbox account's own environment and passes only what the command
     // line sets, PATH extended with teapilot's own tools; elsewhere the command inherits the spawn environment,
-    // which never carries teapilot's secrets. PowerShell there starts at C:\ although the process starts in the
-    // workspace, and runs other programs from its own location. Set-Location to the workspace is refused, since
-    // PowerShell reads every folder above it to spell the path, so it moves to a drive rooted at the workspace.
-    const quoted = (value: string) => `'${value.replace(/'/g, "''")}'`;
+    // which never carries teapilot's secrets. Git Bash takes Windows paths as C:/x, and PATH entries as /c/x.
+    const windowsSetup = windows ? [`cd ${shellQuote(folder.replace(/\\/g, '/'))}`, ...Object.entries(own).map(([key, value]) => `export ${key}=${shellQuote(value.replace(/\\/g, '/'))}`),
+      ...this.toolPath.length ? [`export PATH=${shellQuote(this.toolPath.map(msysPath).join(':'))}:"$PATH"`] : []] : [];
     // srt names its proxy for http and https only. Clients that look a proxy up by URL scheme, such as aiohttp
     // for wss://, then connect directly, which the sandbox drops without asking, so the command hangs.
-    const script = windows
-      ? [`$null = New-PSDrive -Name W -PSProvider FileSystem -Root ${quoted(folder)}`, 'Set-Location W:\\', ...Object.entries(own).map(([key, value]) => `$env:${key}=${quoted(value)}`), ...this.toolPath.length ? [`$env:PATH=${quoted(`${this.toolPath.join(';')};`)}+$env:PATH`] : [],
-        'if ($env:HTTPS_PROXY) { $env:WSS_PROXY=$env:HTTPS_PROXY }', 'if ($env:HTTP_PROXY) { $env:WS_PROXY=$env:HTTP_PROXY }', command].join('; ')
-      : `[ -n "\${HTTPS_PROXY:-}" ] && export WSS_PROXY="$HTTPS_PROXY"\n[ -n "\${HTTP_PROXY:-}" ] && export WS_PROXY="$HTTP_PROXY"\n${command}`;
+    const script = [...windowsSetup, '[ -n "${HTTPS_PROXY:-}" ] && export WSS_PROXY="$HTTPS_PROXY"', '[ -n "${HTTP_PROXY:-}" ] && export WS_PROXY="$HTTP_PROXY"', command].join('\n');
     const commandId = randomUUID();
     // srt hands POSIX commands its own TMPDIR, /tmp/claude unless this names another; one shared by every
     // conversation would let them pass files, so each run gets its workspace's own.
     const shared = process.env.CLAUDE_CODE_TMPDIR;
     if (!windows) process.env.CLAUDE_CODE_TMPDIR = temporary;
     let argv: string[];
-    try { ({ argv } = await SandboxManager.wrapWithSandboxArgv(script, windows ? 'powershell' : '/bin/bash', undefined, options.signal, folder, { commandId, commandText: command })); }
+    try { ({ argv } = await SandboxManager.wrapWithSandboxArgv(script, this.bash, undefined, options.signal, folder, { commandId, commandText: command })); }
     finally { if (shared === undefined) delete process.env.CLAUDE_CODE_TMPDIR; else process.env.CLAUDE_CODE_TMPDIR = shared; }
     const env = { ...cleanChildEnvironment(), ...own, PATH: [join(folder, '.packages', 'bin'), join(folder, 'node_modules', '.bin'), ...this.toolPath, process.env.PATH ?? ''].join(windows ? ';' : ':') };
     this.active = options;

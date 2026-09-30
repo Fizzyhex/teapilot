@@ -4,6 +4,7 @@ import type { ActionRowBuilder, APIModalInteractionResponseCallbackData, Attachm
 import type { IncomingMessage } from './access.js';
 import type { SideAnswer } from './aside-store.js';
 import type { CardButton, CardControls, DiscordTransport } from './bridge.js';
+import { browseGone, browseModal, browseModalPrefix, browsePrefix, browseRows, browseSubmit, type BrowseAction, type BrowseSession, type WorkspaceBrowser } from './browse.js';
 import { attachmentOption, commandDefinitions, commandText, interactionLifetimeMs, promptAttachments, promptCommand, promptSetup, replyCommand, replyMenu, treeOption, withoutUserInstall, type PromptSetup } from './commands.js';
 import { isAside } from '../chat.js';
 import { InteractionFeed, type FeedLink } from './feed.js';
@@ -43,6 +44,8 @@ export interface GatewayCommand extends IncomingMessage {
   respond(text?: string): Promise<void>;
   /** Instead of `respond()`: a private note with buttons, as for a reply. */
   choose(note: string, labels: string[]): Promise<GatewayChoice | undefined>;
+  /** Instead of `respond()`: a private view of a folder, `text`, with buttons that open another folder or send a file. */
+  browse(text: string, browser: WorkspaceBrowser, dir: string): Promise<void>;
   /** teapilot cannot post here, so /reply and /prompt answer through their interactions, one person or collab at a time. */
   oneShot: boolean;
 }
@@ -368,6 +371,8 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   const interactionReplies = new Map<string, RawMessage>();
   /** Side answers that can still be posted to their channel, by nonce. */
   const sideAnswers = new Map<string, PendingAside>();
+  /** Folder views under /workspace tree, by nonce, with who opened them; the oldest are forgotten first. */
+  const browsing = new Map<string, { userId: string; session: BrowseSession }>();
   /** Open `choose()` notes by nonce: who may press them, and what the press resolves. */
   const choices = new Map<string, { userId: string; resolve(click: GatewayChoice | undefined): void }>();
   /** A private note with a button per label, the first one primary; resolves with the invoker's click, or undefined once it expires. */
@@ -593,6 +598,15 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
           answered = true;
           return offer(interaction, note, labels);
         },
+        browse: async (text, browser, dir) => {
+          if (answered) throw new Error('This interaction was already answered.');
+          answered = true;
+          const nonce = randomUUID();
+          browsing.set(nonce, { userId: interaction.user.id, session: { browser, dir } });
+          if (browsing.size > cardLimit) browsing.delete(browsing.keys().next().value!);
+          await interaction.reply({ content: text, components: browseRows(nonce) as unknown as BaseMessageOptions['components'], flags: MessageFlags.Ephemeral, ...quiet })
+            .catch(error => log(`Discord: ${error instanceof Error ? error.message : String(error)}`));
+        },
       });
       return;
     }
@@ -644,6 +658,27 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       if (note) await (interaction.isFromMessage() ? interaction.followUp({ content: note, flags: MessageFlags.Ephemeral, ...quiet }) : interaction.reply({ content: note, flags: MessageFlags.Ephemeral, ...quiet })).catch(noop);
       return;
     }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(browseModalPrefix)) {
+      const [nonce, action] = interaction.customId.slice(browseModalPrefix.length).split(':') as [string, BrowseAction];
+      const entry = browsing.get(nonce);
+      if (!entry) { await interaction.reply({ content: browseGone, flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
+      // Reading and zipping a file can outlast Discord's 3 seconds; a folder is quick.
+      if (action === 'file') await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(noop);
+      try {
+        const outcome = await browseSubmit(entry.session, action, interaction.fields.getTextInputValue('path'));
+        if ('show' in outcome) {
+          // The view is the message the button was pressed on, so it is edited in place.
+          await (interaction.isFromMessage() ? interaction.update({ content: outcome.show, ...quiet }) : interaction.reply({ content: outcome.show, flags: MessageFlags.Ephemeral, ...quiet }));
+        } else if (action === 'file') {
+          await interaction.editReply({ content: outcome.note, files: outcome.file ? attachments([outcome.file]) : [], ...quiet });
+        } else await interaction.reply({ content: outcome.note, flags: MessageFlags.Ephemeral, ...quiet });
+      } catch (error) {
+        log(`Discord: could not open from /workspace tree: ${failure(error)}`);
+        const note = 'that didn\'t work - try again?';
+        await (interaction.deferred ? interaction.editReply({ content: note }) : interaction.reply({ content: note, flags: MessageFlags.Ephemeral })).catch(noop);
+      }
+      return;
+    }
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith(sidePrefix)) {
       await share(interaction, interaction.customId.slice(sidePrefix.length));
       return;
@@ -662,6 +697,14 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
         settle: async note => { await interaction.editReply({ content: note, components: [] }); },
         transport: () => interactionTransport(interaction),
       });
+      return;
+    }
+    if (interaction.customId.startsWith(browsePrefix)) {
+      const [nonce, action] = interaction.customId.slice(browsePrefix.length).split(':') as [string, BrowseAction];
+      const entry = browsing.get(nonce);
+      if (!entry) { await interaction.reply({ content: browseGone, flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
+      if (entry.userId !== interaction.user.id) { await interaction.reply({ content: 'this view is not yours.', flags: MessageFlags.Ephemeral, ...quiet }).catch(noop); return; }
+      await interaction.showModal(browseModal(action, nonce, entry.session.dir) as unknown as APIModalInteractionResponseCallbackData).catch(noop);
       return;
     }
     if (interaction.customId.startsWith(showPrefix)) {

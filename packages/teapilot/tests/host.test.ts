@@ -111,7 +111,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     const f = await setup((body, req, res) => {
       if (req.url === '/jev') jev(res, ++routes === 1 ? 'coder.normal' : 'coder.reasoning');
       else if (req.url?.endsWith('/models')) res.end('{}');
-      else if (body.reasoning_effort === 'none') { localCalls++; completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command } } }); }
+      else if (body.reasoning_effort === 'none') { localCalls++; completion(res, { tool: { name: 'bash', arguments: { command } } }); }
       else {
         cloudCalls++;
         expect(body.model).toBe('capable-test');
@@ -121,7 +121,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
         expect(JSON.stringify(body.messages)).toContain(command);
         expect(JSON.stringify(body.messages)).not.toContain('Previous attempt stopped');
         if (repair && cloudCalls === 1) completion(res, { tool: { name: 'write', arguments: { path: 'failing.test.cjs', content: '// repaired' } } });
-        else if (repair && cloudCalls === 2) completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command } } });
+        else if (repair && cloudCalls === 2) completion(res, { tool: { name: 'bash', arguments: { command } } });
         else completion(res, { text: 'Resolved using the economy model.', cost: 0.00004 });
       }
     });
@@ -249,7 +249,7 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     const f = await setup((_body, req, res) => {
       if (req.url === '/jev') jev(res, 'coder.normal');
       else if (req.url?.endsWith('/models')) res.end('{}');
-      else { inference++; completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command: 'echo unsafe' } } }); }
+      else { inference++; completion(res, { tool: { name: 'bash', arguments: { command: 'echo unsafe' } } }); }
     });
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'Run a command' }, { approve: async () => false });
     expect(result.status).toBe('approval_denied');

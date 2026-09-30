@@ -94,12 +94,12 @@ it('gives repeated equivalent inspection one recovery opportunity and invalidate
   expect(check.lastCheck).toBeUndefined();
   // Editing a scratchpad script between runs makes the next run a new experiment, though it changes nothing in the project.
   const scratch = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 }, [], path => path.startsWith('/s/'));
-  scratch.observe('powershell', { command: 'python .scratch/fit.py' }, false, 'error');
+  scratch.observe('bash', { command: 'python .scratch/fit.py' }, false, 'error');
   scratch.observe('edit', { path: '/s/fit.py' }, false);
-  scratch.observe('powershell', { command: 'python .scratch/fit.py' }, false, 'error');
+  scratch.observe('bash', { command: 'python .scratch/fit.py' }, false, 'error');
   expect(scratch.reason).toBeUndefined();
   expect(scratch.changedFiles.size).toBe(0);
-  scratch.observe('powershell', { command: 'python .scratch/fit.py' }, false, 'error');
+  scratch.observe('bash', { command: 'python .scratch/fit.py' }, false, 'error');
   expect(scratch.reason).toBe('ineffective_calls');
 });
 
@@ -171,7 +171,7 @@ it('does not claim a denied shell command executed or changed files', async () =
   const f = await setup();
   const server = await mockServer((_body, req, res) => {
     if (req.url?.endsWith('/models')) res.end('{}');
-    else completion(res, { tool: { name: process.platform === 'win32' ? 'powershell' : 'bash', arguments: { command: 'echo denied' } } });
+    else completion(res, { tool: { name: 'bash', arguments: { command: 'echo denied' } } });
   }); cleanup.push(server.close);
   f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Run a command' }, { approve: async () => false });

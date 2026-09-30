@@ -16,6 +16,7 @@ import { pictures } from './files.js';
 import { receiveFiles } from '../workspace/attach.js';
 import { SrtSandbox } from '../workspace/sandbox.js';
 import { WorkspaceStore } from '../workspace/store.js';
+import { workspaceBrowser } from './browse.js';
 import { keptNote, storeControls, workspaceCommand } from '../workspace/commands.js';
 import { consultant } from './play/consult.js';
 import { summariser } from './summarise.js';
@@ -308,6 +309,15 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     // Seats hold where teapilot answers through the interaction, and /reply, /prompt keep a conversation per seat there.
     const seat = seats.seat(command.channelId, command.authorId);
     if (command.text.startsWith('/collab')) { await handleCollab(command, seat); return; }
+    const key = seat ? historyKeyOf(command.channelId, command.authorId, seat) : target?.key || undefined;
+    // The tree is private to whoever asked, with buttons; it never needs the conversation, even a running one.
+    const tree = key && /^\/workspace tree(?:\s+([\s\S]*))?$/i.exec(command.text.trim());
+    if (tree) {
+      const browser = workspaceBrowser(files, key);
+      const view = browser.folder(tree[1] ?? '');
+      if ('note' in view) await command.respond(view.note); else await command.browse(view.text, browser, view.dir);
+      return;
+    }
     const conversation = target && conversations.get(target.key);
     if (target && conversation?.active) {
       log(`${target.key}: ${command.text}`);
@@ -318,7 +328,6 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       else await command.respond();
       return;
     }
-    const key = seat ? historyKeyOf(command.channelId, command.authorId, seat) : target?.key || undefined;
     if (!key) { await command.respond(target ? 'No active conversation here. Send a message to start one.' : 'You are not in a conversation with teapilot here.'); return; }
     if (command.text === '/stop') {
       const turn = runningOneShots.get(key);
@@ -355,7 +364,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
         await click.settle((await workspaceCommand(storeControls(files, () => key), command.text))!);
         return;
       }
-      await command.respond(await workspaceCommand(storeControls(files, () => key), command.text, { fence: true }) ?? 'Unknown teapilot command.');
+      await command.respond(await workspaceCommand(storeControls(files, () => key), command.text) ?? 'Unknown teapilot command.');
       return;
     }
     await command.respond('No active conversation here. Send a message to start one.');

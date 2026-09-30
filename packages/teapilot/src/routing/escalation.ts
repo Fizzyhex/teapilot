@@ -75,7 +75,7 @@ export class Evidence {
       this.repeated.set(key, same);
       if (same >= this.thresholds.repeatedToolCalls) this.reason = 'tool_failures';
     }
-    if (['bash', 'powershell'].includes(name) && /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(String((args as { command?: string }).command))) {
+    if (name === 'bash' && /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(String((args as { command?: string }).command))) {
       this.lastCheck = failed ? 'failed' : 'passed';
       if (failed) this.unresolvedChecks.add(String(data.command));
       else this.unresolvedChecks.delete(String(data.command));

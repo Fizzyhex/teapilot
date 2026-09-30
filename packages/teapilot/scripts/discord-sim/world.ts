@@ -4,6 +4,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { browseGone, browseModal, browseModalPrefix, browsePrefix, browseRows, browseSubmit, type BrowseAction, type BrowseSession, type WorkspaceBrowser } from '../../src/discord/browse.js';
 import type { CardButton, CardControls, DiscordTransport } from '../../src/discord/bridge.js';
 import type { connect, GatewayHandlers } from '../../src/discord/gateway.js';
 import { planButtons, planModal, type PlanAction, type PlanControls } from '../../src/discord/plan.js';
@@ -63,11 +64,13 @@ export class World {
   private readonly listeners = new Set<(text: string) => void>();
   private handlers?: GatewayHandlers;
   private operators: readonly string[] = [];
-  private counters = { message: 0, thread: 0, approval: 0 };
+  private counters = { message: 0, thread: 0, approval: 0, browse: 0 };
   /** Status cards by message id, as the gateway keeps them; a restart forgets them. */
   private cards = new Map<string, CardControls['press']>();
   /** Plans by the id of their last message, as the gateway keeps them; a restart forgets them. */
   private plans = new Map<string, PlanControls>();
+  /** Folder views under /workspace tree, by nonce, as the gateway keeps them; a restart forgets them. */
+  private browsing = new Map<string, BrowseSession>();
   private recent?: Channel;
   /** The bot's custom status, as `teapilot discord start` last set it. */
   status?: string;
@@ -129,6 +132,7 @@ export class World {
         this.handlers = undefined;
         this.cards.clear();
         this.plans.clear();
+        this.browsing.clear();
         // Like the real gateway: pending approvals resolve as denied, and their buttons stay behind.
         for (const message of this.messages) { const resolve = message.approval; message.approval = undefined; resolve?.(false); }
       },
@@ -318,6 +322,7 @@ export class World {
     const custom = String(control.custom_id);
     if (custom.startsWith('teapilot:')) return this.answerApproval(person, message, custom.endsWith(':approve'));
     if (custom.startsWith('teapilot-plan:')) return this.pressPlan(person, message, custom.slice('teapilot-plan:'.length) as PlanAction);
+    if (custom.startsWith(browsePrefix)) return this.pressBrowse(person, message, custom.slice(browsePrefix.length));
     if (custom.startsWith('teapilot-card:')) return this.pressCard(person, message, custom.slice('teapilot-card:'.length) as CardButton);
     return this.interact(person, message, 'button', custom, `clicked [${this.label(control)}]`);
   }
@@ -354,6 +359,19 @@ ${this.renderForm(payload)}`;
     const note = controls.press(action, { id: person.id, name: person.name });
     return note ? `${label}
 ${this.render(this.post(message.channel, bot.name, { content: note }, person.name))}` : label;
+  }
+
+  /** Like the real gateway: each button opens a form, and the folder form starts from the folder on show. */
+  private pressBrowse(person: Person, message: Message, rest: string): string {
+    const [nonce, action] = rest.split(':') as [string, BrowseAction];
+    const session = this.browsing.get(nonce);
+    const label = `${person.name} clicked [${action === 'folder' ? 'open folder' : 'open file'}] on ${message.id}.`;
+    if (!session) return `${label}\n${this.render(this.post(message.channel, bot.name, { content: browseGone }, person.name))}`;
+    const payload = browseModal(action, nonce, session.dir) as ModalPayload;
+    this.check(`the form on ${message.id}`, () => checkModal(payload));
+    this.forms.set(person.name, { message, payload });
+    this.emit(`${person.name} opened form "${payload.title}" from ${message.id}`);
+    return `${label}\n${person.name} sees a form:\n${this.renderForm(payload)}`;
   }
 
   /** Like the real gateway: anyone may press, the conversation decides, and only the presser sees the answer. */
@@ -401,6 +419,7 @@ ${this.render(this.post(message.channel, bot.name, { content: note }, person.nam
       if (typeof input.min_length === 'number' && value && value.length < input.min_length) throw new SimError(`${String(input.custom_id)} needs at least ${input.min_length} characters.`);
     }
     this.forms.delete(person.name);
+    if (form.payload.custom_id.startsWith(browseModalPrefix)) return this.submitBrowse(person, form, fields[String(inputs[0]!.custom_id)] ?? '');
     if (form.payload.custom_id.startsWith('teapilot-plan-modal:')) {
       const controls = this.plans.get(form.message.id);
       const note = controls ? controls.press('change', { id: person.id, name: person.name }, fields[planModal.field] ?? '') : 'This plan is no longer available: teapilot restarted since, or it was replaced.';
@@ -408,6 +427,21 @@ ${this.render(this.post(message.channel, bot.name, { content: note }, person.nam
 ${this.render(this.post(form.message.channel, bot.name, { content: note }, person.name))}` : ''}`;
     }
     return this.interact(person, form.message, 'modal', form.payload.custom_id, `submitted "${form.payload.title}"`, undefined, Object.fromEntries(ids.map(key => [key, fields[key] ?? ''])));
+  }
+
+  /** Like the real gateway: a folder edits the view in place; a file or a refusal is said privately. */
+  private async submitBrowse(person: Person, form: { message: Message; payload: ModalPayload }, input: string): Promise<string> {
+    const [nonce, action] = form.payload.custom_id.slice(browseModalPrefix.length).split(':') as [string, BrowseAction];
+    const label = `${person.name} submitted "${form.payload.title}" on ${form.message.id}.`;
+    const session = this.browsing.get(nonce);
+    const say = (payload: Payload) => this.render(this.post(form.message.channel, bot.name, payload, person.name));
+    if (!session) return `${label}\n${say({ content: browseGone })}`;
+    const outcome = await browseSubmit(session, action, input);
+    if ('show' in outcome) {
+      this.update(form.message, { content: outcome.show });
+      return `${label}\n${this.render(form.message)}`;
+    }
+    return `${label}\n${say({ content: outcome.note, files: outcome.file ? [outcome.file] : [] })}`;
   }
 
   /**
@@ -432,6 +466,13 @@ ${this.render(this.post(form.message.channel, bot.name, { content: note }, perso
         authorId: person.id, authorIsBot: false, guildId: channel.kind === 'dm' ? undefined : guildId, channelId: channel.id, parentId: thread?.parent,
         ownThread: Boolean(thread), mentionsBot: false, text, oneShot,
         respond: async content => { if (answered) { if (content) note(content); return; } first(); if (content) note(content); finish(); },
+        browse: async (content, browser: WorkspaceBrowser, dir) => {
+          first();
+          const nonce = `sim${++this.counters.browse}`;
+          this.browsing.set(nonce, { browser, dir });
+          note(content, browseRows(nonce));
+          finish();
+        },
         choose: async (content, labels) => {
           first();
           note(content, [{ type: 1, components: labels.map((label, index) => ({ type: 2, style: index ? 2 : 1, label, custom_id: `teapilot-choice:sim:${index}` })) }]);

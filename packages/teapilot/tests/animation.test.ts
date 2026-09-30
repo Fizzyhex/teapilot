@@ -317,7 +317,7 @@ it('suppresses artwork for long approvals and cancels a prompt without leaving t
 
 it('keeps the command adjacent to a short approval, with no mascot drawn between them', async () => {
   const p = present();
-  p.approval('Run powershell?\nmkdir self-contained-pong-v2 && cd self-contained-pong-v2');
+  p.approval('Run bash?\nmkdir self-contained-pong-v2 && cd self-contained-pong-v2');
   const controller = new AbortController(); const ui = terminalUI(controller.signal, p); uis.push(ui);
   const question = ui.confirm('Approve this action?');
   // Plenty of room is available (80x40), so without the fix this would draw
@@ -337,7 +337,7 @@ it('keeps the command adjacent to a short approval, with no mascot drawn between
 it('does not draw a mascot for an ordinary confirm question that immediately follows an approval', async () => {
   // A stale pendingApproval flag must not leak into an unrelated later prompt.
   const p = present();
-  p.approval('Run powershell?\nsomething');
+  p.approval('Run bash?\nsomething');
   const controller = new AbortController(); const ui = terminalUI(controller.signal, p); uis.push(ui);
   const first = ui.confirm('Approve this action?');
   input.emit('data', Buffer.from('yes\r')); expect(await first).toBe(true);

@@ -3,11 +3,12 @@ import { access, glob, readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import {
-  createBashTool, createEditTool, createEditToolDefinition, createFindTool, createGrepTool, createLsTool, createPowerShellTool,
+  createBashTool, createEditTool, createEditToolDefinition, createFindTool, createGrepTool, createLsTool,
   createReadTool, createWriteTool, createWriteToolDefinition, type FindOperations, type LsOperations,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { cleanChildEnvironment, protectedPart, within, type ExecutionPolicy } from '../execution/policy.js';
+import { gitBash } from '../execution/shell.js';
 import { ensureRipgrep } from '../workspace/toolchain.js';
 
 // The small execution context cannot afford a whole-file read; default to a window the model can page through with offset.
@@ -130,10 +131,13 @@ function guardedGrep(policy: ExecutionPolicy, stateDir: string): AgentTool {
   } };
 }
 
-/** The shell on the host: the repository's own, where each command asks for approval (execution/policy.ts). */
-function hostShell(root: string): AgentTool {
-  const options = { exposeSessionEnvironment: false, spawnHook: (context: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({ ...context, env: cleanChildEnvironment() }) };
-  return process.platform === 'win32' ? createPowerShellTool(root, options) : createBashTool(root, options);
+/**
+ * The shell on the host: the repository's own, where each command asks for approval (execution/policy.ts). It is bash
+ * everywhere, Git Bash on Windows; without it there is no shell, and the instructions say so.
+ */
+function hostShell(root: string): AgentTool | undefined {
+  if (!gitBash()) return undefined;
+  return createBashTool(root, { exposeSessionEnvironment: false, spawnHook: context => ({ ...context, env: cleanChildEnvironment() }) });
 }
 
 export interface SessionToolOptions {
@@ -147,7 +151,7 @@ export interface SessionToolOptions {
 
 /**
  * Every tool-using session's file and command tools, from pi's own factories: read, write, edit, ls, find, grep, and
- * bash or powershell. They share one root, the repository or else the conversation's workspace (or scratchpad), so a
+ * bash. They share one root, the repository or else the conversation's workspace (or scratchpad), so a
  * file name means the same file to all of them. Each is wrapped by the policy, which checks paths, permissions and
  * approvals; teapilot keeps only that, and how much output reaches the model (agents/scratchpad.ts).
  */

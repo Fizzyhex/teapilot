@@ -115,7 +115,7 @@ export class ExecutionPolicy {
       try {
         signal?.throwIfAborted();
         const args = params as Record<string, unknown>;
-        const shell = tool.name === 'bash' || tool.name === 'powershell';
+        const shell = tool.name === 'bash';
         const mutation = tool.name === 'write' || tool.name === 'edit';
         const directory = listing.has(tool.name);
         // Listing and search start at the root when no path is given.
