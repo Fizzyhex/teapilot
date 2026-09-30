@@ -4,13 +4,15 @@ they test how well teapilot plans a task and then hands it to sub-agents ("junio
 
 *verify: read the plan embed itself, and `log <name>` for how the work was split. then check the finished app the usual way (`app`, `screen`, `click`, `select`).*
 
+(this challenge allows you to send minor follow-up prompts to correct teapilot and answer questions).
+
 ## Case 1O: Greggs Kiosk
 {tags: "discord.play", "plan", "sub-agents" }
 
 1. send the prompt below (the `/plan` prefix is part of it):
 
    ```
-   /plan use `discord.play` to build an interactive GREGGS kiosk. the kiosk interface is a simulation - and does not require web connectivity.
+   /plan use `discord.play` to build an interactive GREGGS kiosk. the kiosk itself will use what you have downloaded - and does not require web connectivity.
 
    you can find the menus here:
    https://www.greggs.com/menu?category=breakfast
