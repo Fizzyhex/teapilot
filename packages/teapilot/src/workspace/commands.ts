@@ -30,10 +30,10 @@ const files = (count: number) => `${count} file${count === 1 ? '' : 's'}`;
 
 /** After /convo clear: files that stayed, and how to remove them. */
 export const keptNote = (count: number): string | undefined =>
-  count ? `The workspace still has ${files(count)}. /workspace clear removes them; /new clears both.` : undefined;
+  count ? `note: the workspace still contains ${files(count)}.` : undefined;
 
 /** Runs `/workspace …`; the reply to show, or undefined when the text is not a workspace command. */
-export async function workspaceCommand(controls: WorkspaceControls | undefined, text: string): Promise<string | undefined> {
+export async function workspaceCommand(controls: WorkspaceControls | undefined, text: string, options: { fence?: boolean } = {}): Promise<string | undefined> {
   const match = /^\/workspace(?:\s+(\S+))?(?:\s+([\s\S]*))?$/i.exec(text.trim());
   if (!match) return undefined;
   if (!controls) return 'This session has no workspace.';
@@ -44,14 +44,14 @@ export async function workspaceCommand(controls: WorkspaceControls | undefined, 
     return count ? `Cleared the workspace (${files(count)}).` : 'The workspace was already empty.';
   }
   if (action === 'name') {
-    if (!argument) return controls.name() ? `Workspace: ${controls.name()}` : 'The workspace has no name. /workspace name <name> gives it one.';
+    if (!argument) return controls.name() ? `Workspace: ${controls.name()}` : 'the workspace has no name - use /workspace name <name>.';
     return `Workspace: ${controls.name(argument)}`;
   }
   if (action === 'tree') {
     const name = controls.name();
     const tree = controls.tree(argument || undefined);
-    const heading = `${name ? `${name} ` : ''}(workspace, not the repository)${argument ? `: ${argument}` : ''}`;
-    return tree ? `${heading}\n${tree}` : argument ? `${heading}\nNo files there.` : `${heading}\nNo files yet.`;
+    const body = tree ? (options.fence ? `\`\`\`py\n${tree}\n\`\`\`` : tree) : argument ? 'No files there.' : 'No files yet.';
+    return name ? `${name}\n${body}` : body;
   }
   return `Workspace commands: ${workspaceHelp}`;
 }

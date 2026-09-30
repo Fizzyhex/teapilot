@@ -355,7 +355,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
         await click.settle((await workspaceCommand(storeControls(files, () => key), command.text))!);
         return;
       }
-      await command.respond(await workspaceCommand(storeControls(files, () => key), command.text) ?? 'Unknown teapilot command.');
+      await command.respond(await workspaceCommand(storeControls(files, () => key), command.text, { fence: true }) ?? 'Unknown teapilot command.');
       return;
     }
     await command.respond('No active conversation here. Send a message to start one.');

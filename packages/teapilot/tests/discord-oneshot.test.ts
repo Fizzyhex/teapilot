@@ -138,7 +138,7 @@ it('clears the conversation and the workspace separately, and asks before cleari
   await results(1);
   expect(await command('op', '/workspace tree')).toMatch(/notes\.txt/);
   expect(await command('op', '/workspace name tea notes')).toBe('Workspace: tea notes');
-  expect(await command('op', '/workspace tree')).toMatch(/^tea notes \(workspace, not the repository\)/);
+  expect(await command('op', '/workspace tree')).toMatch(/^tea notes\n```py\n📂 workspace\/\n/);
   expect(await complete('op', '/workspace tree', '')).toEqual([]);
 
   // Clearing the conversation offers to clear the workspace; keeping it keeps the file.

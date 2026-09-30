@@ -47,6 +47,20 @@ const typeOf = (name: string) => mediaTypes[extname(name).toLowerCase()] ?? 'app
 const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 
 const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+interface TreeFolder { folders: Map<string, TreeFolder>; files: { name: string; size: string }[] }
+interface TreeRow { left: string; icon?: string; text: string; size?: string }
+/** Files shown in each folder of /workspace tree before "… N more files". */
+const treeFilesPerFolder = 3;
+const emojis: Record<string, string> = {
+  '🐍': 'py', '🖼️': 'png jpg jpeg gif webp bmp svg', '📝': 'md txt rst', '💬': 'srt vtt ass', '📜': 'js mjs cjs ts tsx jsx',
+  '⚙️': 'json yaml yml toml xml ini', '📊': 'csv tsv xlsx xls', '📕': 'pdf', '📦': 'zip tar gz tgz 7z', '🎵': 'mp3 wav ogg flac m4a',
+  '🎬': 'mp4 mov webm mkv avi', '🌐': 'html htm css', '🖥️': 'sh bash ps1 bat',
+};
+const fileEmoji = (name: string): string => {
+  const extension = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  return Object.entries(emojis).find(([, list]) => list.split(' ').includes(extension))?.[0] ?? '📄';
+};
 /** One line per file, as the model sees it. */
 export function describeFile(file: StoredFile): string {
   const kind = file.width ? `${file.type.replace('image/', '').toUpperCase()} image ${file.width}×${file.height}` : file.type;
@@ -308,23 +322,46 @@ export class WorkspaceStore {
     this.write(to, this.index(from));
   }
 
-  /** The listed files as an indented outline, optionally under one folder; undefined when that folder has none. */
+  /** The listed files as a tree under one folder, files before folders; undefined when that folder has none. */
   tree(conversation: string, dir = '', limit = fileLimits.listed): string | undefined {
     const prefix = dir.replace(/\\/g, '/').replace(/^\.?\/+|\/+$/g, '');
     const files = this.list(conversation).filter(file => !prefix || file.name.toLowerCase().startsWith(`${prefix.toLowerCase()}/`));
     if (!files.length) return undefined;
-    const lines: string[] = [];
-    const shown = new Set<string>();
-    for (const file of [...files].sort((a, b) => a.name.localeCompare(b.name))) {
+    const root: TreeFolder = { folders: new Map(), files: [] };
+    for (const file of files) {
       const parts = (prefix ? file.name.slice(prefix.length + 1) : file.name).split('/');
-      parts.forEach((part, depth) => {
-        const path = parts.slice(0, depth + 1).join('/');
-        if (shown.has(path)) return;
-        shown.add(path);
-        const last = depth === parts.length - 1;
-        lines.push(`${'  '.repeat(depth)}${last ? `${part} (${size(file.size)})` : `${part}/`}`);
-      });
+      let folder = root;
+      for (const part of parts.slice(0, -1)) {
+        if (!folder.folders.has(part)) folder.folders.set(part, { folders: new Map(), files: [] });
+        folder = folder.folders.get(part)!;
+      }
+      folder.files.push({ name: parts[parts.length - 1]!, size: size(file.size) });
     }
+    const rows: TreeRow[] = [];
+    const walkFolder = (folder: TreeFolder, indent: string, top: boolean) => {
+      const files = [...folder.files].sort((a, b) => a.name.localeCompare(b.name));
+      const shown = top ? files : files.slice(0, treeFilesPerFolder);
+      const hidden = files.slice(shown.length);
+      const folders = [...folder.folders].sort(([a], [b]) => a.localeCompare(b));
+      const total = shown.length + folders.length + (hidden.length ? 1 : 0);
+      let index = 0;
+      const branch = () => `${indent}${++index === total ? '└── ' : '├── '}`;
+      for (const file of shown) rows.push({ left: branch(), icon: fileEmoji(file.name), text: file.name, size: file.size });
+      folders.forEach(([name, child]) => {
+        if (top && index > 0) rows.push({ left: '│', text: '' });
+        const last = index + 1 === total;
+        rows.push({ left: branch(), icon: '📂', text: `${name}/` });
+        walkFolder(child, `${indent}${last ? '    ' : '│   '}`, false);
+      });
+      if (hidden.length) rows.push({ left: branch(), icon: fileEmoji(hidden[0]!.name), text: `… ${hidden.length} more file${hidden.length === 1 ? '' : 's'}` });
+    };
+    walkFolder(root, '', true);
+    // Emoji are two cells wide, plus the space after them.
+    const cells = (row: TreeRow) => row.left.length + (row.icon ? 3 : 0) + row.text.length;
+    const width = Math.max(...rows.map(cells)) + 2;
+    const sizes = Math.max(...rows.map(row => row.size?.length ?? 0));
+    const lines = [`📂 ${prefix ? prefix.split('/').pop() : 'workspace'}/`, ...rows.map(row =>
+      `${row.left}${row.icon ? `${row.icon} ` : ''}${row.text}${row.size ? `${' '.repeat(width - cells(row) + sizes - row.size.length)}${row.size}` : ''}`)];
     return (lines.length > limit ? [...lines.slice(0, limit), `… and ${lines.length - limit} more`] : lines).join('\n');
   }
 

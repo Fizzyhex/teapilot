@@ -223,9 +223,9 @@ it('/convo clear keeps the workspace and says so, /workspace clears it, and /new
   expect(log.mock.calls.map(call => call[0])).toEqual([
     'Cleared the conversation. The workspace still has 1 file. /workspace clear removes them; /new clears both.',
     'Workspace: tea',
-    'tea (workspace, not the repository)\nnotes.txt',
+    'tea\nnotes.txt',
     expect.stringContaining('Started a new task with an empty workspace'),
-    '(workspace, not the repository)\nNo files yet.',
+    'No files yet.',
   ]);
   expect(onHistory.mock.calls.filter(call => call[0].length === 0).length).toBeGreaterThanOrEqual(2);
   expect(files).toEqual({ list: [], scratch: 0, label: undefined });

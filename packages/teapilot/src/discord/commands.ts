@@ -82,7 +82,7 @@ export const commandDefinitions: CommandDefinition[] = [
     options: [
       subcommand('clear', 'Delete every file in the workspace'),
       subcommand('name', 'Give the workspace a name', [{ type: 3, name: 'name', description: 'The name', required: true }]),
-      subcommand('tree', 'List the files in the workspace', [{ type: 3, name: treeOption, description: 'Only this folder', required: false, autocomplete: true }]),
+      subcommand('tree', 'List the files in the workspace', [{ type: 3, name: treeOption, description: 'subdirectory path', required: false, autocomplete: true }]),
     ],
     ...everywhere,
   },

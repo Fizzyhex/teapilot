@@ -529,8 +529,8 @@ it('clears a workspace\'s files but not its scratchpad or name, copies it for a 
   await writeFile(join(store.scratch('a'), 'plan.md'), 'plan');
   store.rename('a', '  tea notes ');
   expect(store.name('a')).toBe('tea notes');
-  expect(store.tree('a')).toBe('notes.txt (3 B)\nsrc/\n  app.js (1 B)');
-  expect(store.tree('a', 'src')).toBe('app.js (1 B)');
+  expect(store.tree('a')).toBe('📂 workspace/\n├── 📝 notes.txt   3 B\n│\n└── 📂 src/\n    └── 📜 app.js  1 B');
+  expect(store.tree('a', 'src')).toBe('📂 src/\n└── 📜 app.js  1 B');
   expect(store.tree('a', 'nope')).toBeUndefined();
   expect(store.folders('a')).toEqual(['src']);
 
