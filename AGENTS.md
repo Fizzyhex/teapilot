@@ -69,3 +69,7 @@ To find out what a real request did, read the state directory: `~/.teapilot`, or
 - `spend.jsonl`: budget reservations and charges.
 
 The files are large and grow without limit: read their tails, never the whole file. They hold real conversations: quote only what the task needs, and never edit or delete them to tidy up a result.
+
+## User-Facing Text
+
+teapilot generally uses a concise, casual lower-case style for it's user-facing text. do so when it doesn't have a tangible impact on legibility.
