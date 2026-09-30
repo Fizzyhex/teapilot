@@ -73,3 +73,7 @@ The files are large and grow without limit: read their tails, never the whole fi
 ## User-Facing Text
 
 teapilot uses a concise, casual lower-case style for it's user-facing text. do so when whenever it doesn't have a tangible impact on usability.
+
+## Agent-Facing Text (System & Tools)
+
+teapilot often uses a concise, casual lower-case style for it's agent-facing text. do so when whenever it doesn't have a tangible impact on usability - such as malforming code or breaking case-sensitive data.
