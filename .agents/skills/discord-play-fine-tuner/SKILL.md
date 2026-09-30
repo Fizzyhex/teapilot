@@ -44,6 +44,7 @@ If you're specifically asked to attempt challenge cases, do the cases at one of 
 - `file challenges` -> `./file-challenges.md`
 - `conversation challenges` -> `./conversation-challenges.md`
 - `scratchpad benchmark` (ScratchBench) -> `./scratchpad-challenge.md`
+- `orchestration challenge` -> `./orchestration-challenge.md`
 
 ## Case 1: Snake Game
 {tags: "discord.play", "logic" }
