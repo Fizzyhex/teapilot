@@ -122,3 +122,10 @@ it('notes when the reply chain goes back further than could be fetched', () => {
   expect(partial).toMatch(/^Reply chain, oldest first:\nNote: .*could fetch.*\n\n@alice: ship it\n\nMessage from @bob:\nwhy\?$/);
   expect(quoteMessage({ author: 'bob', text: 'why?' }, { messages: [], truncated: true })).toMatch(/^Reply chain, oldest first:\nNote: .*\n\nMessage from @bob:\nwhy\?$/);
 });
+
+it('lists a tip among the steps as a light bulb and its name', () => {
+  const card = new StatusCard(text => text);
+  card.push({ type: 'tool_execution_end', tool: 'write', path: 'bot.py' });
+  expect(card.push({ type: 'tip', name: 'useJavascript' })).toBe(true);
+  expect(card.render()).toBe('🫖 thinking. · 0s\n-# write bot.py\n-# 💡 useJavascript');
+});

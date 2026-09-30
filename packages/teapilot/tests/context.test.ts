@@ -180,6 +180,8 @@ async function scripted(steps: { name: string; arguments: unknown }[], usage?: (
     res.write(`data: ${JSON.stringify({ ...common, choices: [{ index: 0, delta: {}, finish_reason: step ? 'tool_calls' : 'stop' }], ...(prompt === undefined ? {} : { usage: { prompt_tokens: prompt, completion_tokens: 20, total_tokens: prompt + 20 } }) })}\n\n`);
     res.end('data: [DONE]\n\n');
   });
+  // These measure how the bare page fits, so no tip (agents/tips.ts) rides on the result.
+  f.config.tips = { enabled: false };
   const result = await runAttempt({ ...f, tier: 'normal', workload: 'coder', web: false, prompt: 'Create a self-contained Pong game in index.html.', approve: async () => true });
   return { f, result, admissions: (await events(f.config)).filter(e => e.type === 'context_admission') };
 }

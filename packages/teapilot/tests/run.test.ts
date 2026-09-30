@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { completion, fixture, mockServer } from './helpers.js';
+import { completion, events, fixture, mockServer } from './helpers.js';
 import { runAttempt } from '../src/agents/run.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
@@ -78,4 +78,20 @@ it('asks again after a tool call the server announced but did not send, then giv
   expect(failed.reason).toBe('provider_error');
   expect(failed.turns).toBe(3);
   expect(failed.ending).toMatchObject({ stopReason: 'toolUse', textChars: 0 });
+});
+
+it('adds a tip to the result that calls for it, once per context, and reports it', async () => {
+  const bodies: any[] = [];
+  const f = await setup((body, _req, res) => {
+    bodies.push(body);
+    const files = ['a.py', 'b.py', 'c.py'];
+    completion(res, bodies.length <= files.length ? { tool: { name: 'write', arguments: { path: files[bodies.length - 1], content: 'print(1)\n' } } } : { text: 'Done.' });
+  });
+  const result = await runAttempt({ ...f, tier: 'normal', workload: 'coder', web: false, approve: async () => true, prompt: 'Write three scripts' });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  const sent = JSON.stringify(bodies.at(-1).messages);
+  const count = (text: string) => sent.split(text).length - 1;
+  expect(count('[tip] the user prefers creative, minimalist decision making')).toBe(1);
+  expect(count('[tip] keep your workspace organised')).toBe(1);
+  expect((await events(f.config)).filter(event => event.type === 'tip').map(event => event.name)).toEqual(['pythonPref', 'stayOrganised']);
 });

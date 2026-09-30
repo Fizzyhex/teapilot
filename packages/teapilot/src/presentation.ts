@@ -43,6 +43,11 @@ export function describeCompaction(event: HostEvent): string {
   return `compacted ${what}${size} into a summary${took}`;
 }
 
+/** One line for a tip the host gave the model (agents/tips.ts); a junior's carry its name. */
+export function describeTip(event: HostEvent): string {
+  return `${typeof event.junior === 'string' ? `${event.junior}: ` : ''}💡 ${String(event.name ?? '')}`;
+}
+
 /** Style complete lines, retaining every Markdown character and code indent. */
 export class MarkdownOutput {
   private pending = '';
@@ -451,6 +456,7 @@ export class TerminalPresentation implements ActivityUI {
     else if (event.type === 'tool_execution_start') this.setActivity({ kind: 'waiting', label: `${typeof event.junior === 'string' ? `${event.junior}: ` : ''}Running ${String(event.tool)}...` });
     else if (event.type === 'tool_execution_end') this.write(`${paint(describeTool(event), '2', this.colour)}\n`);
     else if (event.type === 'compaction' || event.type === 'compaction_failed') this.write(`${paint(describeCompaction(event), '2', this.colour)}\n`);
+    else if (event.type === 'tip') this.write(`${paint(describeTip(event), '2', this.colour)}\n`);
     else if (event.type === 'request_end' || event.type === 'request_error') this.pause();
   }
   private endMessage(): void {

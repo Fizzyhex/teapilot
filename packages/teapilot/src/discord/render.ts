@@ -1,4 +1,4 @@
-import { describeCompaction, describeTool } from '../presentation.js';
+import { describeCompaction, describeTip, describeTool } from '../presentation.js';
 import type { HostEvent } from '../integration/events.js';
 
 /** Discord's hard limit for one message's content. */
@@ -64,7 +64,7 @@ export function quoteMessage(message: QuotedMessage, chain: ReplyChain = { messa
 export type CardPhase = 'queued' | 'thinking' | 'running' | 'writing' | 'compacting' | 'approval' | 'stopping';
 /** What a press on a status card shows the person who pressed it, and only them. */
 export interface CardReply { text: string; file?: { name: string; content: string } }
-/** A tool call, reasoning, or something the host did between them (a compaction), which is listed but not counted as a step. */
+/** A tool call, reasoning, or something the host did between them (a compaction, a tip), which is listed but not counted as a step. */
 type Step = { tool: string } | { reasoning: string } | { note: string };
 
 const phases: Record<CardPhase, string> = {
@@ -124,6 +124,7 @@ export class StatusCard {
     if (event.type === 'message_end') { if (this.phase === 'writing') this.phase = 'thinking'; this.answer = ''; return true; }
     if (event.type === 'compaction_start') { this.phase = 'compacting'; return true; }
     if (event.type === 'compaction' || event.type === 'compaction_failed') { this.phase = 'thinking'; this.steps.push({ note: this.redact(describeCompaction(event)) }); return true; }
+    if (event.type === 'tip') { this.steps.push({ note: describeTip(event) }); return true; }
     return false;
   }
   /** Reasoning as it streams. Returns whether the card changed. */

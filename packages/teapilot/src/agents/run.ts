@@ -23,6 +23,7 @@ import { carryOver, fitHistory, supersedePlayCalls, supersedeReads, turnForms, t
 import { pastedEmoji, play, type PlayContext } from './play.js';
 import { workspace, type ConversationWorkspace } from './workspace.js';
 import { captureResult, fixtureTool, scratchPrompt, scratchTouched } from './scratchpad.js';
+import { pickTip, shownTips, tipText } from './tips.js';
 import { inventory, sessionTools, toolGuidelines } from './tools.js';
 import { Scratch, secretsOf } from '../workspace/scratch.js';
 import type { WebController } from '../web/controller.js';
@@ -371,6 +372,11 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const toolDetails = new Map<string, { path?: string; size?: number; command?: string; url?: string; to?: string }>();
   // Calls that ran, or that the host stopped; any other finished call was refused before execution.
   const settled = new Map<string, 'ran' | 'stopped'>();
+  // Tips in what the model was last sent, those given since, and whether that context is close to compaction (agents/tips.ts).
+  const tipping = config.tips?.enabled !== false;
+  let tipsShown = new Set<string>(), nearCompaction = false;
+  // A tip is reported after its call's own line, so progress trails show it under the call it answers.
+  const tipFor = new Map<string, string>();
   const agent = new Agent({
     initialState: { model: piModel(model, profile), systemPrompt: setup.systemPrompt, tools: setup.tools, thinkingLevel: profile.thinking, messages: [...history, ...input.resume?.messages ?? []] },
     streamFn: (...args) => {
@@ -383,6 +389,10 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     prepareRequest: async ({ context: given }) => {
       const context = await shape(given);
       live = context.messages;
+      if (tipping) {
+        tipsShown = shownTips(context.messages);
+        nearCompaction = settings.enabled && estimate(context) >= 0.8 * (profile.contextTokens - settings.reserveTokens);
+      }
       return context === given ? undefined : { context };
     },
     prepareNextTurnWithContext: async ({ context }) => {
@@ -416,7 +426,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
       return undefined;
     },
-    afterToolCall: async ({ toolCall, args, isError, result }) => {
+    afterToolCall: async ({ toolCall, args, isError, result, context: sent }) => {
       settled.set(toolCall.id, 'ran');
       if (!isError && ['play_start', 'play_update'].includes(toolCall.name) && result.content.some(part => part.type === 'text' && /^(Started|Updated) app /.test(part.text))) changed = true;
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
@@ -457,7 +467,15 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       else if (toolCall.name === 'web_read' && typeof data.url === 'string') toolDetails.set(toolCall.id, { url: shortUrl(data.url) });
       else if (toolCall.name === 'delegate_task' && typeof (result.details as { junior?: unknown } | undefined)?.junior === 'string') toolDetails.set(toolCall.id, { to: (result.details as { junior: string }).junior });
       const note = evidence.warning ?? continueNote;
-      if (note) return { content: [...content, { type: 'text' as const, text: note }] };
+      const written = args as { content?: unknown; edits?: Array<{ newText?: unknown }> };
+      const tip = tipping ? pickTip({
+        tool: toolCall.name, path: data.path, succeeded: !isError, scratch: Boolean(data.path && policy.inScratch(data.path)), pressure: nearCompaction,
+        content: typeof written.content === 'string' ? written.content : Array.isArray(written.edits) ? written.edits.map(edit => String(edit?.newText ?? '')).join('\n') : undefined,
+        tools: new Set((sent.tools ?? []).map(tool => tool.name)),
+      }, text => tipsShown.has(text)) : undefined;
+      if (tip) { tipsShown.add(tipText(tip)); tipFor.set(toolCall.id, tip.name); }
+      const extra = [note, tip && tipText(tip)].filter((text): text is string => Boolean(text));
+      if (extra.length) return { content: [...content, ...extra.map(text => ({ type: 'text' as const, text }))] };
       return kept ? { content } : undefined;
     },
     finishTurn: ({ message }) => {
@@ -513,6 +531,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       }
       const result = event.type === 'tool_execution_end' && event.toolName.startsWith('play_') ? JSON.stringify(event.result?.content?.[0]?.text ?? '').slice(1, 401) : undefined;
       input.onEvent?.({ type: event.type, tool: event.toolName, ...('isError' in event ? { isError: event.isError } : {}), ...(result ? { result } : {}), ...detail });
+      const tip = event.type === 'tool_execution_end' ? tipFor.get(event.toolCallId) : undefined;
+      if (tip) { tipFor.delete(event.toolCallId); return telemetry.event('tip', { name: tip, tool: event.toolName, attempt: input.attempt ?? 0, ...(input.junior ? { junior: input.junior.name } : {}) }); }
     }
   });
   deadline = Date.now() + config.policy.limits.attemptTimeoutMs; arm(config.policy.limits.attemptTimeoutMs);
