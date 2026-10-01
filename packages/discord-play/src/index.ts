@@ -75,6 +75,8 @@ export interface Context {
   random(): number;
   /** A server emoji by name (`name` or `:name:`), or `:name:` when no one pasted it. */
   emoji(name: string): string;
+  /** Sandboxed apps: reads a declared text asset snapshot synchronously; throws when missing. */
+  readText(name: string): string;
   /** Trusted apps only: a raw Discord REST call made as teapilot's bot, e.g. request('GET', `/channels/${id}`). */
   discord?: { request(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', route: string, body?: Json): Promise<unknown> };
 }

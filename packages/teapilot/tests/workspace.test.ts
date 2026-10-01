@@ -556,13 +556,14 @@ export default app({ init: () => 0, update: n => n + 1, view: n => ({ content: '
   const f = await agentSetup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
   const result = await runAttempt({ ...f, ...f.base, prompt: 'make a game', activePermissions: ['inference', 'discord.play'], play: f.play, workspace: f.workspace });
   expect(result.success, JSON.stringify(result)).toBe(true);
-  expect(JSON.stringify(bodies[0].messages)).toContain('write the whole app to one such as apps/snake.js with write, then call play_start({ file, title })');
+  expect(JSON.stringify(bodies[0].messages)).toContain('one workspace entry file, plus optional text assets');
+  expect(JSON.stringify(bodies[0].messages)).toContain('ctx.readText(name)');
   // Starting before writing is one wasted call, not a paused turn.
   expect(JSON.stringify(bodies[1].messages.at(-1))).toContain('No file named \\"apps/game.js\\" in the workspace: write the app to it first');
   expect(f.posts[0]!.content).toBe('🪑 0');
   expect(JSON.stringify(bodies[4].messages)).toContain('is already live from this turn');
   expect(f.posts).toHaveLength(1);
-  expect(JSON.stringify(bodies[5].messages.at(-1))).toContain('Nothing to change: apps/game.js is the same as the running code');
+  expect(JSON.stringify(bodies[5].messages.at(-1))).toContain('Nothing to change: apps/game.js and its assets are the same as the running snapshot');
   const [app] = f.runtime.list('dm:1');
   expect(app).toMatchObject({ file: 'apps/game.js' });
   const source = f.runtime.source(app!.id, 'dm:1');

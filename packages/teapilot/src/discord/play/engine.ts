@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Action, Participants, User } from '@teapilot/discord-play';
 import { PlayError } from './render.js';
+import type { AssetTexts } from './assets.js';
 
 /** What an app sees as its context, before the harness adds random() and emoji(). */
 export interface ContextData { now: number; invoker: User; participants: Participants; emojis: Record<string, string>; seed: number }
@@ -25,13 +26,20 @@ export const maxOutputChars = 256_000;
  * random() is mulberry32 over a persisted seed, so it continues across calls and restarts. Math.random
  * is the same generator, so apps that reach for it stay reproducible too.
  */
-export const harness = (awaitResult: boolean) => `
+export const harness = (awaitResult: boolean, assets: AssetTexts = {}) => `
 const definition = app && typeof app === 'object' ? app : undefined;
+const readAsset = (() => {
+  const texts = JSON.parse(${JSON.stringify(JSON.stringify(assets))});
+  return name => {
+    if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(texts, name)) throw new Error('asset ' + JSON.stringify(name) + ' is not declared; select it with play_start/play_update assets.');
+    return texts[name];
+  };
+})();
 globalThis.__play = ${awaitResult ? 'async ' : ''}(method, input, discord) => {
   if (!definition || typeof definition.init !== 'function' || typeof definition.update !== 'function' || typeof definition.view !== 'function') throw new Error('The app module must "export default app({ init, update, view })".');
   const { state, action, ctx: data } = JSON.parse(input);
   let seed = data.seed >>> 0;
-  const ctx = { now: data.now, invoker: data.invoker, participants: data.participants, emojis: data.emojis,
+  const ctx = { now: data.now, invoker: data.invoker, participants: data.participants, emojis: data.emojis, readText: readAsset,
     random() { seed = (seed + 0x6D2B79F5) >>> 0; let t = seed; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; },
     emoji(name) {
       const text = String(name);

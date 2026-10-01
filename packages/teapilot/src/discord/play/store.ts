@@ -13,7 +13,7 @@ const recordSchema = z.object({
   viaInteraction: z.boolean().optional(),
   participants: z.union([z.literal('everyone'), z.literal('invoker'), z.array(z.string())]),
   source: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('sandbox'), code: z.string() }),
+    z.object({ kind: z.literal('sandbox'), code: z.string(), assets: z.record(z.string(), z.string()).optional() }),
     z.object({ kind: z.literal('trusted'), path: z.string(), sha256: z.string() }),
   ]),
   state: z.unknown(), seed: z.number(), view: z.custom<View>(value => typeof value === 'object' && value !== null),
@@ -25,6 +25,8 @@ const recordSchema = z.object({
   status: z.enum(['running', 'finished', 'paused']),
   /** The workspace file the app runs from, which play_update reloads. */
   file: z.string().optional(),
+  /** Logical asset names to workspace files or repository paths, used only when explicitly reloading. */
+  assetFiles: z.record(z.string(), z.string()).optional(),
   note: z.string().optional(),
   log: z.array(z.object({ at: z.number(), action: z.string(), error: z.string().optional() })),
   createdAt: z.number(), updatedAt: z.number(),

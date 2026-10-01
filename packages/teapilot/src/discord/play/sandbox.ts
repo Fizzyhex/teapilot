@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { newQuickJSWASMModuleFromVariant, shouldInterruptAfterDeadline, type QuickJSContext, type QuickJSRuntime, type QuickJSWASMModule } from 'quickjs-emscripten-core';
 import { harness, maxSourceChars, parseResult, sdkPath, toJavaScript, type CallInput, type CallResult, type Method, type PlayEngine } from './engine.js';
 import { PlayError } from './render.js';
+import { checkAssetTexts, type AssetTexts } from './assets.js';
 
 const sdkName = '@teapilot/discord-play';
 const memoryBytes = 32 * 1024 * 1024;
@@ -22,7 +23,7 @@ const sdkExports = () => [...loadSdk().matchAll(/^export (?:function|const) (\w+
  */
 class SandboxEngine implements PlayEngine {
   private realm?: { runtime: QuickJSRuntime; context: QuickJSContext };
-  constructor(private readonly module: QuickJSWASMModule, private readonly code: string) {}
+  constructor(private readonly module: QuickJSWASMModule, private readonly code: string, private readonly assets: AssetTexts) {}
 
   load(): void {
     if (this.realm) return;
@@ -40,7 +41,7 @@ class SandboxEngine implements PlayEngine {
     this.realm = { runtime, context };
     try {
       runtime.setInterruptHandler(shouldInterruptAfterDeadline(Date.now() + loadMs));
-      const result = context.evalCode(`import 'prelude';\nimport app from 'app';\n${harness(false)}`, 'harness.js', { type: 'module' });
+      const result = context.evalCode(`import 'prelude';\nimport app from 'app';\n${harness(false, this.assets)}`, 'harness.js', { type: 'module' });
       if (result.error) { const error = context.dump(result.error); result.error.dispose(); throw new PlayError(`The app failed to load: ${message(error)}`); }
       result.value.dispose();
       const pending = runtime.executePendingJobs();
@@ -89,9 +90,10 @@ function message(error: unknown): string {
 }
 
 /** Loads an app from TypeScript or JavaScript source; syntax and export mistakes surface here. */
-export async function sandbox(source: string): Promise<PlayEngine> {
+export async function sandbox(source: string, assets: AssetTexts = {}): Promise<PlayEngine> {
   if (source.length > maxSourceChars) throw new PlayError(`The app source is ${source.length} characters; the limit is ${maxSourceChars}.`);
-  const engine = new SandboxEngine(await quickjs(), toJavaScript(source));
+  checkAssetTexts(assets);
+  const engine = new SandboxEngine(await quickjs(), toJavaScript(source), assets);
   engine.load();
   return engine;
 }

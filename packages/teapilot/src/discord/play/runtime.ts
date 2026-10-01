@@ -8,6 +8,7 @@ import { describe, findControl, normalizeView, PlayError, renderEmbeds, renderMo
 import { sandbox } from './sandbox.js';
 import type { PlayRecord, PlayStore } from './store.js';
 import { trusted, type DiscordRequest } from './trusted.js';
+import type { AssetFiles } from './assets.js';
 
 /** Where an app's message lives; the gateway implements it. */
 export interface PlaySurface {
@@ -50,6 +51,7 @@ export interface StartOptions {
   title: string; channelId: string; conversation: string; owner: User; source: Source; participants?: Participants; emojis?: Record<string, string>;
   /** The workspace file the code came from, which play_update reloads. */
   file?: string;
+  assetFiles?: AssetFiles;
   /** Posts the app through an interaction instead of in the channel. */
   post?: (payload: MessagePayload) => Promise<HostedMessage>;
 }
@@ -158,7 +160,7 @@ export class PlayRuntime {
   }
 
   private async build(source: Source): Promise<PlayEngine> {
-    if (source.kind === 'sandbox') return sandbox(source.code);
+    if (source.kind === 'sandbox') return sandbox(source.code, source.assets);
     if (await hashFile(source.path).catch(() => undefined) !== source.sha256) throw new PlayError('The trusted app file changed since it was approved. Start or update it again to re-approve.');
     return trusted(source.path, this.options.surface.request, this.options.log);
   }
@@ -480,6 +482,7 @@ export class PlayRuntime {
         participants: 'everyone', source: options.source, state: null, seed: randomBytes(4).readUInt32LE(), view: {}, emojis: options.emojis ?? {},
         timers: [], consults: [], status: 'running', log: [], createdAt: now, updatedAt: now,
         ...(options.post ? { viaInteraction: true } : {}), ...(options.file ? { file: options.file } : {}),
+        ...(options.assetFiles ? { assetFiles: options.assetFiles } : {}),
       };
       const meta = (await engine.call('meta', { ctx: this.context(record) })).value as { participants?: unknown } | null;
       record.participants = checkParticipants(options.participants ?? meta?.participants ?? 'everyone');
@@ -513,12 +516,13 @@ export class PlayRuntime {
 
   /** Swaps in new code or a title. Keeping state lets a fix land mid-game; the view re-renders in place. */
   /** `start` schedules timers now, for a loop new code adds to an app whose init and start button already ran; `emojis` adds server emoji pasted since it started. */
-  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = [], emojis: Record<string, string> = {}, title?: string): Promise<{ record: PlayRecord; preview: string }> {
+  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = [], emojis: Record<string, string> = {}, title?: string, assetFiles?: AssetFiles): Promise<{ record: PlayRecord; preview: string }> {
     const live = this.owned(id, conversation);
     return this.serial(live, async () => {
       const engine = source ? await this.build(source) : await this.engine(live);
       // Starting a timer by hand is deliberate, so it runs without waiting for anyone to play.
       const record: PlayRecord = { ...live.record, title: title === undefined ? live.record.title : clip(title, 100), source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
+      if (assetFiles !== undefined) record.assetFiles = assetFiles;
       try {
         // Kept state lacks what the new version's init() adds (a leaderboard, a weather field); fill those in.
         const added = source && !reset ? await this.fillDefaults(engine, record) : [];
@@ -597,7 +601,8 @@ export class PlayRuntime {
 
   inspect(id: string, conversation: string): string {
     const { record } = this.owned(id, conversation);
-    return JSON.stringify({ id: record.id, title: record.title, status: record.status, note: record.note, participants: record.participants, source: record.source.kind === 'trusted' ? { trusted: record.source.path } : 'sandbox', timers: record.timers, state: record.state, recentActions: record.log });
+    const assets = record.source.kind === 'sandbox' ? Object.entries(record.source.assets ?? {}).map(([name, text]) => ({ name, file: record.assetFiles?.[name], bytes: Buffer.byteLength(text, 'utf8') })) : [];
+    return JSON.stringify({ id: record.id, title: record.title, status: record.status, note: record.note, participants: record.participants, source: record.source.kind === 'trusted' ? { trusted: record.source.path } : 'sandbox', assets, timers: record.timers, state: record.state, recentActions: record.log });
   }
 
   /** The code an app runs now, so a change can be made as small edits to it. */
@@ -605,6 +610,9 @@ export class PlayRuntime {
 
   /** The workspace file an app runs from, if any. */
   file(id: string, conversation: string): string | undefined { return this.owned(id, conversation).record.file; }
+
+  /** File selection for an explicit reload; normal callbacks only see the persisted snapshot. */
+  assetFiles(id: string, conversation: string): AssetFiles { return { ...this.owned(id, conversation).record.assetFiles }; }
 
   /** Records the workspace file an app runs from now: one whose code was only inline, or one moved to another file. */
   adopt(id: string, conversation: string, file: string): void {
