@@ -62,7 +62,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
   const require = () => { if (!has('discord.play')) throw new Error('Missing discord.play permission'); };
   /** The code play_start or play_update last rejected, and the file the current call is trying. */
   let rejected: string | undefined, trying: { code: string; file?: string } | undefined;
-  /** The running app play_update last tried, so a dry run of its file starts from what its players have. */
+  /** The running app play_update last tried, preferred when a dry run names no file. */
   let updating: string | undefined;
   /** The app play_start posted in this turn, so the same app is not posted twice. */
   let started: { id: string; title: string } | undefined;
@@ -184,16 +184,17 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     },
     {
       name: 'play_update', label: 'Update Discord app',
-      description: `Reload a running app from its ${repository ? 'repository' : 'workspace'} file after you changed it with edit, and re-render its message in place. State is kept unless reset is true.`,
+      description: `Reload a running app from its ${repository ? 'repository' : 'workspace'} file after you changed it with edit, or rename its stored title, and re-render its message in place. State is kept unless reset is true. View text comes from the app's code.`,
       parameters: Type.Object({
         id: Type.Optional(Type.String({ description: 'Omit for the newest running app in this conversation.' })),
+        title: Type.Optional(Type.String({ minLength: 1, maxLength: 100, description: 'Change the stored app name. Titles and text inside its message are defined by its code.' })),
         ...location(`Run from this ${repository ? 'repository' : 'workspace'} file from now on, instead of the app's own.`),
         ...repository ? { trusted: Type.Optional(Type.Boolean()) } : {},
         reset: Type.Optional(Type.Boolean({ description: 'Start over from init() instead of keeping the current state.' })),
         timers: Type.Optional(Type.Array(Type.Object({ id: Type.String(), ms: Type.Number() }), { minItems: 1, maxItems: 5, description: 'Timers to start now, such as [{ id: "tick", ms: 2000 }]: a loop the new code adds never starts on its own in an app past its init and start button.' })),
       }),
       execute: async (_id, params, signal) => attempt('play_update', async () => {
-        const args = params as { id?: string; file?: string; path?: string; trusted?: boolean; reset?: boolean; timers?: Array<{ id: string; ms: number }> };
+        const args = params as { id?: string; title?: string; file?: string; path?: string; trusted?: boolean; reset?: boolean; timers?: Array<{ id: string; ms: number }> };
         const id = args.id ?? newest();
         if (!id) return 'No running app in this conversation; pass id (see play_list) or use play_start.';
         const current = context.runtime.source(id, context.conversation);
@@ -210,13 +211,14 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         const loaded = await resolve(path !== undefined ? { ...args, path } : { file }, signal);
         if (typeof loaded === 'string') return loaded;
         const same = loaded.source.kind === 'sandbox' && current.kind === 'sandbox' && loaded.source.code.trim() === current.code.trim();
-        if (same && !args.reset && !args.timers) return adopted
+        const renamed = args.title !== undefined && args.title !== context.runtime.list(context.conversation).find(app => app.id === id)?.title;
+        if (same && !args.reset && !args.timers && !renamed) return adopted
           ? `App ${id}'s code is now the workspace file ${file}. Change it with edit, then call play_update.`
           : `Nothing to change: ${loaded.file ?? 'the file'} is the same as the running code. Change it with edit first, then call play_update.`;
-        const { record, preview } = await context.runtime.update(id, context.conversation, same ? undefined : loaded.source, Boolean(args.reset), args.timers, known());
+        const { record, preview } = await context.runtime.update(id, context.conversation, same ? undefined : loaded.source, Boolean(args.reset), args.timers, known(), args.title);
         if (loaded.file && loaded.file !== record.file) context.runtime.adopt(id, context.conversation, loaded.file);
         tests = 0; rejected = undefined;
-        return `Updated app ${record.id}.\nPreview:\n${preview}${unused(loaded.source)}`;
+        return `Updated app ${record.id}${renamed ? ` (${JSON.stringify(record.title)})` : ''}.\nPreview:\n${preview}${unused(loaded.source)}`;
       }),
     },
     {
@@ -233,9 +235,10 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     },
     {
       name: 'play_test', label: 'Test Discord app',
-      description: `Dry-run an app's ${repository ? 'repository' : 'workspace'} file without posting it: runs init (or, for the file of the app play_update last changed, starts from that app's current state), then each action, and shows the resulting state, view and effects. Optional: play_start tries every control itself.`,
+      description: `Dry-run an app's ${repository ? 'repository' : 'workspace'} file without posting it. A running app's own file starts from its current state, even before play_update; other files start from init. Then runs each action and shows state, view and effects. Optional: play_start tries every control itself.`,
       parameters: Type.Object({
-        ...location(`The app's ${repository ? 'repository' : 'workspace'} file; defaults to the file of the app play_update last changed.`),
+        ...location(`The app's ${repository ? 'repository' : 'workspace'} file; defaults to the app play_update last tried, or the newest running app here.`),
+        reset: Type.Optional(Type.Boolean({ description: 'Test a fresh init instead of the running app\'s current state. This does not reset the live app.' })),
         steps: Type.Optional(Type.Boolean({ description: 'Show every step, not only the last. Long; leave off unless debugging.' })),
         actions: Type.Array(Type.Object({
           kind: Type.String({ description: 'button, select, modal, timer or consult.' }),
@@ -245,18 +248,21 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         }), { maxItems: 50 }),
       }),
       execute: async (_id, params, signal) => attempt('play_test', async () => {
-        const args = params as { path?: string; file?: string; actions: Array<TestAction & { user_id?: string }>; steps?: boolean };
+        const args = params as { path?: string; file?: string; reset?: boolean; actions: Array<TestAction & { user_id?: string }>; steps?: boolean };
         const kinds = ['button', 'select', 'modal', 'timer', 'consult'];
         const wrong = args.actions.find(action => !kinds.includes(action.kind));
         if (wrong) return `Action kind ${JSON.stringify(wrong.kind)} is not one of ${kinds.join(', ')}.`;
         tested = true;
         if (++tests > 2) return 'Enough dry runs: call play_start (or play_update) now. It tries every control before posting and returns anything that breaks, so remaining problems can be fixed in place.';
-        const running = updating && visible().some(app => app.id === updating) ? updating : undefined;
+        const running = updating && visible().some(app => app.id === updating) ? updating : newest();
         const own = args.file === undefined && args.path === undefined && running ? await fileOf(running) : undefined;
         const loaded = await resolve(repository ? { path: args.path ?? own } : { file: args.file ?? own }, signal, true);
         if (typeof loaded === 'string') return loaded;
         // A dry run of the running app's own file shows what its players will actually get.
-        const state = running && loaded.file !== undefined && loaded.file === context.runtime.file(running, context.conversation) ? context.runtime.state(running, context.conversation) : undefined;
+        const candidates = context.runtime.list(context.conversation).filter(app => app.status === 'running').reverse();
+        const matching = loaded.file === undefined ? undefined : candidates.find(app => app.id === running && context.runtime.file(app.id, context.conversation) === loaded.file)
+          ?? candidates.find(app => context.runtime.file(app.id, context.conversation) === loaded.file);
+        const state = !args.reset && matching ? context.runtime.state(matching.id, context.conversation) : undefined;
         return context.runtime.test(loaded.source, args.actions.map(({ user_id, ...action }) => user_id ? { ...action, user: { id: user_id } } : action), owner, { steps: args.steps, state, emojis: known(), conversation: context.conversation });
       }),
     },

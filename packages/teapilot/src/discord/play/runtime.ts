@@ -500,24 +500,28 @@ export class PlayRuntime {
     } catch (error) { engine.dispose(); throw error; }
   }
 
-  /** Swaps in new code. Keeping state lets a fix land mid-game; the view re-renders in place. */
+  /** A new version can add top-level defaults without replacing players' existing data. */
+  private async fillDefaults(engine: PlayEngine, record: PlayRecord): Promise<string[]> {
+    const state = record.state;
+    if (!isObject(state)) return [];
+    const fresh = normalize((await engine.call('init', { ctx: this.context(record) })).value).state;
+    if (!isObject(fresh)) return [];
+    const added = Object.keys(fresh).filter(key => !(key in state));
+    if (added.length) record.state = { ...Object.fromEntries(added.map(key => [key, fresh[key]])), ...state };
+    return added;
+  }
+
+  /** Swaps in new code or a title. Keeping state lets a fix land mid-game; the view re-renders in place. */
   /** `start` schedules timers now, for a loop new code adds to an app whose init and start button already ran; `emojis` adds server emoji pasted since it started. */
-  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = [], emojis: Record<string, string> = {}): Promise<{ record: PlayRecord; preview: string }> {
+  async update(id: string, conversation: string, source: Source | undefined, reset: boolean, start: Array<{ id: string; ms: number }> = [], emojis: Record<string, string> = {}, title?: string): Promise<{ record: PlayRecord; preview: string }> {
     const live = this.owned(id, conversation);
     return this.serial(live, async () => {
       const engine = source ? await this.build(source) : await this.engine(live);
       // Starting a timer by hand is deliberate, so it runs without waiting for anyone to play.
-      const record: PlayRecord = { ...live.record, source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
-      const added: string[] = [];
+      const record: PlayRecord = { ...live.record, title: title === undefined ? live.record.title : clip(title, 100), source: source ?? live.record.source, emojis: { ...live.record.emojis, ...emojis }, status: 'running', note: undefined, ...(reset ? { state: null, timers: [] } : {}) };
       try {
         // Kept state lacks what the new version's init() adds (a leaderboard, a weather field); fill those in.
-        if (source && !reset && isObject(record.state)) {
-          const fresh = normalize((await engine.call('init', { ctx: this.context(record) })).value).state;
-          if (isObject(fresh)) {
-            for (const key of Object.keys(fresh)) if (!(key in record.state)) added.push(key);
-            if (added.length) record.state = { ...Object.fromEntries(added.map(key => [key, fresh[key]])), ...record.state };
-          }
-        }
+        const added = source && !reset ? await this.fillDefaults(engine, record) : [];
         const step = reset ? await this.advance(engine, record) : await (async () => {
           const shown = await engine.call('view', { state: record.state, ctx: this.context(record) });
           const view = normalizeView(shown.value);
@@ -570,6 +574,7 @@ export class PlayRuntime {
       else {
         // A running app's own state, so a dry run of new code shows what people will actually get.
         record.state = options.state;
+        await this.fillDefaults(engine, record);
         const shown = await engine.call('view', { state: record.state, ctx: this.context(record) });
         show('current state', { state: record.state, seed: shown.seed, view: normalizeView(shown.value) as View, payload: renderView(record.id, normalizeView(shown.value)), effects: [], timers: [] });
       }

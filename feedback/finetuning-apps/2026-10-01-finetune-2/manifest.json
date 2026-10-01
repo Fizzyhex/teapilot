@@ -1,0 +1,34 @@
+[
+  {
+    "run": "gb2-r1",
+    "directory": "baseline-1",
+    "source": "kiosk.js",
+    "catalog": "catalog.json",
+    "snapshot": "E",
+    "evaluatorEvidence": "C:\\Users\\simul\\AppData\\Local\\Temp\\gitbench-2026-10-01-eval-2\\gb2-r1"
+  },
+  {
+    "run": "gb2-r2",
+    "directory": "baseline-2",
+    "source": "kiosk.js",
+    "catalog": "catalog.json",
+    "snapshot": "E",
+    "evaluatorEvidence": "C:\\Users\\simul\\AppData\\Local\\Temp\\gitbench-2026-10-01-eval-2\\gb2-r2"
+  },
+  {
+    "run": "gb2-r3",
+    "directory": "baseline-3",
+    "source": "cafe_kiosk.js",
+    "catalog": "kiosk_catalog.json",
+    "snapshot": "E",
+    "evaluatorEvidence": "C:\\Users\\simul\\AppData\\Local\\Temp\\gitbench-2026-10-01-eval-2\\gb2-r3"
+  },
+  {
+    "run": "gb2-after1",
+    "directory": "tuned-1",
+    "source": "kiosk.js",
+    "catalog": "catalog.json",
+    "snapshot": "E",
+    "evaluatorEvidence": "C:\\Users\\simul\\AppData\\Local\\Temp\\gitbench-2026-10-01-eval-2\\gb2-after1"
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "id": "b1",
+    "category": "breakfast",
+    "name": "egg roll",
+    "price_pence": 325,
+    "available": true,
+    "description": "egg in a soft roll"
+  },
+  {
+    "id": "b2",
+    "category": "breakfast",
+    "name": "toast",
+    "price_pence": 180,
+    "available": true,
+    "description": "two slices with butter"
+  },
+  {
+    "id": "b3",
+    "category": "breakfast",
+    "name": "porridge",
+    "price_pence": 290,
+    "available": false,
+    "description": "warm oats with apple"
+  },
+  {
+    "id": "b4",
+    "category": "breakfast",
+    "name": "oat pot",
+    "price_pence": 240,
+    "available": true,
+    "description": "warm oat porridge"
+  },
+  {
+    "id": "s1",
+    "category": "sweets",
+    "name": "brownie",
+    "price_pence": 260,
+    "available": true,
+    "description": "chocolate brownie"
+  },
+  {
+    "id": "s2",
+    "category": "sweets",
+    "name": "lemon slice",
+    "price_pence": 245,
+    "available": false,
+    "description": "lemon sponge slice"
+  },
+  {
+    "id": "s3",
+    "category": "sweets",
+    "name": "flapjack",
+    "price_pence": 210,
+    "available": true,
+    "description": "oat and syrup bar"
+  }
+]
