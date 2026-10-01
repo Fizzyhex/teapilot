@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { cp, lstat, readdir, rm } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { z } from 'zod';
@@ -207,6 +207,30 @@ export class WorkspaceStore {
     return this.keep(conversation, fileName(name), data, from, type);
   }
 
+  /** Keeps a user's attachment in the scratchpad under a new name, never replacing an existing entry. */
+  async saveAttachment(conversation: string, name: string, data: Buffer, from: string, type?: string): Promise<StoredFile> {
+    let directory = this.folder(conversation);
+    for (const part of ['.scratch', 'user-attachments']) {
+      directory = join(directory, part);
+      const info = lstatSync(directory, { throwIfNoEntry: false });
+      if (!info) mkdirSync(directory);
+      else if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${part} is not a folder in the scratchpad.`);
+    }
+    const clean = fileName(name);
+    const extension = extname(clean);
+    const stem = clean.slice(0, clean.length - extension.length);
+    const taken = new Set(readdirSync(directory).map(entry => entry.toLowerCase()));
+    for (let copy = 0; ; copy++) {
+      const candidate = copy ? `${stem}-${copy}${extension}` : clean;
+      if (taken.has(candidate.toLowerCase())) continue;
+      try { return await this.keep(conversation, `.scratch/user-attachments/${candidate}`, data, from, type, true); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        taken.add(candidate.toLowerCase());
+      }
+    }
+  }
+
   /** As save, at a path with folders (apps/game.js), each part made safe; never through a link a command left. */
   async saveAt(conversation: string, path: string, data: Buffer, from: string): Promise<StoredFile> {
     const parts = path.split(/[\\/]/).filter(part => part && part !== '.' && part !== '..').map(fileName);
@@ -220,12 +244,12 @@ export class WorkspaceStore {
     return this.keep(conversation, parts.join('/') || 'file', data, from);
   }
 
-  private async keep(conversation: string, clean: string, data: Buffer, from: string, type?: string): Promise<StoredFile> {
+  private async keep(conversation: string, clean: string, data: Buffer, from: string, type?: string, exclusive = false): Promise<StoredFile> {
     if (data.length > maxFileBytes) throw new Error(`${clean} is ${size(data.length)}; files may be at most ${size(maxFileBytes)}.`);
     const folder = this.folder(conversation);
     // Never write through a link a command left under this name.
-    rmSync(join(folder, clean), { force: true });
-    writeFileSync(join(folder, clean), data);
+    if (!exclusive) rmSync(join(folder, clean), { force: true });
+    writeFileSync(join(folder, clean), data, { flag: exclusive ? 'wx' : 'w' });
     const entry = await this.describe(clean, data, from, type);
     const index = this.index(conversation);
     index.files = [...index.files.filter(file => file.name !== clean), { ...entry, mtimeMs: lstatSync(join(folder, clean)).mtimeMs }];
@@ -317,14 +341,24 @@ export class WorkspaceStore {
     this.write(conversation, index);
   }
 
+  /** Clears the scratchpad and its listed files, including user attachments and queued pictures. */
+  async clearScratch(conversation: string): Promise<void> {
+    const index = this.index(conversation);
+    index.files = index.files.filter(file => !file.name.startsWith('.scratch/'));
+    this.write(conversation, index);
+    this.arrived.delete(conversation);
+    await rm(this.scratch(conversation), { recursive: true, force: true });
+  }
+
   /** Deletes the files, packages and caches, keeping the scratchpad, the name and the approved hosts. */
   async clearFiles(conversation: string): Promise<number> {
     const folder = this.folder(conversation);
     const entries = await readdir(folder).catch(() => [] as string[]);
     for (const entry of entries) if (entry !== '.scratch') await rm(join(folder, entry), { recursive: true, force: true });
     const index = this.index(conversation);
-    const count = index.files.length;
-    index.files = [];
+    const kept = index.files.filter(file => file.name.startsWith('.scratch/'));
+    const count = index.files.length - kept.length;
+    index.files = kept;
     this.write(conversation, index);
     return count;
   }

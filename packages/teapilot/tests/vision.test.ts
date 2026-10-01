@@ -94,7 +94,9 @@ it('keeps a picture that arrived once, for the next request only', async () => {
     { name: 'notes.txt', size: 5, data: async () => Buffer.from('hello') },
   ], 'op', 10_000);
   expect(result).toContain('tree.png (PNG image 64×64');
-  expect(f.store.takeImages('dm:1')).toEqual(['tree.png']);
+  const images = f.store.takeImages('dm:1');
+  expect(images).toEqual(['.scratch/user-attachments/tree.png']);
+  expect(await workspaceImages(f.store, 'dm:1', images)).toHaveLength(1);
   expect(f.store.takeImages('dm:1')).toEqual([]);
   expect(f.store.takeImages('dm:2')).toEqual([]);
 });

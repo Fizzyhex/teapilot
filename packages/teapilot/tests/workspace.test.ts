@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { copyFile, link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -16,6 +16,7 @@ import { ExecutionPolicy, type Approval } from '../src/execution/policy.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import type { RunOptions, WorkspaceSandbox } from '../src/workspace/sandbox.js';
+import { receiveFiles } from '../src/workspace/attach.js';
 import { fileLimits, WorkspaceStore } from '../src/workspace/store.js';
 import { TerminalWorkspace } from '../src/workspace/terminal.js';
 import { pandocAsset, pythonAbi } from '../src/workspace/toolchain.js';
@@ -74,6 +75,73 @@ it('keeps files per conversation by safe names, with image sizes, replacing a fi
   expect(store.read('dm:1', 'notes.txt')?.data.toString()).toBe('hello again');
   expect(store.list('dm:1')).toHaveLength(2);
   expect(await imageInfo(Buffer.from('not an image'))).toBeUndefined();
+});
+
+it('keeps incoming files in the scratchpad without replacing workspace files or earlier attachments', async () => {
+  const state = await directory('teapilot-workspace-');
+  const store = WorkspaceStore.at(state);
+  await store.save('dm:1', 'notes.txt', Buffer.from('workspace original'), 'teapilot');
+  const incoming = (text: string) => ({ name: 'notes.txt', size: text.length, type: 'text/plain', data: async () => Buffer.from(text) });
+  const first = await receiveFiles(store, 'dm:1', [incoming('first')], 'op', 5000);
+  const second = await receiveFiles(store, 'dm:1', [incoming('second')], 'user', 5000);
+  expect(first).toContain('Attached file .scratch/user-attachments/notes.txt');
+  expect(second).toContain('Attached file .scratch/user-attachments/notes-1.txt');
+  expect(store.read('dm:1', 'notes.txt')?.data.toString()).toBe('workspace original');
+  expect(store.read('dm:1', '.scratch/user-attachments/notes.txt')?.data.toString()).toBe('first');
+  expect(store.read('dm:1', '.scratch/user-attachments/notes-1.txt')?.data.toString()).toBe('second');
+  await store.reconcile('dm:1');
+  const restarted = WorkspaceStore.at(state);
+  expect(restarted.get('dm:1', '.scratch/user-attachments/notes-1.txt')).toMatchObject({ from: 'user', type: 'text/plain', size: 6 });
+  expect(restarted.tree('dm:1')).toContain('user-attachments/');
+});
+
+it('avoids sanitized, case-insensitive and unindexed attachment name clashes, including folders', async () => {
+  const store = WorkspaceStore.at(await directory('teapilot-workspace-'));
+  store.folder('dm:1');
+  const attachments = join(store.scratch('dm:1'), 'user-attachments');
+  await mkdir(attachments, { recursive: true });
+  await writeFile(join(attachments, 'NOTES_file.txt'), 'unindexed');
+  await mkdir(join(attachments, 'notes_file-1.txt'));
+  const saved = await store.saveAttachment('dm:1', '../notes file.txt', Buffer.from('new'), 'op');
+  const next = await store.saveAttachment('dm:1', 'notes?file.txt', Buffer.from('next'), 'op');
+  expect(saved.name).toBe('.scratch/user-attachments/notes_file-2.txt');
+  expect(next.name).toBe('.scratch/user-attachments/notes_file-3.txt');
+  expect(await readFile(join(attachments, 'NOTES_file.txt'), 'utf8')).toBe('unindexed');
+  expect(store.safePath('dm:1', saved.name)).toBe(join(attachments, 'notes_file-2.txt'));
+});
+
+it('keeps concurrent attachments under distinct names, including files without extensions', async () => {
+  const store = WorkspaceStore.at(await directory('teapilot-workspace-'));
+  const saved = await Promise.all(['first', 'second', 'third'].map(text => store.saveAttachment('dm:1', 'notes', Buffer.from(text), 'op')));
+  expect(saved.map(file => file.name)).toEqual(['.scratch/user-attachments/notes', '.scratch/user-attachments/notes-1', '.scratch/user-attachments/notes-2']);
+  expect(saved.map(file => store.read('dm:1', file.name)?.data.toString())).toEqual(['first', 'second', 'third']);
+  expect(store.list('dm:1')).toHaveLength(3);
+});
+
+it.each(['.scratch', '.scratch/user-attachments'])('refuses an attachment folder linked outside the workspace at %s', async path => {
+  const store = WorkspaceStore.at(await directory('teapilot-workspace-'));
+  const outside = await directory('teapilot-outside-');
+  await writeFile(join(outside, 'notes.txt'), 'host original');
+  const folder = store.folder('dm:1');
+  if (path.includes('/')) await mkdir(store.scratch('dm:1'));
+  await symlink(outside, join(folder, path), 'junction');
+  await expect(store.saveAttachment('dm:1', 'notes.txt', Buffer.from('new'), 'op')).rejects.toThrow('not a folder in the scratchpad');
+  expect(await readFile(join(outside, 'notes.txt'), 'utf8')).toBe('host original');
+  expect(store.list('dm:1')).toEqual([]);
+});
+
+it('keeps attachments when workspace files are cleared, and removes them with the scratchpad', async () => {
+  const store = WorkspaceStore.at(await directory('teapilot-workspace-'));
+  await store.save('dm:1', 'result.txt', Buffer.from('result'), 'teapilot');
+  const attachment = await store.saveAttachment('dm:1', 'tree.png', await png(), 'op');
+  store.arrive('dm:1', attachment.name);
+  expect(await store.clearFiles('dm:1')).toBe(1);
+  expect(store.list('dm:1')).toEqual([expect.objectContaining({ name: attachment.name })]);
+  expect(store.read('dm:1', attachment.name)?.file.width).toBe(40);
+  await store.clearScratch('dm:1');
+  expect(store.list('dm:1')).toEqual([]);
+  expect(store.takeImages('dm:1')).toEqual([]);
+  expect(existsSync(store.scratch('dm:1'))).toBe(false);
 });
 
 it('records what a command made, changed and removed, leaving packages and caches unlisted', async () => {
@@ -534,10 +602,10 @@ it('copies @mentioned files into a terminal session\'s workspace and saves sent 
   const approvals: Approval[] = [];
   const session = new TerminalWorkspace(store, fakeSandbox(), async approval => { approvals.push(approval); return false; });
   const prompt = await session.attach('turn @tree.png and read @notes.txt, but not @missing.png or @../escape.txt', cwd, 5000);
-  expect(prompt).toContain('[Attached file tree.png (PNG image 40×20');
+  expect(prompt).toContain('[Attached file .scratch/user-attachments/tree.png (PNG image 40×20');
   expect(prompt).toContain('buy tea');
   const context = session.context(cwd);
-  expect(context.store.list(context.conversation).map(file => file.name)).toEqual(['tree.png', 'notes.txt']);
+  expect(context.store.list(context.conversation).map(file => file.name)).toEqual(['.scratch/user-attachments/tree.png', '.scratch/user-attachments/notes.txt']);
 
   const told = await context.send!('', [{ name: 'tree.png', data: Buffer.from('turned') }, { name: 'new.txt', data: Buffer.from('new') }]);
   expect(approvals).toEqual([expect.objectContaining({ kind: 'overwrite' })]);
@@ -548,6 +616,21 @@ it('copies @mentioned files into a terminal session\'s workspace and saves sent 
   const folder = store.folder(context.conversation);
   await session.close();
   expect(existsSync(folder)).toBe(false);
+});
+
+it('keeps distinct @mentioned files with the same basename and deduplicates repeated paths', async () => {
+  const store = WorkspaceStore.at(await directory('teapilot-workspace-'));
+  const cwd = await directory('teapilot-cwd-');
+  await mkdir(join(cwd, 'other'));
+  await writeFile(join(cwd, 'notes.txt'), 'first');
+  await writeFile(join(cwd, 'other', 'notes.txt'), 'second');
+  const session = new TerminalWorkspace(store, fakeSandbox(), async () => false);
+  await session.attach('@notes.txt @other/notes.txt @notes.txt', cwd, 5000);
+  const { conversation } = session.context(cwd);
+  expect(store.list(conversation).map(file => file.name)).toEqual(['.scratch/user-attachments/notes.txt', '.scratch/user-attachments/notes-1.txt']);
+  expect(store.read(conversation, '.scratch/user-attachments/notes.txt')?.data.toString()).toBe('first');
+  expect(store.read(conversation, '.scratch/user-attachments/notes-1.txt')?.data.toString()).toBe('second');
+  await session.close();
 });
 
 it('keeps teapilot\'s Python packages apart per interpreter ABI, and has a pinned pandoc for each desktop platform', () => {

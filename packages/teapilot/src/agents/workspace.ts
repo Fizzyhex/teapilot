@@ -177,7 +177,7 @@ function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus |
   const deliver = context.delivery === 'save' ? 'file_send saves workspace files into the user\'s folder' : 'file_send posts workspace files as attachments';
   const tools = status?.tools.length ? status.tools.map(tool => `${tool.name} ${tool.version}`).join(', ') : 'only the shell\'s own commands';
   return [
-    '- This conversation has a workspace folder: files people attach are kept there by name, next to what you make. ' + (vision
+    '- This conversation has a workspace folder: files people attach are kept under .scratch/user-attachments/ with unique names. ' + (vision
       ? `You can see images, not hear audio: pictures people attach are shown to you with their message${rooted ? ', and read opens any other picture in the workspace' : ''}. Work from names, sizes and command output for everything else.`
       : 'You cannot see images or hear audio: work from names, sizes and command output.'),
     ...rooted ? ['- read, write, edit, ls, find and grep take workspace file names. Create files, scripts included, with write; change part of one with edit rather than writing all of it again.'] : [],

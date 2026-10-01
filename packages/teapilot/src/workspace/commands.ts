@@ -1,4 +1,3 @@
-import { rm } from 'node:fs/promises';
 import type { WorkspaceStore } from './store.js';
 
 /**
@@ -19,7 +18,7 @@ export interface WorkspaceControls {
 export const storeControls = (store: WorkspaceStore, conversation: () => string): WorkspaceControls => ({
   count: () => store.list(conversation()).length,
   clearFiles: () => store.clearFiles(conversation()),
-  clearScratch: () => rm(store.scratch(conversation()), { recursive: true, force: true }),
+  clearScratch: () => store.clearScratch(conversation()),
   name: label => { if (label !== undefined) store.rename(conversation(), label); return store.name(conversation()); },
   tree: dir => store.tree(conversation(), dir),
 });

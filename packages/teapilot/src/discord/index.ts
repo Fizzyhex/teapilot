@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { realpath, rm } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { isAside, proposalRequest } from '../chat.js';
 import { loadConfig, type Config } from '../config.js';
 import { repositoryOffered, repositoryPermissions, SessionGrants } from '../execution/grants.js';
@@ -122,7 +122,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   let setStatus: Gateway['setStatus'] | undefined;
   const files = WorkspaceStore.at(stateDir);
   /** A conversation's scratchpad is working material for its task, so it goes when its history is cleared; files and apps stay. */
-  const clearScratch = (historyKey: string) => { void rm(files.scratch(historyKey), { recursive: true, force: true }).catch(error => log(`${historyKey}: scratchpad not cleared: ${error instanceof Error ? error.message : String(error)}`)); };
+  const clearScratch = (historyKey: string) => { void files.clearScratch(historyKey).catch(error => log(`${historyKey}: scratchpad not cleared: ${error instanceof Error ? error.message : String(error)}`)); };
   const sandbox = new SrtSandbox(stateDir, config.workspace, config.source?.directory);
   void sandbox.status().then(status => log(status.available
     ? `Workspace commands run sandboxed with ${status.tools.map(tool => tool.name).join(', ') || 'no media tools found'}.`

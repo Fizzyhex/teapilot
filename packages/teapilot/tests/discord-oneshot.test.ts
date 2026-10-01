@@ -5,6 +5,7 @@ import type { DiscordTransport } from '../src/discord/bridge.js';
 import type { connect, GatewayHandlers, GatewayReply } from '../src/discord/gateway.js';
 import { grantView, type GrantPanel } from '../src/discord/grants-panel.js';
 import { serveDiscord } from '../src/discord/index.js';
+import { WorkspaceStore } from '../src/workspace/store.js';
 import { completion, fixture, jev, mockServer } from './helpers.js';
 
 const cleanups: Array<() => unknown> = [];
@@ -138,20 +139,24 @@ it('points /collab at /prompt where teapilot can post', async () => {
 }, 30_000);
 
 it('clears the conversation and the workspace separately, and asks before clearing a collab\'s', async () => {
-  const { reply, results, command, complete, notes, press } = await oneShots();
+  const { stateDir, reply, results, command, complete, notes, press } = await oneShots();
   const data = Buffer.from('oolong\n');
   reply('op', 'keep this', [{ name: 'notes.txt', size: data.length, contentType: 'text/plain', download: async () => data }]);
   await results(1);
   expect(await command('op', '/workspace tree')).toMatch(/notes\.txt/);
   expect(await command('op', '/workspace name tea notes')).toBe('Workspace: tea notes');
   expect(await command('op', '/workspace tree')).toMatch(/^tea notes\n```py\n📂 workspace\/\n/);
-  expect(await complete('op', '/workspace tree', '')).toEqual([]);
+  expect(await complete('op', '/workspace tree', '')).toEqual(['.scratch', '.scratch/user-attachments']);
+  const store = WorkspaceStore.at(stateDir);
+  await store.save('reply:channel:op', 'result.txt', Buffer.from('saved result'), 'teapilot');
 
-  // Clearing the conversation offers to clear the workspace; keeping it keeps the file.
+  // Clearing the conversation takes attachments with the scratchpad, but offers to keep workspace results.
   press(1);
   expect(await command('op', '/convo clear')).toBe('Cleared the conversation. The workspace kept its files.');
   expect(notes.at(-2)).toMatch(/the workspace still contains 1 file\./);
-  expect(await command('op', '/workspace tree')).toMatch(/notes\.txt/);
+  const tree = await command('op', '/workspace tree');
+  expect(tree).toMatch(/result\.txt/);
+  expect(tree).not.toMatch(/notes\.txt/);
   press(0);
   expect(await command('op', '/convo clear')).toBe('Cleared the conversation. Cleared the workspace too.');
   expect(await command('op', '/workspace tree')).toMatch(/no files yet\./);

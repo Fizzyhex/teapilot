@@ -47,6 +47,7 @@ export class TerminalWorkspace implements SessionWorkspace {
   async attach(prompt: string, cwd: string, room: number): Promise<string> {
     const root = await realpath(cwd);
     const incoming: Incoming[] = [];
+    const seen = new Set<string>();
     for (const match of prompt.matchAll(mentions)) {
       const written = (match[1] ?? match[2]!).replace(/[.,;:!?)]+$/, '');
       const path = resolve(root, written);
@@ -54,7 +55,8 @@ export class TerminalWorkspace implements SessionWorkspace {
       // Only plain files inside the folder the session started in, as the composer offers them.
       if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) continue;
       const info = await lstat(path).catch(() => undefined);
-      if (!info?.isFile() || info.nlink > 1 || incoming.some(file => file.name === basename(path))) continue;
+      if (!info?.isFile() || info.nlink > 1 || seen.has(path)) continue;
+      seen.add(path);
       incoming.push({ name: basename(path), size: info.size, data: () => readFile(path) });
     }
     if (!incoming.length) return prompt;
