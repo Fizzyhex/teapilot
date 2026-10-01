@@ -40,12 +40,13 @@ Don't judge a case by teapilot's reply alone. Check the app itself:
 
 If you're specifically asked to attempt challenge cases, do the cases at one of the following directories, NOT the ones listed in this document.
 
-- `ultra challenges` -> `./ultra-challenges.md`
-- `file challenges` -> `./file-challenges.md`
-- `conversation challenges` -> `./conversation-challenges.md`
-- `scratchpad benchmark` (ScratchBench) -> `./scratchpad-challenge.md`
-- `orchestration challenge` -> `./orchestration-challenge.md`
-- `git benchmark` (GitBench) -> `./git-challenge.md`
+"challenge name" : "path under repo's `/feedback/challenges` folder"
+- `ultra challenges` -> `ultra-challenges.md`
+- `file challenges` -> `file-challenges.md`
+- `conversation challenges` -> `conversation-challenges.md`
+- `scratchpad benchmark` (ScratchBench) -> `scratchpad-challenge.md`
+- `orchestration challenge` -> `orchestration-challenge.md`
+- `git benchmark` (GitBench) -> `git-challenge.md`
 
 ## Case 1: Snake Game
 {tags: "discord.play", "logic" }
