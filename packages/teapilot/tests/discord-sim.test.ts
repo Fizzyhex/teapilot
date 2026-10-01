@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,6 +140,29 @@ it('holds Components V2 answers to Discord\'s rules, shows them, and reads table
   expect(await world.click('stranger', 'm2', 'rows')).toContain('| item | a | b | c |\n  | --- | --- | --- | --- |\n  | tea | 1 | 2 | 3 |');
 });
 
+it('attaches long table sources privately, including after a restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'teapilot-table-source-'));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const world = new World(directory);
+  const settings = { token: 't', allowedUserIds: [people.op.id], channelIds: [channelId], root: directory, startMode: 'ask' as const };
+  const handlers = { message: vi.fn(), command: vi.fn(), reply: vi.fn(), component: vi.fn(), asides: { keep: vi.fn(), find: vi.fn(), summarise: vi.fn() } };
+  const gateway = await world.connect(settings, handlers, vi.fn());
+  const rows = Array.from({ length: 12 }, (_, index) => `| row ${index} | ${'a'.repeat(80)} | ${'b'.repeat(80)} |`).join('\n');
+  const [message] = await layout(`| item | a | b |\n|---|---|---|\n${rows}`, { viewSourcePrefix });
+  const id = await world.transport(world.channel('channel')).answer!(message!);
+  expect(await world.click('op', id, 'columns')).toContain('the table is attached.');
+  await gateway.close();
+  const restarted = await world.connect(settings, handlers, vi.fn());
+  cleanups.push(() => restarted.close());
+  const clicked = await world.click('stranger', id, 'columns');
+  expect(clicked).toContain('the table is attached.');
+  const reply = world.messages.at(-1)!;
+  expect(reply.only).toBe('stranger');
+  expect(reply.files[0]!.name).toBe('table.md');
+  expect(await readFile(reply.files[0]!.path, 'utf8')).toContain(rows);
+  expect(world.logs.filter(line => line.startsWith('⚠'))).toEqual([]);
+});
+
 it('flags what Discord would reject instead of accepting it', async () => {
   const { world, gateway } = await playWorld();
   await expect(gateway.play.post(channelId, { content: '', embeds: [], components: [], allowedMentions: { parse: [] } })).rejects.toThrow(DiscordRejected);
@@ -147,8 +170,8 @@ it('flags what Discord would reject instead of accepting it', async () => {
   await expect(gateway.play.request('GET', '/users/@me')).rejects.toThrow(/does not emulate/);
 });
 
-/** Models that build the counter on the first turn and answer plainly after that. */
-async function models() {
+/** Models that build the counter, or return a supplied answer for delivery tests. */
+async function models(answer?: string) {
   const f = await fixture(); cleanups.push(f.cleanup);
   let completions = 0;
   const server = await mockServer((_body, request, response) => {
@@ -166,7 +189,7 @@ async function models() {
     else {
       // The model writes the app to a workspace file, then starts it from there.
       const steps = [{ tool: { name: 'write', arguments: { path: 'apps/counter.js', content: counter } } }, { tool: { name: 'play_start', arguments: { file: 'apps/counter.js', title: 'Counter' } } }];
-      completion(response, steps[completions++] ?? { text: 'Your counter is up.' });
+      completion(response, answer === undefined ? steps[completions++] ?? { text: 'Your counter is up.' } : { text: answer });
     }
   });
   cleanups.push(server.close);
@@ -175,6 +198,42 @@ async function models() {
   f.config.policy.permissions = [...f.config.policy.permissions.filter(value => value !== 'discord.play'), 'discord.play'];
   return { ...f, server };
 }
+
+it('delivers rich answers through the service and keeps both table buttons working after restart', async () => {
+  const narrow = '| item | a | b |\n|---|---|---|\n| tea | 1 | 2 |';
+  const wide = '| item | a | b | c | d |\n|---|---|---|---|---|\n| tea | 1 | 2 | 3 | 4 |';
+  const f = await models(`see the chart\n![chart](chart.png)\n\n---\n\n![script.py]\n\n${narrow}\n\n${wide}`);
+  const world = new World(join(f.cwd, 'attachments'));
+  const settings = { token: 'simulated-discord-token', allowedUserIds: [people.op.id], channelIds: [channelId], root: f.cwd, startMode: 'ask' as const };
+  const serve = () => {
+    const controller = new AbortController();
+    const done = serveDiscord({ config: f.config, settings, log: world.log, signal: controller.signal, connect: world.connect, stateDir: join(f.cwd, 'discord'), teachat: false });
+    return { stop: async () => { controller.abort(); await done; } };
+  };
+  let service = serve();
+  cleanups.push(() => service.stop());
+  await vi.waitFor(() => expect(world.connected).toBe(true));
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+  world.say('op', 'show these files and tables', undefined, [
+    { name: 'chart.png', data: image, contentType: 'image/png' },
+    { name: 'script.py', data: Buffer.from('print(1)\n'), contentType: 'text/plain' },
+  ]);
+  await vi.waitFor(() => expect(world.screen('dm-op')).toContain('Result: completed'), { timeout: 20_000 });
+  const rich = world.messages.find(message => message.flags === IS_COMPONENTS_V2)!;
+  expect(rich.components.map(component => component.type)).toEqual([9, 14, 13]);
+  expect(rich.files.map(file => file.name)).toEqual(['chart.png', 'script.py']);
+  expect(await readFile(rich.files[0]!.path)).toEqual(image);
+  const tables = world.messages.filter(message => message.embeds.length);
+  expect(tables).toHaveLength(2);
+  expect(await world.click('stranger', tables[0]!.id, 'columns')).toContain('| tea | 1 | 2 |');
+  expect(await world.click('stranger', tables[1]!.id, 'rows')).toContain('| tea | 1 | 2 | 3 | 4 |');
+  await service.stop();
+  service = serve();
+  await vi.waitFor(() => expect(world.connected).toBe(true));
+  expect(await world.click('stranger', tables[0]!.id, 'columns')).toContain('| tea | 1 | 2 |');
+  expect(await world.click('stranger', tables[1]!.id, 'rows')).toContain('| tea | 1 | 2 | 3 | 4 |');
+  expect(world.logs.filter(line => line.startsWith('⚠'))).toEqual([]);
+}, 60_000);
 
 it('runs teapilot discord start against the simulator: a model builds an app, people use it, and it survives a restart', async () => {
   const f = await models();

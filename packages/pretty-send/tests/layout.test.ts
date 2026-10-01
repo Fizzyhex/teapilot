@@ -9,6 +9,32 @@ const files: Record<string, Resolved> = {
 };
 const resolve = (ref: string) => files[ref];
 
+it('renders inline images and files between the surrounding text', async () => {
+  const [single] = await layout('see ![chart][chart.png] here', { resolve });
+  expect(single!.components).toEqual([
+    { type: 9, components: [{ type: 10, content: 'see' }], accessory: { type: 11, media: { url: 'attachment://chart.png' }, description: 'chart' } },
+    { type: 10, content: ' here' },
+  ]);
+  const [multiple] = await layout('see ![one](chart.png) ![two](dir/chart.png) here', { resolve });
+  expect(multiple!.components).toEqual([
+    { type: 10, content: 'see ' },
+    { type: 12, items: [{ media: { url: 'attachment://chart.png' }, description: 'one' }, { media: { url: 'attachment://chart-2.png' }, description: 'two' }] },
+    { type: 10, content: ' here' },
+  ]);
+  const [file] = await layout('download ![script.py] now', { resolve });
+  expect(file!.components).toEqual([
+    { type: 10, content: 'download ' },
+    { type: 13, file: { url: 'attachment://script.py' } },
+    { type: 10, content: ' now' },
+  ]);
+  expect(file!.files).toEqual([{ name: 'script.py', data }]);
+});
+
+it('keeps unresolved inline references unchanged when there is no rich content', async () => {
+  const text = 'see ![missing](nope.png) here and ![missing.py]';
+  expect(await layout(text, { resolve })).toEqual([{ content: text, source: text }]);
+});
+
 it('sends plain text exactly as chunk splits it', async () => {
   const text = `Title\n---\n${'word '.repeat(900)}\n\`\`\`\n| a |\n|---|\n\`\`\``;
   expect(await layout(text, { resolve })).toEqual(chunk(text).map(content => ({ content, source: content })));

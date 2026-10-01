@@ -187,10 +187,10 @@ it('clears the history on /convo clear, and leaves the channel quiet when the co
   cleanups.push(async () => { controller.abort(); await chat.done; });
   chat.push('/convo clear', { quiet: true });
   await vi.waitFor(() => expect(histories.at(-1)).toEqual([]));
-  await vi.waitFor(() => expect(log).toHaveBeenCalledWith('dm:test: Cleared the conversation.'));
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith('dm:test: cleared the conversation.'));
   expect(send).not.toHaveBeenCalled();
   chat.push('/convo clear');
-  await vi.waitFor(() => expect(send).toHaveBeenCalledWith('Cleared the conversation.'));
+  await vi.waitFor(() => expect(send).toHaveBeenCalledWith('cleared the conversation.'));
 });
 
 it('never cuts an earlier turn through the middle of an emoji', () => {

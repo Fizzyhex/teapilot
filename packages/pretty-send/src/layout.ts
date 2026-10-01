@@ -105,7 +105,7 @@ function packer(messages: Message[]) {
 /**
  * A markdown answer as Discord messages, in order. Plain text is sent as it is, split as `chunk` splits it. Tables
  * become embeds of their own with a "view source" button, since Discord allows no embeds beside V2 components.
- * Dividers, and images or files on lines of their own, turn the rest into Components V2 messages.
+ * Dividers, images and files turn the rest into Components V2 messages.
  */
 export async function layout(text: string, options: LayoutOptions = {}): Promise<Message[]> {
   const blocks = parse(text);

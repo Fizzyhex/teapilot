@@ -41,6 +41,15 @@ it('reads a dashed line under a paragraph as a heading, as GFM does', () => {
   expect(parse('- item\n***')).toEqual([{ type: 'text', text: '- item' }, { type: 'divider' }]);
 });
 
-it('keeps an image in the middle of a sentence as text', () => {
-  expect(parse('see ![a](a.png) here')).toEqual([{ type: 'text', text: 'see ![a](a.png) here' }]);
+it('extracts inline images and files while keeping surrounding text in order', () => {
+  expect(parse('see ![a][a.png] ![script.py] here')).toEqual([
+    { type: 'text', text: 'see ' },
+    { type: 'media', items: [{ ref: 'a.png', alt: 'a', source: '![a][a.png]' }, { ref: 'script.py', source: '![script.py]' }] },
+    { type: 'text', text: ' here' },
+  ]);
+});
+
+it('leaves inline code and escaped media as text', () => {
+  const text = 'see `![a](a.png)` and `` ` ![script.py] `` and \\![b][b.png]';
+  expect(parse(text)).toEqual([{ type: 'text', text }]);
 });

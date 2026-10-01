@@ -14,7 +14,7 @@ import { parseCustomId, type ModalPayload } from '../../src/discord/play/render.
 import type { PlayInteraction } from '../../src/discord/play/runtime.js';
 import type { DiscordSettings } from '../../src/discord/settings.js';
 import { viewSource } from 'pretty-send';
-import { viewSourcePrefix } from '../../src/discord/render.js';
+import { MESSAGE_LIMIT, viewSourcePrefix } from '../../src/discord/render.js';
 import { checkFiles, checkMessage, checkModal, componentsV2, DiscordRejected } from './validate.js';
 
 type Json = Record<string, unknown>;
@@ -410,14 +410,17 @@ ${this.render(this.post(message.channel, bot.name, { content: note }, person.nam
     return seen.join('\n');
   }
 
-  /** Like the real gateway: anyone may press, the conversation decides, and only the presser sees the answer. */
   /** Like the real gateway: anyone may press, and the table is read back from the embed, privately. */
   private pressViewSource(person: Person, message: Message, custom: string): string {
     const source = viewSource(custom, message.embeds[0] as never, viewSourcePrefix);
-    const note = this.post(message.channel, bot.name, { content: source ? `\`\`\`md\n${source}\n\`\`\`` : 'this table can no longer be read back.' }, person.name);
+    const block = source && `\`\`\`md\n${source}\n\`\`\``;
+    const content = !block ? 'this table can no longer be read back.' : block.length <= MESSAGE_LIMIT ? block : 'the table is attached.';
+    const files = block && block.length > MESSAGE_LIMIT ? [{ name: 'table.md', data: Buffer.from(`${source}\n`) }] : [];
+    const note = this.post(message.channel, bot.name, { content, files }, person.name);
     return `${person.name} clicked [view source] on ${message.id}.\n${this.render(note)}`;
   }
 
+  /** Like the real gateway: anyone may press, the conversation decides, and only the presser sees the answer. */
   private pressCard(person: Person, message: Message, button: CardButton): string {
     const press = this.cards.get(message.id);
     const reply = press ? press(button, person.id) : { text: 'This turn is no longer available: teapilot restarted since, or the turn is too old.' };

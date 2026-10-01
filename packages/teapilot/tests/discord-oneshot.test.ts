@@ -150,7 +150,7 @@ it('clears the conversation and the workspace separately, and asks before cleari
   // Clearing the conversation offers to clear the workspace; keeping it keeps the file.
   press(1);
   expect(await command('op', '/convo clear')).toBe('Cleared the conversation. The workspace kept its files.');
-  expect(notes.at(-2)).toMatch(/The workspace still has 1 file\./);
+  expect(notes.at(-2)).toMatch(/the workspace still contains 1 file\./);
   expect(await command('op', '/workspace tree')).toMatch(/notes\.txt/);
   press(0);
   expect(await command('op', '/convo clear')).toBe('Cleared the conversation. Cleared the workspace too.');

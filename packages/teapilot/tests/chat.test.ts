@@ -221,7 +221,7 @@ it('/convo clear keeps the workspace and says so, /workspace clears it, and /new
   const run = vi.fn(async () => result);
   await runChat({ request: { prompt: 'First', cwd: '.' }, maxPromptChars: 2000, input, run, log, onHistory, files: controls });
   expect(log.mock.calls.map(call => call[0])).toEqual([
-    'Cleared the conversation. The workspace still has 1 file. /workspace clear removes them; /new clears both.',
+    'cleared the conversation. \n-# note: the workspace still contains 1 file.',
     'Workspace: tea',
     'tea\nnotes.txt',
     expect.stringContaining('Started a new task with an empty workspace'),

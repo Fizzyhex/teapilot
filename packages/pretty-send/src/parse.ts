@@ -29,20 +29,33 @@ export function cells(line: string): string[] {
   return row.split(pipe).map(cell => cell.trim());
 }
 
-/** Every image or file reference on a line that holds nothing else. */
-function mediaLine(line: string): MediaRef[] | undefined {
-  if (!line.includes('![') || line.replace(media, '').trim()) return undefined;
-  const items = [...line.matchAll(media)].flatMap(([source, alt, link, label]): MediaRef[] => {
+/** Image and file references outside inline code and escaped markdown. */
+function mediaParts(line: string): { start: number; end: number; item: MediaRef }[] {
+  const code: { start: number; end: number }[] = [];
+  const ticks = [...line.matchAll(/`+/g)];
+  for (let at = 0; at < ticks.length; at++) {
+    const opener = ticks[at]!;
+    const close = ticks.findIndex((tick, index) => index > at && tick[0].length === opener[0].length);
+    if (close < 0) continue;
+    code.push({ start: opener.index, end: ticks[close]!.index + ticks[close]![0].length });
+    at = close;
+  }
+  return [...line.matchAll(media)].flatMap(match => {
+    const [source, alt, link, label] = match;
+    const start = match.index;
+    const end = start + source.length;
+    if (code.some(span => start < span.end && end > span.start)
+      || (line.slice(0, start).match(/\\+$/)?.[0].length ?? 0) % 2) return [];
     const ref = (link ?? label)?.replace(/^<|>$/g, '').trim();
-    if (ref) return [{ ref, alt: alt?.trim() || undefined, source }];
-    return alt?.trim() ? [{ ref: alt.trim(), source }] : [];
+    const item = ref ? { ref, alt: alt?.trim() || undefined, source }
+      : alt?.trim() ? { ref: alt.trim(), source } : undefined;
+    return item ? [{ start, end, item }] : [];
   });
-  return items.length ? items : undefined;
 }
 
 /**
- * The parts of a markdown answer Discord can't show as text: tables, dividers, and images or files on lines of their
- * own. Everything else, code fences included, stays text. A setext heading becomes an ATX one, which Discord renders.
+ * The parts of a markdown answer Discord can't show as text: tables, dividers, and images or files.
+ * Everything else, code included, stays text. A setext heading becomes an ATX one, which Discord renders.
  */
 export function parse(text: string): Block[] {
   const lines = text.split('\n');
@@ -77,12 +90,20 @@ export function parse(text: string): Block[] {
       continue;
     }
     if (thematic.test(line)) { flush(); blocks.push({ type: 'divider' }); continue; }
-    const items = mediaLine(line);
-    if (items) {
-      const last = blocks.at(-1);
-      // Images separated only by blank lines are shown together.
-      if (last?.type === 'media' && !pending.some(entry => entry.trim())) { pending = []; last.items.push(...items); }
-      else { flush(); blocks.push({ type: 'media', items }); }
+    const parts = mediaParts(line);
+    if (parts.length) {
+      let cursor = 0;
+      for (const { start, end, item } of parts) {
+        const before = line.slice(cursor, start);
+        if (before.trim()) pending.push(before);
+        const last = blocks.at(-1);
+        // References separated only by whitespace are shown together.
+        if (last?.type === 'media' && !pending.some(entry => entry.trim())) { pending = []; last.items.push(item); }
+        else { flush(); blocks.push({ type: 'media', items: [item] }); }
+        cursor = end;
+      }
+      const after = line.slice(cursor);
+      if (after.trim()) pending.push(after);
       continue;
     }
     pending.push(line);
