@@ -76,4 +76,4 @@ teapilot uses a concise, casual lower-case style for it's user-facing text. do s
 
 ## Agent-Facing Text (System & Tools)
 
-teapilot often uses a concise, casual lower-case style for it's agent-facing text. do so when whenever it doesn't have a tangible impact on usability - such as malforming code or breaking case-sensitive data.
+teapilot often uses a concise, casual lower-case style for it's agent-facing text. this doesn't apply to you, it applies to `teapilot`. but for teapilot & its interfaces - follow those rules when whenever it doesn't have a tangible impact on usability - such as malforming code or breaking case-sensitive data.
