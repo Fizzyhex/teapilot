@@ -18,6 +18,14 @@ it('answers each call with the first tip that fits', () => {
   expect(pick({ tool: 'read', path: 'app.ts', pressure: true })).toBe('takeNotes');
 });
 
+it('nudges toward git only in a workspace that is a repository', () => {
+  expect(pick({ path: 'plan.md', content: '# plan', tools: new Set(['write']), repository: true })).toBe('commitOften');
+  expect(pick({ path: 'notes.md', scratch: true, tools: new Set(['write']), repository: true })).toBeUndefined();
+  expect(pick({ tool: 'bash', succeeded: false, repository: true })).toBe('checkHistory');
+  expect(pick({ tool: 'bash', succeeded: false })).toBeUndefined();
+  expect(pick({ tool: 'delegate_task', repository: true })).toBe('reviewJuniors');
+});
+
 it('gives nothing for failed calls, reads, or scratchpad notes', () => {
   expect(pick({ path: 'main.py', succeeded: false })).toBeUndefined();
   expect(pick({ tool: 'read', path: 'main.py' })).toBeUndefined();

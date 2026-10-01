@@ -3,6 +3,7 @@ import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ensureRepository, gitEnvironment } from '../src/workspace/git.js';
 import { SrtSandbox, type RunOptions } from '../src/workspace/sandbox.js';
 import { WorkspaceStore } from '../src/workspace/store.js';
 import { toolsFolder } from '../src/workspace/toolchain.js';
@@ -36,6 +37,15 @@ describe.skipIf(!status.available)('sandboxed workspace commands', () => {
     const result = await sandbox.run(mine, 'echo hello > out.txt && cat out.txt', offline);
     expect(result).toMatchObject({ exitCode: 0, timedOut: false });
     expect(result.output).toContain('hello');
+  }, 60_000);
+
+  it.skipIf(!tool('git'))('starts a git repository in a workspace and commits as the agent it runs for', async () => {
+    const folder = store.folder('dm:git');
+    expect(await ensureRepository(folder, sandbox, status)).toBe(true);
+    await writeFile(join(folder, 'notes.txt'), 'hello');
+    const result = await sandbox.run(folder, 'git add -A && git commit -q -m "add notes" && git log --format="%an %s" && git status --porcelain', { ...offline, env: gitEnvironment('tea-junior-alfa') });
+    expect(result).toMatchObject({ exitCode: 0 });
+    expect(result.output).toMatch(/tea-junior-alfa add notes\r?\nteapilot start workspace/);
   }, 60_000);
 
   it('cannot read another conversation\'s workspace or teapilot\'s state, nor write outside its own', async () => {

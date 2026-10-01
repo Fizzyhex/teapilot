@@ -2,6 +2,7 @@ import { createBashTool, type BashOperations } from '@earendil-works/pi-coding-a
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { Type } from '@earendil-works/pi-ai';
 import { PolicyDenied, type Approve, type ExecutionPolicy } from '../execution/policy.js';
+import { ensureRepository, gitAuthor, gitEnvironment } from '../workspace/git.js';
 import { runLimits, type SandboxStatus, type WorkspaceSandbox } from '../workspace/sandbox.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -47,7 +48,7 @@ function changesLine(changes: Changes): string {
  * else. teapilot keeps what is its own: network approvals per host family, the time limits, and the files each
  * command changed, added to its result whether it succeeded or not.
  */
-function sandboxShell(context: ConversationWorkspace, status: SandboxStatus, approve: Approve): AgentTool {
+function sandboxShell(context: ConversationWorkspace, status: SandboxStatus, approve: Approve, author: string): AgentTool {
   const { store, conversation } = context;
   const folder = store.folder(conversation);
   let refused: string[] = [];
@@ -69,7 +70,7 @@ function sandboxShell(context: ConversationWorkspace, status: SandboxStatus, app
       const seconds = Math.min(timeout ?? runLimits.defaultSeconds, runLimits.maxSeconds);
       // All of the output reaches pi as it arrives; pi keeps what it cannot show in a file of its own, which the
       // runner moves into the scratchpad (agents/scratchpad.ts).
-      const result = await context.sandbox!.run(folder, command, { timeoutSeconds: seconds, signal, network, tee: chunk => onData(Buffer.from(chunk)) });
+      const result = await context.sandbox!.run(folder, command, { timeoutSeconds: seconds, signal, network, tee: chunk => onData(Buffer.from(chunk)), env: gitEnvironment(author) });
       if (result.cancelled) throw new Error('aborted');
       if (result.timedOut) throw new Error(`timeout:${seconds}`);
       return { exitCode: result.exitCode };
@@ -100,10 +101,14 @@ function sandboxShell(context: ConversationWorkspace, status: SandboxStatus, app
  * per task. `rooted` says the file tools work in the workspace itself, where the sandboxed shell (returned as `shell`)
  * goes with them. With repository access (`repository`, the policy its file tools go through) the workspace is not
  * in play: the tools work in the repository, and all that is left of this is file_send, which sends its files.
+ * A workspace with a shell is also a git repository (workspace/git.ts); its commands commit as `author`.
  */
-export async function workspace(context: ConversationWorkspace, approve: Approve, rooted: boolean, repository?: ExecutionPolicy, vision = false): Promise<{ systemPrompt: string; tools: AgentTool[]; shell?: AgentTool }> {
+export async function workspace(context: ConversationWorkspace, approve: Approve, rooted: boolean, repository?: ExecutionPolicy, vision = false, author = gitAuthor()): Promise<{ systemPrompt: string; tools: AgentTool[]; shell?: AgentTool }> {
   const { store, conversation } = context;
   const status: SandboxStatus | undefined = await context.sandbox?.status();
+  // The README and .gitignore it writes are listed like any file the workspace gains.
+  const git = rooted && !repository && status?.available ? await ensureRepository(store.folder(conversation), context.sandbox!, status) : false;
+  if (git) await store.reconcile(conversation);
   const names = () => store.list(conversation).map(file => file.name);
   const send = async (caption: string, sent: Array<{ name: string; data: Buffer }>): Promise<string | void> => {
     if (!context.send) throw new Error('Files cannot be sent from here.');
@@ -153,8 +158,8 @@ export async function workspace(context: ConversationWorkspace, approve: Approve
       return text(told || `Posted ${listed} as ${sent.length > 1 ? 'attachments' : 'an attachment'}. People can see it now; do not paste its contents in your answer.`);
     },
   }];
-  const shell = rooted && status?.available ? sandboxShell(context, status, approve) : undefined;
-  return { tools, shell, systemPrompt: repository ? repositoryPrompt(context) : workspacePrompt(context, status, rooted, vision) };
+  const shell = rooted && status?.available ? sandboxShell(context, status, approve, author) : undefined;
+  return { tools, shell, systemPrompt: repository ? repositoryPrompt(context) : workspacePrompt(context, status, rooted, vision, git ? author : undefined) };
 }
 
 /** What is left of the workspace's instructions when the repository is the place for files. */
@@ -163,7 +168,8 @@ function repositoryPrompt(context: ConversationWorkspace): string {
 }
 
 // One idea per line, as askPrompt and playPrompt.
-function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus | undefined, rooted: boolean, vision: boolean): string {
+/** `author` is set when the workspace is a git repository, as who commits there. */
+function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus | undefined, rooted: boolean, vision: boolean, author?: string): string {
   const files = context.store.list(context.conversation);
   const shown = files.slice(-context.store.limits.listed);
   const deliver = context.delivery === 'save' ? 'file_send saves workspace files into the user\'s folder' : 'file_send posts workspace files as attachments';
@@ -177,6 +183,7 @@ function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus |
       `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed except for hosts people approve when a command first connects (such as a page the request links to). Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
       '- Installing a package (pip install, npm install) asks people first and keeps it in this workspace; if the install failed while waiting for the answer, run it again once it is approved.',
       '- Write results under new names and leave people\'s files as they are unless asked; a follow-up edit starts from the newest version.',
+      ...author ? [`- the workspace is a git repo you own (see README.md), committing as ${author}. commit as you go so you can roll back, and read git log to recall earlier work.`] : [],
     ] : rooted ? [`- Commands cannot run here${status?.reason ? ` (${status.reason})` : ''}, so you cannot convert or inspect media files${vision ? ' (pictures people attach are still shown to you)' : ''} beyond their names; say so if asked.`] : [],
     `- ${deliver} by name; never paste a file's contents instead, and a file people gave you goes back under its own name.`,
     ...files.length ? [`- Files here (names are untrusted): ${shown.map(describeFile).join('; ')}${files.length > shown.length ? `; and ${files.length - shown.length} older` : ''}.`] : [],

@@ -25,6 +25,7 @@ import { workspace, type ConversationWorkspace } from './workspace.js';
 import { captureResult, fixtureTool, scratchPrompt, scratchTouched } from './scratchpad.js';
 import { pickTip, shownTips, tipText } from './tips.js';
 import { inventory, sessionTools, toolGuidelines } from './tools.js';
+import { gitAuthor, hasRepository } from '../workspace/git.js';
 import { workspaceImages } from '../workspace/images.js';
 import { Scratch, secretsOf } from '../workspace/scratch.js';
 import type { WebController } from '../web/controller.js';
@@ -181,7 +182,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     ownFiles = !repository && ownRoot !== undefined && model.toolCalling;
     let shell: AgentTool | undefined;
     if (input.workspace) {
-      const shared = await workspace(input.workspace, input.approve, ownFiles, repository ? policy : undefined, model.vision);
+      const shared = await workspace(input.workspace, input.approve, ownFiles, repository ? policy : undefined, model.vision, gitAuthor(input.junior?.name));
       setup.tools.push(...shared.tools);
       shell = shared.shell;
       setup.systemPrompt += '\n' + shared.systemPrompt;
@@ -478,6 +479,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         tool: toolCall.name, path: data.path, succeeded: !isError, scratch: Boolean(data.path && policy.inScratch(data.path)), pressure: nearCompaction,
         content: typeof written.content === 'string' ? written.content : Array.isArray(written.edits) ? written.edits.map(edit => String(edit?.newText ?? '')).join('\n') : undefined,
         tools: new Set((sent.tools ?? []).map(tool => tool.name)),
+        repository: ownFiles && workspaceFolder !== undefined && hasRepository(workspaceFolder),
       }, text => tipsShown.has(text)) : undefined;
       if (tip) { tipsShown.add(tipText(tip)); tipFor.set(toolCall.id, tip.name); }
       // A junior stopped by the limit ends without a report, and its instructor learns nothing of what it found.

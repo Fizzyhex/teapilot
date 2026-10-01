@@ -334,6 +334,36 @@ it('without a sandbox, keeps and sends files but says commands cannot run', asyn
   expect(setup.systemPrompt).toContain('Commands cannot run here (the sandbox is not installed)');
 });
 
+it('makes a workspace a git repository once, committing as the orchestrator or a junior', async () => {
+  const runs: Array<{ command: string; author?: string }> = [];
+  const base = fakeSandbox(async (folder, command, options) => {
+    runs.push({ command, author: options.env?.GIT_AUTHOR_NAME });
+    if (command.startsWith('git init')) await mkdir(join(folder, '.git'));
+  });
+  const sandbox = { ...base, status: async () => ({ available: true, shell: 'bash' as const, tools: [{ name: 'git', kind: 'git', version: '2.45.1' }] }) };
+  const f = await agentSetup(() => undefined, sandbox);
+  await f.store.save('dm:1', 'README.md', Buffer.from('mine'), 'op');
+  const setup = await workspace(f.workspace, f.base.approve, true);
+  const folder = f.store.folder('dm:1');
+  expect(runs).toEqual([{ command: expect.stringMatching(/^git init/), author: 'teapilot' }]);
+  // A README someone shared stays theirs; the session's transcripts are never committed.
+  expect(await readFile(join(folder, 'README.md'), 'utf8')).toBe('mine');
+  expect(await readFile(join(folder, '.gitignore'), 'utf8')).toContain('.scratch/');
+  expect(setup.systemPrompt).toContain('git repo you own (see README.md), committing as teapilot-orchestrator');
+  await setup.shell!.execute('one', { command: 'git commit -am x' });
+  const junior = await workspace(f.workspace, f.base.approve, true, undefined, false, 'tea-junior-alfa');
+  await junior.shell!.execute('two', { command: 'git log' });
+  expect(runs.slice(1)).toEqual([{ command: 'git commit -am x', author: 'teapilot-orchestrator' }, { command: 'git log', author: 'tea-junior-alfa' }]);
+  expect(junior.systemPrompt).toContain('committing as tea-junior-alfa');
+});
+
+it('leaves a workspace without git as it is', async () => {
+  const f = await agentSetup(() => undefined);
+  const setup = await workspace(f.workspace, f.base.approve, true);
+  expect(existsSync(join(f.store.folder('dm:1'), '.gitignore'))).toBe(false);
+  expect(setup.systemPrompt).not.toContain('git repo');
+});
+
 it('in a repository keeps only file_send, sending repository files by path with none of the workspace around it', async () => {
   const f = await agentSetup(() => undefined);
   const repo = await directory('teapilot-repo-');

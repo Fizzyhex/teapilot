@@ -39,6 +39,8 @@ export interface RunOptions {
   network(host: string): Promise<boolean>;
   /** Receives all of the output as it arrives, before any of it is left out. */
   tee?(text: string): void;
+  /** Extra environment for this command, such as who git commits as. */
+  env?: Record<string, string>;
 }
 /** `clipped` says part of the output was left out of `output`. */
 export interface RunResult { exitCode: number | null; output: string; timedOut: boolean; cancelled: boolean; clipped?: boolean }
@@ -56,6 +58,7 @@ const probes: Array<{ name: string; commands: string[] }> = [
   { name: 'python', commands: ['python3 --version', 'python --version'] },
   { name: 'pandoc', commands: ['pandoc --version'] },
   { name: 'node', commands: ['node --version'] },
+  { name: 'git', commands: ['git --version'] },
 ];
 const versionOf = (name: string, output: string): string | undefined => {
   const line = output.split(/\r?\n/).find(text => text.trim())?.trim() ?? '';
@@ -241,6 +244,10 @@ export class SrtSandbox implements WorkspaceSandbox {
       npm_config_cache: join(folder, '.cache', 'npm'), npm_config_update_notifier: 'false', MPLCONFIGDIR: join(folder, '.cache', 'matplotlib'),
       ...(this.pythonPath ? { PYTHONPATH: this.pythonPath } : {}),
       ...(windows ? { USERPROFILE: folder, APPDATA: join(folder, '.appdata'), LOCALAPPDATA: join(folder, '.appdata', 'local') } : {}),
+      // On Windows the sandbox account does not own the workspace, which git refuses without this. Set from the
+      // environment it is command scope, the only scope besides system and global that git trusts it from.
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: '*',
+      ...options.env,
     };
     // Windows starts the command from the sandbox account's own environment and passes only what the command
     // line sets, PATH extended with teapilot's own tools; elsewhere the command inherits the spawn environment,

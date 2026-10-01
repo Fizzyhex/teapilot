@@ -19,6 +19,8 @@ export interface TipCall {
   tools: ReadonlySet<string>;
   /** The context is close to being compacted. */
   pressure: boolean;
+  /** The files are in a workspace that is a git repository (workspace/git.ts). */
+  repository?: boolean;
 }
 export interface Tip { name: string; content: string; when: (call: TipCall) => boolean }
 
@@ -45,6 +47,9 @@ export const TIPS: readonly Tip[] = [
     name: 'docHygiene', content: 'maintain compact documentation of the current design at the top, use (brackets) to tag keywords inline for agentic search aid',
     when: call => writes(call) && codeFiles.has(extension(call.path) ?? '') && lines(call.content) > 20,
   },
+  { name: 'commitOften', content: 'commit finished steps with a short message - git log becomes your memory', when: call => changes(call) && !call.scratch && Boolean(call.repository) },
+  { name: 'checkHistory', content: '`git log --oneline` and `git diff` show what changed and who did it', when: call => call.tool === 'bash' && !call.succeeded && Boolean(call.repository) },
+  { name: 'reviewJuniors', content: 'review your juniors\' work with `git log --author=tea-junior`', when: call => call.tool === 'delegate_task' && call.succeeded && Boolean(call.repository) },
   { name: 'stayOrganised', content: 'keep your workspace organised', when: call => writes(call) && !call.scratch },
 ];
 
