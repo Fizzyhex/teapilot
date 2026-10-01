@@ -36,66 +36,55 @@ Don't judge a case by teapilot's reply alone. Check the app itself:
 - Survival: `restart <name>` mid-game should leave the app working.
 - Files: attach with `say <name> "..." --attach path`. Open the path on each `📎` line to check what teapilot sent or an app shows (images can be viewed directly), not only its name.
 
-## Special Challenge Cases (Ultra/File/Conversation)
+## Typed cases and smoke tests
 
-If you're specifically asked to attempt challenge cases, do the cases at one of the following directories, NOT the ones listed in this document.
+Use `packages/teapilot/scripts/bench/challenge/cases/*.ts` as guidelines for your own smoke tests. Read the chosen case's prompt, `steps`, `judged` and `notes`, then adapt it loosely to the task and the app teapilot actually produces. The migrated play examples are `snake`, `multiplayer-scroller` and `recipe-book`.
 
-"challenge name" : "path under repo's `/feedback/challenges` folder"
-- `ultra challenges` -> `ultra-challenges.md`
-- `file challenges` -> `file-challenges.md`
-- `conversation challenges` -> `conversation-challenges.md`
-- `scratchpad benchmark` (ScratchBench) -> `scratchpad-challenge.md`
-- `orchestration challenge` -> `orchestration-challenge.md`
-- `git benchmark` (GitBench) -> `git-challenge.md`
+Agent evaluation is up to your interpretation, backed by observed behaviour. Don't copy assertions blindly or treat passing mechanical checks as proof that teapilot fulfilled the request correctly. `expect` only checks a mechanical slice; even `judged` is a starting point, not an exhaustive rubric. Decide what the user needs, play through it, and explain your verdict with evidence. Distinguish an app failure from a probe that used the wrong control or lacked evidence; `unscored` is not a pass.
 
-## Case 1: Snake Game
-{tags: "discord.play", "logic" }
+Examples to adapt:
 
-"i'm granting you discord.play. make a game of snake. 5x5 board. use :white_large_square: for the background, :blue_square: for the snake. the food can be an 🍎"
+- **snake:** vary the board or skin; inspect the live controls, steer to food, lose and replay, then request a cosmetic change. Check that movement, growth, collision and the follow-up actually work. Emoji in source and valid buttons alone don't prove a playable game.
+- **multiplayer scroller:** move as `op`, `user` and `stranger`, using the controls the app exposes. Check distinct avatars, walking into another player and stacking, then explore the edge of the world and camera movement. Adapt positions and timing rather than assuming a fixed button sequence or spawn layout.
+- **recipe book:** discover the form's actual field ids, request two recipes of your choice, switch between them using the live dropdown values, and ask for icons and trivia. Check the generated content, navigation and follow-up, not just whether the source mentions `consult()`.
 
-*expectation: agent does as instructed, creates an embed with the snake game, and components to move the snake up/down/left/right. game flow should be handled correctly - start -> play -> play again. the game should be responsive but not tick too frequently to avoid hitting discord message edit rate limits. shortcodes like :white_large_square: are text only, so the agent should use the Unicode emoji (⬜ 🟦) wherever it draws or labels with them; a rejected shortcode on a button is a failure.*
+## Benchmark tooling
 
-*verify: `advance` through a few ticks, eat the food, lose, then press play again.*
+Read `packages/teapilot/scripts/bench/challenge/README.md` for the runner, evidence and reporting options. Discover and inspect cases without spending a model:
 
-"that's great - could you instead make the food a 🍕? and replace the snake's head with a :grinning: emoji. set the embed title to 'the grinner's meal'"
+```sh
+node packages/teapilot/scripts/bench/challenge/case.mjs list
+node packages/teapilot/scripts/bench/challenge/case.mjs show snake --json
+node packages/teapilot/scripts/bench/challenge/case.mjs run snake --name snake-dry --out feedback/bench-runs/snake-dry --dry-run
+```
 
-*expectation: agent does as instructed. the embed has a little title at the top too.*
+Use `agent-discord.mjs` for exploratory smoke tests; use `case.mjs run` when the declarative steps fit the test you want. A runner example (real models, real cost):
 
----
+```sh
+node packages/teapilot/scripts/bench/challenge/case.mjs run snake --name snake-before --out feedback/bench-runs/snake-before --label before
+```
 
-## Case 2: Multiplayer Scroller
-{tags: "discord.play", "multi-user" }
+The runner captures evidence before stopping its session. For a session you drive yourself, capture before `stop` deletes the session and its attachments:
 
-"
-hey, use discord.play. create a basic vertically scrolling platformer for us
+```sh
+node packages/teapilot/scripts/bench/challenge/evidence.mjs capture --name smoke --out feedback/bench-runs/smoke
+node packages/teapilot/scripts/agent-discord.mjs stop smoke
+node packages/teapilot/scripts/bench/challenge/report.mjs score --dir feedback/bench-runs/smoke
+```
 
-each user that uses the game's controls is a separate player, represented by one of these emojis: :man_fairy::angel::merman::man_vampire:
+Always stop sessions you start, and read approvals before answering them. Inspect live controls and forms rather than forcing the case's labels or field ids onto a different app. A blocked runner is not a completed evaluation; investigate it and continue with an appropriate probe if needed.
 
-the playing field ranges from 0-30 tiles horizontally, but the canvas is only 6x6.
+For before/after comparisons, keep a comparable prompt, model, case set and test scope, record adaptations, and retain evidence for both runs. Use `report.mjs batch`, `compare` and `cheat-check` where useful, but supplement their results with your own judgement of correctness, usability and responsiveness. Report mechanical verdicts, missing evidence and qualitative findings separately; don't turn a check count into a claim of request fulfillment.
 
-allow players to walk left/right on a flat grass plane. if a player walks into another, the walker stacks and stands ontop of the other.
-"
+## Special challenge cases
 
-*expectation: agent does as instructed - each player is assigned a separate player and can walk around. sensible assumptions made about the ground and other unspecified logistics.*
+When specifically asked for a challenge family, use the corresponding typed cases as starting points. Their prose supplies the intent; adapt probes without weakening that intent.
 
-*verify: move as `op`, `user` and `stranger`; each should get their own emoji. walk one into another to check stacking.*
-
----
-
-## Case 3: Recipe Book
-{tags: "discord.play", "consult" }
-
-"
-hey, i want a minimalistic recipe book with discord.play.
-
-allow me to request recipes by name. you should then generate the recipes, content and title an entry to the book. let me navigate through all the different recipes via a dropdown.
-
-recipes should have condensed sections for name, prep time, servings, ingredients, and method.
-
-"
-
-*expectation: works as expected, user can input recipes, fast llm populates them.*
-
-*verify: the app should ask the model through `consult()` (visible in `app <name> <id>`'s source), not hard-code recipes. submit two recipes through the form, then switch between them with `select`.*
-
-"that's great - could you use emojis as icons for the recipes in the dropdown options, and include little summaries underneath that add fun trivia about the recipe?"
+"challenge name" : "files under `packages/teapilot/scripts/bench/challenge/cases`"
+- `convo switching` -> `conversation-1c-casual.ts` or `conversation-2c-banter.ts`
+- `ultra challenges` -> `ultra-1u-kessel.ts`, `ultra-2u-library-abyss.ts`
+- `file challenges` -> `file-1f-image-rotate.ts`, `file-2f-mod-my-game.ts`
+- `conversation challenges` -> `conversation-1c-casual.ts`, `conversation-2c-banter.ts`
+- `scratchpad benchmark` (ScratchBench) -> `scratchbench-1-import-audit.ts`
+- `orchestration challenge` -> `orchestration-1o-greggs.ts`
+- `git benchmark` (GitBench) -> `gitbench-1-offline-kiosk.ts`

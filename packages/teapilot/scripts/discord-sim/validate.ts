@@ -106,6 +106,31 @@ const v2Builders: Record<number, new (data: never) => { toJSON(): unknown }> = {
 };
 
 /** Every `attachment://` name a message's components show. */
+/**
+ * Every string a message shows: content, embed text, control labels and placeholders, select option
+ * labels and descriptions. Challenge tooling reads this to spot `:shortcode:` left in a label, where
+ * Discord would show the literal text rather than an emoji.
+ */
+export function messageStrings(payload: { content?: unknown; embeds?: unknown; components?: unknown }): string[] {
+  const found: string[] = [];
+  // These are ids and links rather than words on screen: a `:name:` inside a custom_id is a control's
+  // address, and one inside a url is part of the link. Neither is shown as literal text.
+  const hidden = new Set(['url', 'custom_id', 'value']);
+  const visit = (value: unknown, key?: string): void => {
+    if (typeof value === 'string') {
+      if ((key === undefined || !hidden.has(key)) && !value.startsWith('attachment://')) found.push(value);
+      return;
+    }
+    if (Array.isArray(value)) value.forEach(entry => visit(entry, key));
+    else if (value && typeof value === 'object') for (const [name, entry] of Object.entries(value)) visit(entry, name);
+  };
+  visit(payload.content, 'content');
+  visit(payload.embeds, 'embeds');
+  visit(payload.components, 'components');
+  return found;
+}
+
+/** Every `attachment://` name a message's components show. */
 export function componentAttachments(components: unknown): string[] {
   const names: string[] = [];
   const visit = (value: unknown) => {

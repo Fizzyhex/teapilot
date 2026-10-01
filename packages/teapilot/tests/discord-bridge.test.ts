@@ -9,6 +9,8 @@ import { grantControls } from '../src/discord/grants-panel.js';
 import type { HostResult } from '../src/host.js';
 import { WorkspaceStore } from '../src/workspace/store.js';
 import { fixture } from './helpers.js';
+import { World } from '../scripts/discord-sim/world.js';
+import { TurnEvents } from '../scripts/discord-sim/turn-events.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -64,6 +66,29 @@ it('runs a turn per message, posts the redacted answer, then collapses the statu
   // Stop goes with the turn; Details stays.
   expect(cards[0]!.controls.stop).toBe(true);
   expect(cards.at(-1)!.controls.stop).toBe(false);
+});
+
+it('signals simulator completion for a casual reply only after its lines are delivered', async () => {
+  const { sent, cards, transport } = discord();
+  const turns = new TurnEvents(new World(), () => true);
+  let release!: () => void;
+  const delivered = new Promise<void>(done => { release = done; });
+  transport.send = vi.fn(async text => { await delivered; sent.push(text); return 'reply'; });
+  const onTurnEnd = vi.fn(completion => turns.complete(completion));
+  const { chat } = conversation({ transport, cardDelayMs: 60_000, lineDelayMs: () => 0, onTurnEnd,
+    run: async (_request, dependencies) => {
+      dependencies.onEvent?.({ type: 'route', casual: true });
+      return { ...result, casual: true, text: 'hey there' };
+    },
+  });
+  const waited = turns.wait(5);
+  chat.push('hi');
+  await vi.waitFor(() => expect(transport.send).toHaveBeenCalled());
+  expect(onTurnEnd).not.toHaveBeenCalled();
+  release();
+  expect(await waited).toEqual({ event: 'turn_end', status: 'completed', requestId: 'req-1' });
+  expect(sent).toEqual(['hey there']);
+  expect(cards).toHaveLength(0);
 });
 
 it('shows steps, the running tool and the answer being written, and keeps the whole log behind Details', async () => {

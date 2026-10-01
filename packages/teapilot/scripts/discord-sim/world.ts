@@ -23,6 +23,28 @@ interface Upload { name: string; data: Buffer }
 interface Payload { content?: string; embeds?: Json[]; components?: Row[]; files?: Upload[]; flags?: number }
 /** An attachment as the simulator keeps it: on disk, so whoever drives it can open the file. */
 export interface Attachment { name: string; size: number; path: string }
+
+/** One control as `click`/`select` address it, and as Discord received it. */
+export interface SnapshotControl {
+  id: string; type: number; label?: string; emoji?: { id?: string; name?: string }; url?: string;
+  style?: number; disabled: boolean; customId?: string;
+  options?: Array<{ label: string; value: string; description?: string }>;
+}
+
+/** A message with the payload Discord received, rather than the lines `screen` draws it as. */
+export interface SnapshotMessage {
+  id: string; channel: string; author: string; content: string; embeds: Json[]; components: Row[];
+  flags?: number; files: Attachment[]; only?: string; replyTo?: string; edits: number; reactions: string[];
+  controls: SnapshotControl[];
+}
+
+/** `World.snapshot()`: the whole simulated Discord, as data. */
+export interface WorldSnapshot {
+  messages: SnapshotMessage[];
+  warnings: Warning[];
+  forms: Array<{ person: string; from: string; payload: ModalPayload }>;
+  channels: Channel[];
+}
 const kilobytes = (bytes: number) => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 export interface Person { name: string; id: string }
@@ -55,6 +77,18 @@ export interface Message {
 
 /** A mistake in how the simulator was asked to act, such as clicking a control that does not exist. */
 export class SimError extends Error {}
+
+/** A `⚠` line, kept as data so tooling can read it without parsing rendered text. */
+export interface Warning {
+  /** The line as `screen` and `log` show it, without the leading `⚠ `. */
+  text: string;
+  /** `rejection` when Discord would have refused the message, edit or form. */
+  kind: 'rejection' | 'other';
+  /** What was refused, for a rejection: `a message in #dm-op`, `an edit to m4`, `the form on m4`. */
+  what?: string;
+  /** Discord's or discord.js's own reason, for a rejection. */
+  message?: string;
+}
 
 const styles: Record<number, string> = { 1: 'primary', 3: 'success', 4: 'danger' };
 const settle = (text: string, verdict: string) => `${text.slice(0, 2000 - verdict.length - 2)}\n\n${verdict}`;
@@ -105,7 +139,16 @@ export class World {
     this.lastEvent = Date.now();
     for (const listener of this.listeners) listener(text);
   }
-  warn(text: string): void { this.logs.push(`⚠ ${text}`); this.emit(`⚠ ${text}`); }
+  /**
+   * Every warning, structured as well as rendered: challenge tooling asserts on these instead of
+   * scraping `⚠` lines out of `screen` text. `kind` is `rejection` when Discord would have refused it.
+   */
+  readonly warnings: Warning[] = [];
+  warn(text: string, detail?: Partial<Warning>): void {
+    this.warnings.push({ text, kind: detail?.kind ?? 'other', ...detail });
+    this.logs.push(`⚠ ${text}`);
+    this.emit(`⚠ ${text}`);
+  }
   log = (text: string): void => { this.logs.push(text); this.emit(`[log] ${text}`); };
 
   get connected(): boolean { return Boolean(this.handlers); }
@@ -181,7 +224,7 @@ export class World {
 
   private check(what: string, run: () => void): void {
     try { run(); } catch (error) {
-      if (error instanceof DiscordRejected) this.warn(`Discord would reject ${what}: ${error.message}`);
+      if (error instanceof DiscordRejected) this.warn(`Discord would reject ${what}: ${error.message}`, { kind: 'rejection', what, message: error.message });
       throw error;
     }
   }
@@ -681,6 +724,35 @@ ${this.render(this.post(form.message.channel, bot.name, { content: note }, perso
       ...(message.reactions.length ? [`reactions: ${message.reactions.join(' ')}`] : []),
     ];
     return [header, ...lines.map(line => `  ${line}`)].join('\n');
+  }
+
+  /**
+   * Everything in the world as plain data: each message with the payload Discord received, the
+   * controls it carries with the ids `click` accepts, and every warning. Challenge tooling asserts
+   * on this rather than on `screen`'s rendered text, and can re-run validate.ts over it offline.
+   */
+  snapshot(): WorldSnapshot {
+    return {
+      messages: this.messages.map((message): SnapshotMessage => ({
+        id: message.id, channel: message.channel.name, author: message.author, content: message.content,
+        embeds: message.embeds, components: message.components, flags: message.flags, files: message.files,
+        only: message.only, replyTo: message.replyTo, edits: message.edits, reactions: message.reactions,
+        controls: this.controls(message).map((control): SnapshotControl => ({
+          id: this.controlId(control) ?? String(control.label),
+          type: control.type as number,
+          label: control.label as string | undefined,
+          emoji: control.emoji as SnapshotControl['emoji'],
+          url: control.url as string | undefined,
+          style: control.style as number | undefined,
+          disabled: Boolean(control.disabled),
+          customId: control.custom_id as string | undefined,
+          options: control.options as SnapshotControl['options'],
+        })),
+      })),
+      warnings: this.warnings,
+      forms: [...this.forms].map(([name, form]) => ({ person: name, from: form.message.id, payload: form.payload })),
+      channels: [...this.channels.values()],
+    };
   }
 
   /** A channel's latest messages: the one most recently active unless `where` names one. */

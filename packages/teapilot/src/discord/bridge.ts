@@ -81,6 +81,8 @@ export interface ConversationOptions {
   extension?: SessionExtension;
   /** Receives the conversation's turns after each change, so they survive a restart. */
   onHistory?: (history: ConversationTurn[]) => void;
+  /** Receives completion after the answer and any status card have been sent. */
+  onTurnEnd?: (result: Pick<HostResult, 'status' | 'requestId'>) => void;
   /**
    * discord.play apps; `channelId` is where they run, absent where they cannot be posted, and `post` posts them
    * through an interaction instead. `conversation` manages them, by default this conversation's key.
@@ -406,6 +408,7 @@ export class Conversation {
       if (!await show(summary, false)) await this.say(summary);
     }
     this.options.log(`${this.options.key}: ${result.status}; $${result.spentUsd.toFixed(6)}`);
+    this.options.onTurnEnd?.({ status: result.status, requestId: result.requestId });
     this.answerOnly = false;
     return result;
   };

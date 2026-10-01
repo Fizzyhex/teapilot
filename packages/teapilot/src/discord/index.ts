@@ -13,7 +13,7 @@ import { HistoryStore } from './history-store.js';
 import { GrantStore } from './grant-store.js';
 import { grantControls, type GrantPanel } from './grants-panel.js';
 import { SeatStore, type Seat } from './seat-store.js';
-import { Conversation, TurnQueue, type DiscordTransport } from './bridge.js';
+import { Conversation, TurnQueue, type ConversationOptions, type DiscordTransport } from './bridge.js';
 import { pictures } from './files.js';
 import { receiveFiles } from '../workspace/attach.js';
 import { SrtSandbox } from '../workspace/sandbox.js';
@@ -65,6 +65,7 @@ export interface DiscordServer {
   stateDir?: string;
   clock?: Clock;
   teachat?: boolean;
+  onTurnEnd?: ConversationOptions['onTurnEnd'];
 }
 
 /** Connects and serves Discord until `signal` aborts. */
@@ -188,6 +189,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
       onHistory: history => { if (!history.length) clearScratch(historyKey); try { histories.save(historyKey, history); } catch (error) { log(`${historyKey}: history not saved: ${error instanceof Error ? error.message : String(error)}`); } },
       maxPromptChars: config.policy.limits.maxPromptChars,
       run: runTurn,
+      onTurnEnd: options.onTurnEnd,
       extension: teachat && headlessTeachat(teachat, key),
       // A one-shot posts apps through its interaction, and later one-shots in the same history manage them.
       play: { runtime: play, conversation: historyKey, ...(!oneShot ? { channelId } : transport.postApp ? { channelId, post: payload => transport.postApp!(payload) } : {}) },

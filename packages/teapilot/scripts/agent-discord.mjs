@@ -3,7 +3,7 @@
 // one command at a time. A detached daemon (discord-sim/daemon.ts) owns teapilot and the fake
 // Discord; every other command is a short client call that returns plain text. Development tooling only.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -48,8 +48,13 @@ const usage = `Usage: node scripts/agent-discord.mjs <command>
   approve <name> [--deny] [--as P]   answer the newest waiting approval
   wait <name> --for REGEX | --idle MS [--timeout S]
   screen <name> [--in C] [--last N]  a channel's latest messages (default: the most recently active)
-  apps <name>                        every discord.play app
-  app <name> <id>                    one app: state, view, timers, recent actions and its source
+  apps <name> [--json]               every discord.play app (--json writes the records)
+  app <name> <id> [--json]           one app: state, view, timers, recent actions and its source
+  dump <name> [--out FILE]           the whole simulated Discord as JSON: every message with the
+                                     payload Discord received, its controls' ids, warnings, forms,
+                                     and every app record. --out writes it to a file and prints
+                                     only the path; omit it to print to stdout.
+  warnings <name>                    the ⚠ lines as {kind, what, message}, not as text
   advance <name> <duration>          move the clock ahead, e.g. 30s, 5m, 25h
   restart <name>                     restart teapilot; apps and conversation history are recovered
                                      (say "/convo clear" to start a conversation over)
@@ -160,6 +165,7 @@ async function client(argv) {
     as: { type: 'string', default: 'op' }, in: { type: 'string' }, for: { type: 'string' }, idle: { type: 'string' }, timeout: { type: 'string', default: '120' },
     last: { type: 'string' }, field: { type: 'string', multiple: true, default: [] }, deny: { type: 'boolean', default: false },
     attach: { type: 'string', multiple: true, default: [] }, choose: { type: 'string' }, 'one-shot': { type: 'boolean', default: false },
+    json: { type: 'boolean', default: false }, out: { type: 'string' },
   } });
   const [name, ...args] = positionals;
   if (!name) throw new UsageError(`${command} needs a session name.\n\n${usage}`);
@@ -201,13 +207,25 @@ async function client(argv) {
   else if (command === 'screen') body = { op: 'screen', in: values.in, last: values.last };
   else if (command === 'apps') body = { op: 'apps' };
   else if (command === 'app') { need(1, '<id>'); body = { op: 'app', id: args[0] }; }
+  else if (command === 'dump') body = { op: 'dump' };
+  else if (command === 'warnings') body = { op: 'warnings' };
   else if (command === 'advance') { need(1, '<duration>'); body = { op: 'advance', ms: duration(args[0]) }; }
   else if (command === 'log') body = { op: 'log', last: values.last };
   else if (command === 'scratch') body = { op: 'scratch', last: values.last };
   else if (['restart', 'status', 'stop'].includes(command)) body = { op: command };
   else throw new UsageError(`Unknown command ${command}.\n\n${usage}`);
   const reply = await session(name, body);
-  console.log(reply.text);
+  // --json and --out prefer the structured payload over the rendered text, and --out prints the path only.
+  if (command === 'dump' && reply.snapshot) {
+    const payload = { snapshot: reply.snapshot, apps: reply.apps ?? [] };
+    if (values.out) {
+      const path = resolve(values.out);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+      console.log(path);
+    } else console.log(JSON.stringify(payload));
+  } else if (values.json) console.log(JSON.stringify(reply[command === 'app' ? 'app' : command === 'apps' ? 'apps' : 'warnings'] ?? null, null, 2));
+  else console.log(reply.text);
   if (command === 'stop') rmSync(files(name).directory, { recursive: true, force: true });
   return reply.gone && command !== 'stop' ? 3 : 0;
 }

@@ -13,6 +13,7 @@ import { toolsFolder } from '../../src/workspace/toolchain.js';
 import type { DiscordSettings } from '../../src/discord/settings.js';
 import { SkippableClock } from './clock.js';
 import { channelId, people, SimError, World } from './world.js';
+import { TurnEvents } from './turn-events.js';
 
 export interface Spec {
   name: string; directory: string; socket: string; meta: string; log: string;
@@ -76,9 +77,9 @@ let session: { controller: AbortController; done: Promise<void>; ended: boolean 
 async function serve(): Promise<void> {
   const controller = new AbortController();
   const current = { controller, ended: false, done: Promise.resolve() };
-  current.done = serveDiscord({ config, settings, log: world.log, signal: controller.signal, connect: world.connect, stateDir: spec.state, clock, teachat: spec.teachat })
+  current.done = serveDiscord({ config, settings, log: world.log, signal: controller.signal, connect: world.connect, stateDir: spec.state, clock, teachat: spec.teachat, onTurnEnd: result => turns.complete(result) })
     .catch(error => world.warn(`teapilot stopped after an error: ${error instanceof Error ? error.message : String(error)}`))
-    .finally(() => { current.ended = true; for (const waiter of waiters) waiter(); });
+    .finally(() => { current.ended = true; turns.notify(); for (const waiter of waiters) waiter(); });
   session = current;
   await new Promise<void>(resolve => {
     const off = world.onEvent(text => { if (text.startsWith('[log] Connected as')) { off(); resolve(); } });
@@ -93,6 +94,8 @@ async function halt(): Promise<void> {
   await current.done;
 }
 const running = () => Boolean(session && !session.ended);
+
+const turns = new TurnEvents(world, running);
 
 function wait({ pattern, idle, timeout }: { pattern?: string; idle?: number; timeout: number }): Promise<{ code: number; screen: string }> {
   return new Promise(done => {
@@ -165,7 +168,7 @@ function scratch(last: number): string {
 
 async function handle(body: Body): Promise<Record<string, unknown>> {
   const as = String(body.as ?? 'op');
-  const input = () => { fresh = ''; };
+  const input = () => { fresh = ''; turns.reset(); };
   switch (body.op) {
     case 'hello': return { text: [`Simulated Discord ${running() ? 'is running' : 'did not start'}.`, ...notes].join('\n') };
     case 'say': {
@@ -186,9 +189,17 @@ async function handle(body: Body): Promise<Record<string, unknown>> {
       return { text: await world.click(as, message.id, body.deny ? 'deny' : 'approve') };
     }
     case 'wait': return wait(body as never);
+    case 'wait-turn': return turns.wait(Number(body.timeout) || 900);
     case 'screen': return { text: world.screen(body.in as string | undefined, Number(body.last) || 15) };
-    case 'apps': return { text: apps() };
-    case 'app': return { text: app(String(body.id)) };
+    case 'apps': return { text: apps(), apps: store.all() };
+    case 'app': return { text: app(String(body.id)), app: store.all().find(entry => entry.id === String(body.id)) };
+    // The same world as data rather than as rendered text: challenge tooling asserts on payloads,
+    // re-runs validate.ts offline, and reads rejections without scraping `⚠` from `screen`.
+    case 'dump': return { snapshot: world.snapshot(), apps: store.all() };
+    case 'warnings': return {
+      warnings: world.warnings,
+      text: world.warnings.length ? world.warnings.map(warning => `⚠ ${warning.text}${warning.what ? ` [${warning.kind}: ${warning.what}]` : ''}`).join('\n') : 'No warnings.',
+    };
     case 'scratch': return { text: scratch(Number(body.last) || 40) };
     case 'log': return { text: world.logs.slice(-(Number(body.last) || 30)).join('\n') || 'Nothing logged yet.' };
     case 'advance': {
@@ -237,6 +248,6 @@ server.listen(spec.socket);
 writeFileSync(spec.meta, JSON.stringify({ name: spec.name, pid: process.pid, root: spec.root, mode: spec.mode, startedAt: new Date().toISOString() }, null, 2));
 // An abandoned session ends itself after the TTL without contact.
 setInterval(() => {
-  if (waiters.size) lastContact = Date.now();
+  if (waiters.size || turns.waiting) lastContact = Date.now();
   if (Date.now() - lastContact > spec.ttl * 1000) void halt().then(shutdown);
 }, 1000);

@@ -4,16 +4,20 @@
 
 hi, teapilot is a small (but not) personal agent for coding and questions, for windows or linux.
 
-**weird but practical**
+**made out of spite**
+
+i stated this project out of exhaustion from the ai bubble. it's been cool to find out a bit about how this stuff works, and i'm putting this up to share my unique spin on things :)
+
+**weird & practical**
 
 - rather than offer lots of models, teapilot prefers you use the ones it provides, with routing systems that control its personality.
 - `teachat` allows teapilot to be the first agentic ✨ gossiper... when you chat, they gossip there and ask each other questions. keep that in mind :).
 
-**for your friends**
+**for friends!**
 
 teapilot's discord support is *really good*. it works great with interactions to allow usage in dms, group chats and servers without needing to invite teapilot. `discord.play` enables teapilot to create hot-reloadable games that are playable through embeds. you ca join convos at the same time as your friends, and chat with teapilot at the same time.
 
-**pretty capable**
+**good foundation**
 
 teapilot is based on [`pi`](https://github.com/earendil-works/pi)'s core, rather than wasting time maintaining a proprietary foundation.
 
@@ -23,7 +27,7 @@ if you want extensibility, use the deeply extendable pi harness. i designed teap
 
 - agents always [use bash instead of powershell](https://developer.microsoft.com/blog/the-hidden-variables-in-your-agent-eval/)
   - big difference in my experience.
-- automatic loops refine teapilot, fix bugs and cut down context bloat, see `./feedback`
+- automatic loops refine teapilot, fix bugs and cut down context bloat. i'm still working on this, but see `./feedback`
 
 **some commands:**
 
