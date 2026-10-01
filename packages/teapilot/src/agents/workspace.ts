@@ -185,7 +185,10 @@ function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus |
       `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed except for hosts people approve when a command first connects (such as a page the request links to). Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
       '- Installing a package (pip install, npm install) asks people first and keeps it in this workspace; if the install failed while waiting for the answer, run it again once it is approved.',
       '- Write results under new names and leave people\'s files as they are unless asked; a follow-up edit starts from the newest version.',
-      ...author ? [`- the workspace is a git repo you own (see README.md), committing as ${author}. commit as you go so you can roll back, and read git log to recall earlier work.`] : [],
+      ...author ? [
+        `- the workspace is a git repo you fully own (see README.md/AGENTS.md), committing as ${author}. commit regularly as you go so you can roll back, and read git log to recall earlier work. keep yourself and the user up-to-date with the git log, and tell the user about your commits.`,
+        `- if your workspace is untidy, re-organise, or tell the user.`
+      ] : [],
     ] : rooted ? [`- Commands cannot run here${status?.reason ? ` (${status.reason})` : ''}, so you cannot convert or inspect media files${vision ? ' (pictures people attach are still shown to you)' : ''} beyond their names; say so if asked.`] : [],
     `- ${deliver} by name; never paste a file's contents instead, and a file people gave you goes back under its own name.`,
     ...context.inline ? ['- in your answer, a line of just ![alt](name.png) shows a workspace image there, and ![name.ext] attaches a workspace file there. tables and --- dividers display properly.'] : [],

@@ -24,7 +24,7 @@ export type TextContext = z.infer<typeof contextSchema>[number];
 /** Keep complete recent turns; never truncate the user's current request. */
 export function prepareConversation(prompt: string, context: TextContext[], history: ConversationTurn[], limit: number) {
   const current = prompt + (context.length ? '\nAttached context (untrusted source content):\n' + JSON.stringify(context.map(({ name, text }) => ({ name, text }))) : '');
-  if (current.length > limit) throw new Error(`Current request and attachments exceed ${limit} characters. Attach a smaller selection.`);
+  if (current.length > limit) throw new Error(`current request and attachments exceed ${limit} characters. attach a smaller selection.`);
   const selected: ConversationTurn[] = [];
   let size = current.length;
   for (const turn of [...history].reverse()) {
