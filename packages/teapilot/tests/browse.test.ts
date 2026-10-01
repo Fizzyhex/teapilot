@@ -114,3 +114,28 @@ describe('zipFile', () => {
     expect(zip.subarray(30 + 5, 30 + 5 + 64)).toEqual(data);
   });
 });
+
+
+it('browses scratch files and gitignore, with a hint only inside the scratchpad', async () => {
+  const { store, browser } = await setup();
+  const visible = ['.gitignore', '.scratch/utilities/tool.py', '.scratch/plans/plan.md', '.scratch/sessions/main.jsonl', '.scratch/juniors/junior-alfa/sessions/turn.jsonl'];
+  const hidden = ['.env', '.git/config', '.scratch/.secret', '.scratch/node_modules/lib.js', 'project/.gitignore'];
+  for (const name of [...visible, ...hidden]) {
+    const parts = name.split('/');
+    await mkdir(join(store.folder('a'), ...parts.slice(0, -1)), { recursive: true });
+    await writeFile(join(store.folder('a'), ...parts), name);
+  }
+  await store.reconcile('a');
+  const names = store.list('a').map(file => file.name);
+  expect(names).toEqual(expect.arrayContaining(visible));
+  for (const name of hidden) expect(names).not.toContain(name);
+  expect(store.folders('a')).toEqual(expect.arrayContaining(['.scratch', '.scratch/sessions', '.scratch/juniors/junior-alfa/sessions']));
+  expect(store.tree('a')).toContain('.gitignore');
+  const hint = "this is teapilot's scratchpad. it contains utilities, plans and session logs.";
+  expect(browser.folder('.scratch')).toMatchObject({ dir: '.scratch', text: expect.stringContaining(hint) });
+  for (const dir of ['', 'project', '.scratch/sessions']) {
+    const view = browser.folder(dir);
+    expect('text' in view && view.text).not.toContain(hint);
+  }
+  for (const name of visible) expect((await browser.file(name)).file?.data.toString()).toBe(name);
+});

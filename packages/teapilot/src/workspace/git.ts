@@ -17,8 +17,8 @@ export function gitEnvironment(author: string): Record<string, string> {
   return { GIT_AUTHOR_NAME: author, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: author, GIT_COMMITTER_EMAIL: email };
 }
 
-/** teapilot's own folders in a workspace; .scratch holds session transcripts and is never committed. */
-const ignored = ['.scratch/', '.tmp/', '.packages/', '.cache/', '.appdata/', '.gitconfig', 'node_modules/', '__pycache__/'];
+/** teapilot's internal files; scratch utilities and plans are tracked, session transcripts are not. */
+const ignored = ['/.scratch/sessions/', '/.scratch/juniors/*/sessions/', '.tmp/', '.packages/', '.cache/', '.appdata/', '.gitconfig', 'node_modules/', '__pycache__/'];
 
 const readme = `# workspace
 

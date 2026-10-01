@@ -73,7 +73,9 @@ export function describeFile(file: StoredFile): string {
  * are never listed or sent, so a `pip install` does not bury the files people care about.
  */
 export function internal(name: string): boolean {
-  return name.split('/').some(part => part.startsWith('.') || part === 'node_modules' || part === '__pycache__');
+  return name.split('/').some((part, index) =>
+    (part.startsWith('.') && !(index === 0 && (part === '.scratch' || name === '.gitignore')))
+    || part === 'node_modules' || part === '__pycache__');
 }
 
 /** Every regular file under `directory` by relative path, never following links; stops after `limit` entries. */
@@ -156,8 +158,8 @@ export class WorkspaceStore {
   }
 
   /**
-   * The conversation's scratchpad (workspace/scratch.ts): a hidden folder inside its workspace, so sandboxed commands
-   * reach it as .scratch/ while people never see it listed. Not created here.
+   * The conversation's scratchpad (workspace/scratch.ts): a folder inside its workspace, so sandboxed commands
+   * reach it as .scratch/ and people can browse its files. Not created here.
    */
   scratch(conversation: string): string { return join(this.directory, this.id(conversation), '.scratch'); }
 

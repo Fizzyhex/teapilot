@@ -199,8 +199,9 @@ it('runs workspace commands with pi\'s shell in the sandbox, leaving the whole o
   const pad = new Scratch(store.scratch('dm:1'));
   const kept = (await captureResult(pad, new ExecutionPolicy(store.folder('dm:1'), f.config, async () => true, undefined, pad.folder, true), 'bash', { command: 'make' }, shown, result.details))!;
   expect(await readFile(kept.saved!.path, 'utf8')).toBe(out);
-  // People never see the scratchpad among the conversation's files.
-  expect(store.list('dm:1').map(file => file.name)).toEqual(['made.txt']);
+  // Reconciliation makes saved scratch output available in workspace views.
+  await store.reconcile('dm:1');
+  expect(store.list('dm:1').map(file => file.name)).toEqual(expect.arrayContaining(['made.txt', '.scratch/logs/bash-1.log']));
   cancelled = true;
   await expect(shell!.execute('r', { command: 'make' })).rejects.toThrow(/Command aborted[\s\S]*Changed: made\.txt/);
 });

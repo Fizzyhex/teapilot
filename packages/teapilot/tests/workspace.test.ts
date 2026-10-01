@@ -4,6 +4,7 @@ import { copyFile, link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import ignore from 'ignore';
 import { runAttempt } from '../src/agents/run.js';
 import { workspace, type ConversationWorkspace } from '../src/agents/workspace.js';
 import { pictures } from '../src/discord/files.js';
@@ -257,8 +258,8 @@ it('gives every tool the workspace as its root, so an edited script is the one t
   expect(JSON.stringify(bodies[0].messages)).toContain('read, write, edit, ls, find and grep take workspace file names');
   expect(JSON.stringify(bodies[4].messages)).toContain('ran print(\\"new\\")');
   expect(await readFile(join(store.scratch('dm:1'), 'notes.md'), 'utf8')).toBe('the scene works');
-  // Files the tools write join the workspace's list, so they can be sent; the scratchpad and its files stay out of it.
-  expect(store.list('dm:1').map(file => file.name)).toEqual(['scene.py', 'credits.txt']);
+  // Workspace and scratchpad files can be browsed and sent.
+  expect(store.list('dm:1').map(file => file.name)).toEqual(expect.arrayContaining(['scene.py', 'credits.txt', '.scratch/notes.md']));
   expect(f.sent.map(entry => entry.files.map(file => file.name))).toEqual([['credits.txt']]);
   expect(JSON.stringify(bodies[7].messages.at(-1))).toContain('scene.py');
   // Nothing asked anyone, and changed files read as workspace names (scratchpad writes are shown without one).
@@ -348,13 +349,21 @@ it('makes a workspace a git repository once, committing as the orchestrator or a
   expect(runs).toEqual([{ command: expect.stringMatching(/^git init/), author: 'teapilot' }]);
   // A README someone shared stays theirs; the session's transcripts are never committed.
   expect(await readFile(join(folder, 'README.md'), 'utf8')).toBe('mine');
-  expect(await readFile(join(folder, '.gitignore'), 'utf8')).toContain('.scratch/');
+  const rules = (await readFile(join(folder, '.gitignore'), 'utf8')).split('\n');
+  expect(rules).toContain('/.scratch/sessions/');
+  expect(rules).toContain('/.scratch/juniors/*/sessions/');
+  expect(rules).not.toContain('.scratch/');
+  const matcher = ignore().add(rules);
+  for (const name of ['.scratch/sessions/main.jsonl', '.scratch/juniors/junior-alfa/sessions/turn.jsonl']) expect(matcher.ignores(name)).toBe(true);
+  for (const name of ['.scratch/utilities/tool.py', '.scratch/plans/plan.md', '.scratch/juniors/junior-alfa/notes.md']) expect(matcher.ignores(name)).toBe(false);
+  await writeFile(join(folder, '.gitignore'), '.scratch/\ncustom/\n');
   expect(setup.systemPrompt).toContain('git repo you own (see README.md), committing as teapilot-orchestrator');
   await setup.shell!.execute('one', { command: 'git commit -am x' });
   const junior = await workspace(f.workspace, f.base.approve, true, undefined, false, 'tea-junior-alfa');
   await junior.shell!.execute('two', { command: 'git log' });
   expect(runs.slice(1)).toEqual([{ command: 'git commit -am x', author: 'teapilot-orchestrator' }, { command: 'git log', author: 'tea-junior-alfa' }]);
   expect(junior.systemPrompt).toContain('committing as tea-junior-alfa');
+  expect(await readFile(join(folder, '.gitignore'), 'utf8')).toBe('.scratch/\ncustom/\n');
 });
 
 it('leaves a workspace without git as it is', async () => {

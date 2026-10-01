@@ -45,6 +45,7 @@ If you're specifically asked to attempt challenge cases, do the cases at one of 
 - `conversation challenges` -> `./conversation-challenges.md`
 - `scratchpad benchmark` (ScratchBench) -> `./scratchpad-challenge.md`
 - `orchestration challenge` -> `./orchestration-challenge.md`
+- `git benchmark` (GitBench) -> `./git-challenge.md`
 
 ## Case 1: Snake Game
 {tags: "discord.play", "logic" }

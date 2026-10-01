@@ -103,7 +103,8 @@ export function workspaceBrowser(store: WorkspaceStore, conversation: string): W
       for (const limit of [40, 30, 20, 10]) {
         const tree = store.tree(conversation, dir, limit);
         if (!tree) return { note: top ? 'no files yet. attach one, or ask teapilot to make something.' : `${code(dir)} has no files.` };
-        text = `${name ? `${name}\n` : ''}${fence}py\n${tree}\n${fence}`;
+        const hint = dir === '.scratch' ? "this is teapilot's scratchpad. it contains utilities, plans and session logs.\n" : '';
+        text = `${name ? `${name}\n` : ''}${hint}${fence}py\n${tree}\n${fence}`;
         if (text.length <= MESSAGE_LIMIT) break;
       }
       return { dir, text };
