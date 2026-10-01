@@ -12,8 +12,6 @@ Preserve the opening unless asked to change it.
 Use this structure:
 
 ```md
----
-
 ## Flow
 <execution sequence>
 
@@ -33,5 +31,9 @@ Use this structure:
 Infer where each instruction belongs from its purpose. Preserve concrete details that matter for execution, such as file paths, commands, tools, labels, constraints, and report locations.
 
 Consolidate repetition and keep the result concise. Do not invent requirements or execute the task itself.
+
+Trust the agents inference, do not produce verbose, depth-heavy, token-hungry instructions.
+
+Don't repeat instructions from .agents\skills\discord-play-fine-tuner\SKILL.md.
 
 Return the completed agent prompt only.
