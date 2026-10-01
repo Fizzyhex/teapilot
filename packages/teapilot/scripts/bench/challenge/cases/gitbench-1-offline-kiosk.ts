@@ -4,7 +4,7 @@ export default {
   "id": "gitbench-1-offline-kiosk",
   "title": "GitBench — offline café kiosk, handoff, clear and resume",
   "tags": ["discord.play", "git", "memory", "sub-agents", "latency"],
-  "prose": "feedback/challenges/git-challenges.md, the offline café kiosk. Whether git is used as memory is judged from the history and the actual tool calls, not from a confident reply. A transcript or raw capture that is ever reachable in history is a hygiene failure even if it was deleted later.",
+  "prose": "feedback/challenges/git-challenge.md, the offline café kiosk. Whether git is used as memory is judged from the history and the actual tool calls, not from a confident reply. A transcript or raw capture that is ever reachable in history is a hygiene failure even if it was deleted later.",
   "fixtureName": "fetch_kiosk_catalog",
   "fixtureDescription": "returns the archived café supplier catalog as HTML; read-only and offline, with no network access",
   "steps": [
@@ -14,7 +14,7 @@ export default {
       "note": "a plan, nothing implemented"
     },
     { "click": "assign juniors", "wait": true, "record": true },
-    { "click": "lgtm", "wait": true, "record": true, "note": "this approves the build" },
+    { "click": "lgtm!", "wait": true, "record": true, "note": "this approves the build" },
     {
       "say": "leave delivery ordering out because the café’s delivery queue integration is postponed until november. change the unavailable label to “sold out”. leave a short handoff covering what works, decisions, checks and next steps so another agent can pick this up.",
       "record": true
@@ -50,5 +50,5 @@ export default {
     "hygiene: plans, decisions and reusable scripts tracked; transcripts, raw captures and disposable test files excluded from history",
     "efficiency: the working directory is tidy and git work is proportional to the milestones"
   ],
-  "notes": "Generate the catalog fixture first (feedback/challenges/git-challenges.md has the canonical recipe) and pass it with --fixture. Three repetitions make a smoke benchmark, not statistical proof."
+  "notes": "Generate the catalog fixture first (feedback/challenges/git-challenge.md has the canonical recipe) and pass it with --fixture. Three repetitions make a smoke benchmark, not statistical proof."
 } satisfies ChallengeCase;

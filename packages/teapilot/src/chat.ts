@@ -26,45 +26,61 @@ export const proposalRequest = (text: string): { kind: ProposalKind; idea: strin
   return match ? { kind: match[1]!.toLowerCase() as ProposalKind, idea: (match[2] ?? '').trim() } : undefined;
 };
 
-const proposalHead = `Hi, your job is to plan out this feature:
+const proposalHead = `[PLAN MODE] You are in plan mode - a read-only exploration mode for safe analysis.
 
 ---
+
+## Plan
 
 %prompt%
 
 ---
 
-CRITICAL: DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"!`;
+DO NOT MAKE ANY CHANGES UNTIL THE USER GIVES AN EXPLICIT "go ahead"!`;
 
-const planTemplate = `${proposalHead} Your reply MUST be a plan that follows the structure below, starting with the "<plan>" tag - with NOTHING else extra.
+const planTemplate = `${proposalHead}
 
-First, research before you propose anything: skim the links, files and documents the request points to (ask for web access with request_capabilities if you lack it), so the plan rests on them rather than on guesses - collecting data that takes more than a few calls is a step of the plan, not research; look through the repository for what already exists, and look for successful, lightweight open-source alternatives (small, well-maintained libraries or tools that already do part or all of this). Prefer reusing or adopting one over building from scratch, and say why if you still build it.
+## Plan Mode Restrictions:
+- Write tools are forbidden and disabled
+- Bash is restricted to an allowlist of read-only commands
+- Do not perform planned work
 
-\`\`\`template
+## Research & Source Gathering
+
+[!] Only enough research to confirm feasibility is required.
+
+Using \`delegate_task\`, deploy up to 2 planning researchers to either:
+  -> inspect the relevant \`workspace\` context; understanding any existing implementation & constraints.
+  -> if more info is required; direct an agent to perform focused web research with \`web_search\`.
+
+
+## Output
+
+Output a concrete, high-level plan, inside <plan> tags:
+
+\`\`\`text
 <plan>
-# Plan name
+# [title]
 
-## Goal
 
-One or two sentences: what will exist when this is done, and what is out of scope.
+[plan]
+1. concrete implementation step
+2 ...
 
-## Findings
+[verification]
+...
 
-What you found in the repository, and the lightweight open-source alternatives you found (name, what it does, why it is or is not a fit).
+[if applicable; non-obvious design choice / tradeoff? 1 paragraph max]
 
-## Approach
+[key tradeoffs / rationale, only if non-obvious]
 
-The chosen approach and the key decisions behind it, including whether to adopt an existing project or build.
-
-## Steps
-
-A short, ordered checklist. Each step names the files or components it touches and can be verified on its own.
-
-## Risks and open questions
-
-Anything that could go wrong, and anything you need me to decide before starting.
+[clarifying questions, 0-3]
 </plan>
-\`\`\``;
+\`\`\`
+
+[!] Include relevant file paths, and prefer simple solutions that mesh well with anything in the existing workspace.
+
+`;
 
 const rfcTemplate = `${proposalHead} Your reply MUST use the template below, starting with the "<rfc>" tag - with NOTHING else extra.
 

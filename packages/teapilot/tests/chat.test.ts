@@ -172,7 +172,7 @@ it('/btw asks from the conversation without joining it', async () => {
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/btw <question>/));
 });
 
-it('/plan asks for a researched implementation plan as an ordinary turn that stays in the conversation', async () => {
+it('/plan asks for a read-only implementation plan as an ordinary turn that stays in the conversation', async () => {
   const onHistory = vi.fn(), log = vi.fn();
   const input = vi.fn().mockResolvedValueOnce('/plan').mockResolvedValueOnce('/planet').mockResolvedValueOnce('go ahead').mockResolvedValueOnce('/exit');
   const run = vi.fn(async (_request: HostRequest) => result);
@@ -180,9 +180,10 @@ it('/plan asks for a researched implementation plan as an ordinary turn that sta
   expect(run).toHaveBeenCalledTimes(2);
   const planned = run.mock.calls[0]![0].prompt;
   expect(planned).toContain('\n\nadd a $& cache\n\n');
-  expect(planned).toMatch(/DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"/);
-  expect(planned).toContain('lightweight open-source alternatives');
+  expect(planned).toMatch(/DO NOT MAKE ANY CHANGES UNTIL THE USER GIVES AN EXPLICIT "go ahead"/);
+  expect(planned).toContain('[PLAN MODE]');
   expect(planned).toContain('<plan>');
+  expect(planned).toContain('</plan>');
   expect(planned).not.toContain('<rfc>');
   expect(run.mock.calls[0]![0].side).toBeUndefined();
   expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'go ahead', history: [{ user: planned, assistant: result.text }] });
@@ -199,7 +200,7 @@ it('/rfc asks for a design proposal in the RFC format', async () => {
   expect(run).toHaveBeenCalledTimes(1);
   const proposed = run.mock.calls[0]![0].prompt;
   expect(proposed).toContain('\n\nadd a cache\n\n');
-  expect(proposed).toMatch(/DO NOT MAKE ANY CHANGES UNTIL I GIVE YOU AN EXPLICIT "go ahead"/);
+  expect(proposed).toMatch(/DO NOT MAKE ANY CHANGES UNTIL THE USER GIVES AN EXPLICIT "go ahead"/);
   expect(proposed).toContain('<rfc>');
   expect(proposed).toContain('## Prior Art');
   expect(proposed).not.toContain('<plan>');

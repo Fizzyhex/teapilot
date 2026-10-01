@@ -176,7 +176,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       setup.tools.push(...input.junior ? apps.tools.filter(tool => !juniorPlayWithheld.includes(tool.name)) : apps.tools);
       setup.systemPrompt += '\n' + apps.systemPrompt + (input.junior ? '\n- As a junior you do not post apps: write the file, dry-run it with play_test, and name the file in your report so your instructor can post it.' : '');
     } else if (input.play && input.requestCapabilities && config.policy.permissions.includes('discord.play')) {
-      setup.systemPrompt += '\n- For interactive Discord apps (games, polls, quizzes, boards, timers with buttons), request `discord.play` with request_capabilities; it is granted without a prompt.';
+      setup.systemPrompt += '\n- For interactive Discord apps (games, polls, quizzes, boards, timers with buttons), request `discord.play` with request_capabilities before planning or building; it is granted without a prompt. Its apps use sandboxed JavaScript, not a separate Discord bot.';
     }
     // Without repository access the file tools, and the workspace's sandboxed shell, share its folder as their root.
     ownFiles = !repository && ownRoot !== undefined && model.toolCalling;

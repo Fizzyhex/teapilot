@@ -324,6 +324,7 @@ function playPrompt(repository: boolean, writable: boolean, running: Array<{ id:
     '- Before posting, dry-run rules that depend on several people or steps (turns, stacking, win lines, a sample consult answer) with play_test, acting as different user_ids. After posting, compare the returned preview with each thing asked for (sizes, emoji, layout, titles) and fix any mismatch with edit and play_update before answering.',
     '- When play_start rejects the app or a dry run shows a mistake, fix the file with edit and call play_start again with the same file, instead of writing the whole app again.',
     // Generated content
+    '- Apps built from supplied or downloaded data preserve its facts: prepare their embedded data from the source, not from memory or invented substitutes, and check displayed values against it. If the source is missing a fact, show it as unknown.',
     '- Anything the app should write for people while it runs (a recipe, story, answer or question for what they typed) comes from consult(); never hard-code stand-in content for it.',
     // Text input
     '- To collect text, give a button opens: modal(...); submitting it sends a modal action with the modal\'s id and fields.',

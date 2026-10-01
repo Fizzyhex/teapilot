@@ -72,7 +72,9 @@ export function gitEvidence(workspace, out) {
   };
   // A workspace need not be a repository; that is recorded, not thrown, and git's own stderr is kept out
   // of the runner's output so a missing repository does not look like a failure.
-  const git = args => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+  // The sandbox may own this workspace under another OS identity. Trust only this explicit evaluator
+  // path for this read, never a global wildcard or a change to the tested repository's configuration.
+  const git = args => execFileSync('git', ['-c', `safe.directory=${resolve(workspace).replaceAll('\\', '/')}`, '-C', workspace, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
   const safe = args => { try { return git(args); } catch (error) { return `# git ${args.join(' ')} failed\n${String(error.stderr ?? error.message)}`; } };
   const index = {};
   for (const [name, args] of Object.entries(views)) { const text = safe(args); write(join(out, `${name}.txt`), text); index[name] = text.split('\n').filter(Boolean).length; }
@@ -80,7 +82,7 @@ export function gitEvidence(workspace, out) {
   // Every blob any reachable commit holds, so an oversized or discarded capture is visible as data.
   const blobs = [];
   const commits = [];
-  for (const commit of safe(['rev-list', '--all']).split('\n').filter(Boolean)) {
+  for (const commit of safe(['rev-list', '--all']).split('\n').filter(line => /^[0-9a-f]{40}$/.test(line))) {
     const [hash, author, at, ...subject] = (safe(['show', '-s', '--format=%H%x09%an%x09%aI%x09%s', commit]).split('\n')[0] ?? '').split('\t');
     commits.push({ hash, author, at, subject: subject.join('\t') });
     for (const entry of safe(['ls-tree', '-r', commit]).split('\n').filter(Boolean)) {
@@ -147,7 +149,7 @@ const transcriptOf = name => {
  * Everything one run leaves behind, copied into `out`. `interactions` is what the runner recorded as it
  * went; `caseId` and `label` are what the batch needs to tell repetitions apart.
  */
-export function capture(name, out, { caseId, label, interactions = [], startedAt, fixture, seed, notes } = {}) {
+export function capture(name, out, { caseId, label, interactions = [], startedAt, fixture, seed, notes, configDir } = {}) {
   const directory = resolve(out);
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
@@ -177,12 +179,12 @@ export function capture(name, out, { caseId, label, interactions = [], startedAt
   const manifest = {
     case: caseId ?? null, label: label ?? null, session: name, startedAt: startedAt ?? session.startedAt, capturedAt: new Date().toISOString(),
     revision: revision.trim(), patchSha256: sha(patch()),
-    configDir: process.env.CHALLENGE_CONFIG_DIR ?? null, seed: seed ?? null, fixture: fixture ?? null, notes: notes ?? null,
+    configDir: configDir ?? process.env.CHALLENGE_CONFIG_DIR ?? null, seed: seed ?? null, fixture: fixture ?? null, notes: notes ?? null,
     apps, git, workspaces: workspaces(name).map(entry => entry.id), transcript: transcript ? relative(directory, transcript.path) : null,
     trace: existsSync(join(directory, 'trace')) ? readdirSync(join(directory, 'trace')).length : 0,
     events: events.length, requests, scratchFiles: scratch.files.length, scratchBytes: scratch.files.reduce((total, file) => total + file.bytes, 0),
     warnings: (dump.ok && existsSync(join(directory, 'discord.json')) ? JSON.parse(readFileSync(join(directory, 'discord.json'), 'utf8')).snapshot.warnings : []).length,
-    models: [...new Set(events.filter(event => event.type === 'attempt_start').map(event => event.model).filter(Boolean))],
+    models: [...new Set(events.map(event => event.model).filter(Boolean))],
   };
   write(join(directory, 'manifest.json'), manifest);
   return manifest;

@@ -23,14 +23,19 @@ export interface PlanControls {
   press(action: PlanAction, user: PlanClick, request?: string): string | undefined;
 }
 
-export const approvePrompt = 'go ahead with the plan';
-export const juniorsPrompt = [
-  'REFINE THE PLAN above - reply with the updated <plan>, don\'t take action yet.',
-  'workload distribution - group up todo tasks for delegation (`delegate_task`) to juniors: one junior per independent deliverable (research or data gathering, a separate file or feature), never parts of one small file.',
-  'short descriptive `#tags` next to your todos so you can maintain and reference them.',
-  '',
-  'maintenance - mark off completions, crossing off failures with notes, keep me in the loop.',
-].join('\n');
+export const approvePrompt = 'approved: save the plan to your workspace\'s scratchpad, then go ahead.';
+export const juniorsPrompt =
+`you will be the orchestrator for carrying out this plan. make edits:
+1. if not present - add a high-level TODOs section.
+2. assign #tags to each group of deliverables for \`delegate_task\`; avoiding fragmentation.
+3. create a mapping of juniors to each deliverable; with an example of how they may handoff.
+   lose example: junior 1 -> feat(deliverable): implemented my work
+
+[!] keep the current scope and quantities. group dependent work so you can check and integrate it simply.
+
+output the updated plan; do not take action or delegate tasks until the user gives an explicit go ahead.
+r`;
+
 export const changePrompt = (request: string) => `refine the plan with this request - don't take action yet:\n---\n${request}`;
 /** How each button looks: the label people read is what they "say". */
 export const planButtons: Record<PlanAction, { label: string; emoji?: string; style: 'success' | 'secondary' }> = {

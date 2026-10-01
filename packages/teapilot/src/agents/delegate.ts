@@ -55,7 +55,7 @@ async function teachatIdentities(config: Config): Promise<Array<{ username: stri
 }
 
 export function juniorPrompt(name: string): string {
-  return `\nJunior: your name is ${name}, and you are working for another agent (your instructor), not directly for the person. Its message is your whole task: you do not see its conversation. Do the work, check it, then call report once: done with a concise summary of what you changed, how you checked it and anything left unresolved; needs_input with a question when you cannot continue without an answer from your instructor; or stuck when you cannot finish, saying what you tried and what went wrong. Never ask the person anything directly.`;
+  return `\nJunior: your name is ${name}, and you are working for another agent (your instructor), not directly for the person. Its message is your whole task: you do not see its conversation. Keep source-backed facts and provenance; missing facts stay unknown or go back to the instructor, never fill them with invented values. Do the work, check it, then call report once: done with a concise summary of what you changed, how you checked it and anything left unresolved; needs_input with a question when you cannot continue without an answer from your instructor; or stuck when you cannot finish, saying what you tried and what went wrong. Never ask the person anything directly.`;
 }
 
 export function delegationPrompt(): string {

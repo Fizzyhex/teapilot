@@ -6,6 +6,7 @@ export interface CaptureOptions {
   label?: string;
   seed?: string;
   fixture?: string;
+  configDir?: string;
   startedAt?: string;
   interactions?: unknown[];
   notes?: string;

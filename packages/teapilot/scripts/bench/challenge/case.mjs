@@ -73,15 +73,16 @@ const dump = name => {
  * simulator's own checks so the payload is re-validated here rather than trusted from the session.
  */
 export async function scoreOut(evidenceDir, value) {
-  const wanted = (value?.expect ?? []).map(entry => (typeof entry === 'string' ? entry : entry.check)).filter(name => checkNames.includes(name));
-  if (!wanted.length) return [];
-  const validate = wanted.includes('controlsAreValid') ? validators() : undefined;
-  return runChecks(evidenceDir, wanted, {
-    options: Object.fromEntries((value.expect ?? []).map(entry => {
-      const { check, options } = typeof entry === 'string' ? { check: entry } : entry;
-      return [check, check === 'controlsAreValid' ? { ...options, validate } : options];
-    })),
-  });
+  const expectations = (value?.expect ?? []).map(entry => typeof entry === 'string' ? { check: entry } : entry)
+    .filter(entry => checkNames.includes(entry.check));
+  if (!expectations.length) return [];
+  const validate = expectations.some(entry => entry.check === 'controlsAreValid') ? validators() : undefined;
+  // A case can ask the same check several questions; options keyed by name would overwrite all but
+  // the last one and silently score that question repeatedly instead.
+  const results = await Promise.all(expectations.map(({ check, options }) => runChecks(evidenceDir, [check], {
+    options: { [check]: check === 'controlsAreValid' ? { ...options, validate } : options },
+  })));
+  return results.flat();
 }
 
 /** Finds a control by label, id, emoji or custom id, on the newest message that carries it. */
@@ -173,7 +174,7 @@ export async function runCase(value, options) {
     if (!dryRun) {
       write(join(out, 'interactions.jsonl'), interactions.map(entry => JSON.stringify(entry)).join('\n') + '\n');
       if (value.capture !== false && !outcome.startsWith('skipped')) {
-        try { capture(name, out, { caseId: value.id, label, seed, fixture, startedAt, interactions, notes: outcome === 'complete' ? undefined : blockedReason }); }
+        try { capture(name, out, { caseId: value.id, label, seed, fixture, configDir, startedAt, interactions, notes: outcome === 'complete' ? undefined : blockedReason }); }
         catch (error) { console.error(`  capture failed: ${error.message}`); }
       }
     }

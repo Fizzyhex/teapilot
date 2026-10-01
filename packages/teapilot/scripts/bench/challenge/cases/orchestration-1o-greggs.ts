@@ -35,7 +35,7 @@ Blue and Orange`,
       "note": "a plan, nothing implemented yet"
     },
     { "click": "assign juniors", "wait": true, "record": true, "note": "the plan now carries TODOs" },
-    { "click": "lgtm", "wait": true, "record": true, "note": "this approves the build" }
+    { "click": "lgtm!", "wait": true, "record": true, "note": "this approves the build" }
   ],
   "expect": [
     "noRejections",

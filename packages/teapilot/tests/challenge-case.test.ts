@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findControl, loadCases, scoreOut } from '../scripts/bench/challenge/case.mjs';
+import { gitEvidence } from '../scripts/bench/challenge/evidence.mjs';
 import { captures, score, compare } from '../scripts/bench/challenge/report.mjs';
 import type { ChallengeCase, Control, WorldSnapshot } from '../scripts/bench/challenge/case.mjs';
 
@@ -139,7 +140,48 @@ world\` }] };`);
   });
 });
 
+describe('git evidence', () => {
+  it('does not count git error lines as commits when the workspace is not a repository', () => {
+    const workspace = loadingDir();
+    const out = loadingDir();
+    const result = gitEvidence(workspace, out);
+    expect(result.commits).toBe(0);
+    expect(result.blobs).toBe(0);
+    expect(JSON.parse(readFileSync(join(out, 'commits.json'), 'utf8'))).toEqual([]);
+  });
+
+  it('indexes a repository without changing its local or global trust configuration', () => {
+    const workspace = loadingDir();
+    const out = loadingDir();
+    execFileSync('git', ['init', '-q', workspace]);
+    writeFileSync(join(workspace, 'catalog.json'), '[1,2,3]\n');
+    execFileSync('git', ['-C', workspace, 'add', 'catalog.json']);
+    execFileSync('git', ['-C', workspace, '-c', 'user.name=evaluator', '-c', 'user.email=evaluator@example.test', 'commit', '-qm', 'catalog']);
+    const config = readFileSync(join(workspace, '.git', 'config'), 'utf8');
+    const result = gitEvidence(workspace, out);
+    expect(result.commits).toBe(1);
+    expect(result.blobs).toBe(1);
+    expect(result.largest).toBe(8);
+    expect(readFileSync(join(workspace, '.git', 'config'), 'utf8')).toBe(config);
+  });
+});
+
 describe('scoring a capture', () => {
+  it('keeps separate options for repeated expectations of the same check', async () => {
+    const dir = loadingDir();
+    writeFileSync(join(dir, 'discord.json'), JSON.stringify({
+      apps: [{ id: 'kiosk', source: { code: 'breakfast' } }]
+    }));
+    const results = await scoreOut(dir, {
+      id: 'two-patterns', steps: [{ inspect: true }], expect: [
+        { check: 'appSourceContains', options: { pattern: 'breakfast' } },
+        { check: 'appSourceContains', options: { pattern: 'sweets' } }
+      ]
+    });
+    expect(results.map(result => result.pass)).toEqual([true, false]);
+    expect(results.map(result => result.detail)).toEqual(['found breakfast', 'no app source matches sweets']);
+  });
+
   const captureDir = (extra: Record<string, unknown> = {}) => {
     const dir = mkdtempSync(join(tmpdir(), 'challenge-score-'));
     writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ case: 'snake', label: 'baseline', revision: 'abc123', patchSha256: 'p1', models: ['m'], apps: [], warnings: 0, requests: 1, notes: null, ...extra }));
