@@ -158,6 +158,52 @@ it('dry-runs the running app\'s changed file from its current state', async () =
   expect(last(bodies[5])).toContain('Total 1');
 });
 
+it.each([
+  { name: 'an explicit file', args: { file: 'apps/counter.js' }, expected: 'Total 6' },
+  { name: 'the newest app by default', args: {}, expected: 'Total 6' },
+  { name: 'an explicit fresh start', args: { file: 'apps/counter.js', reset: true }, expected: 'Total 100' },
+  { name: 'an unrelated file', args: { file: 'apps/other.js' }, expected: 'Count 8' },
+])('dry-runs $name before updating in a later turn', async ({ args, expected }) => {
+  const bodies: any[] = [];
+  const steps = [
+    written(source.replace('init: () => 0', 'init: () => 5')),
+    { tool: { name: 'play_start', arguments: { file: 'apps/counter.js', title: 'Counter' } } },
+    { text: 'Started.' },
+    written(source.replace('init: () => 0', 'init: () => 99').replace("'Count '", "'Total '")),
+    written(source.replace('init: () => 0', 'init: () => 7'), 'apps/other.js'),
+    { tool: { name: 'play_test', arguments: { ...args, actions: [{ kind: 'button', id: 'add' }] } } },
+    { text: 'Checked.' },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  await runAttempt({ ...f, ...f.base, prompt: 'make a counter', activePermissions: ['inference', 'discord.play'], ...f.turn() });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'check the changed app', activePermissions: ['inference', 'discord.play'], ...f.turn() });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(last(bodies[6])).toContain(expected);
+  const [app] = f.runtime.list('dm:1');
+  expect(f.runtime.state(app!.id, 'dm:1')).toBe(5);
+  expect(f.runtime.source(app!.id, 'dm:1')).toMatchObject({ code: expect.stringContaining("'Count '") });
+});
+
+it('renames a running app without changing its code or resetting state', async () => {
+  const bodies: any[] = [];
+  const steps = [
+    written(source.replace('init: () => 0', 'init: () => 5')),
+    { tool: { name: 'play_start', arguments: { file: 'apps/counter.js', title: 'Counter' } } },
+    { tool: { name: 'play_update', arguments: { title: 'Renamed counter' } } },
+    { tool: { name: 'play_inspect', arguments: {} } },
+    { text: 'Renamed.' },
+  ];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'make and rename a counter', activePermissions: ['inference', 'discord.play'], ...f.turn() });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(last(bodies[3])).toContain('Updated app');
+  expect(last(bodies[4])).toContain('Renamed counter');
+  const [app] = f.runtime.list('dm:1');
+  expect(app!.title).toBe('Renamed counter');
+  expect(f.runtime.state(app!.id, 'dm:1')).toBe(5);
+  expect(f.posts).toEqual(['Count 5']);
+});
+
 it('answers on the last turn of a play attempt instead of running into the turn limit', async () => {
   const bodies: any[] = [];
   const f = await setup((body, _req, res) => { bodies.push(body); completion(res, body.tools?.length ? { tool: { name: 'play_list', arguments: {} } } : { text: 'Nothing is running yet.' }); });

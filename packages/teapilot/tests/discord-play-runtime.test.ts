@@ -439,6 +439,17 @@ it('fills in top-level state a new version adds in init, keeping the rest', asyn
   expect(preview).toContain('Note: The kept state gained scores from the new init()');
 });
 
+it('dry-runs new top-level defaults while preserving existing live state', async () => {
+  const { runtime } = await setup();
+  const code = counter.replace("count: 0, said: ''", "count: 99, said: '', scores: { best: 9 }")
+    .replace("state.count + ' ' + state.said", "state.count + ' ' + state.scores.best");
+  const kept = { count: 5, said: '' };
+  const preview = await runtime.test({ kind: 'sandbox', code }, [{ kind: 'button', id: 'add' }], owner, { state: kept });
+  expect(preview).toContain('6 9');
+  expect(preview).toContain('"scores":{"best":9}');
+  expect(kept).toEqual({ count: 5, said: '' });
+});
+
 it('refuses a broken app before posting anything', async () => {
   const { runtime, posts } = await setup();
   await expect(start(runtime, { code: counter.replace("content: state.count + ' ' + state.said", "content: 5") })).rejects.toThrow(/Message content must be a string/);
