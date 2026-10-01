@@ -17,6 +17,7 @@ import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import type { RunOptions, WorkspaceSandbox } from '../src/workspace/sandbox.js';
 import { receiveFiles } from '../src/workspace/attach.js';
+import { ensureRepository } from '../src/workspace/git.js';
 import { fileLimits, WorkspaceStore } from '../src/workspace/store.js';
 import { TerminalWorkspace } from '../src/workspace/terminal.js';
 import { pandocAsset, pythonAbi } from '../src/workspace/toolchain.js';
@@ -417,6 +418,7 @@ it('makes a workspace a git repository once, committing as the orchestrator or a
   expect(runs).toEqual([{ command: expect.stringMatching(/^git init/), author: 'teapilot' }]);
   // A README someone shared stays theirs; the session's transcripts are never committed.
   expect(await readFile(join(folder, 'README.md'), 'utf8')).toBe('mine');
+  expect(await readFile(join(folder, 'AGENTS.md'), 'utf8')).toContain('commit after each meaningful step');
   const rules = (await readFile(join(folder, '.gitignore'), 'utf8')).split('\n');
   expect(rules).toContain('/.scratch/sessions/');
   expect(rules).toContain('/.scratch/juniors/*/sessions/');
@@ -425,7 +427,9 @@ it('makes a workspace a git repository once, committing as the orchestrator or a
   for (const name of ['.scratch/sessions/main.jsonl', '.scratch/juniors/junior-alfa/sessions/turn.jsonl']) expect(matcher.ignores(name)).toBe(true);
   for (const name of ['.scratch/utilities/tool.py', '.scratch/plans/plan.md', '.scratch/juniors/junior-alfa/notes.md']) expect(matcher.ignores(name)).toBe(false);
   await writeFile(join(folder, '.gitignore'), '.scratch/\ncustom/\n');
-  expect(setup.systemPrompt).toContain('git repo you own (see README.md), committing as teapilot-orchestrator');
+  expect(setup.systemPrompt).toContain('git repo you fully own (see AGENTS.md), committing as teapilot-orchestrator');
+  expect(setup.systemPrompt).toContain('before working, read and follow AGENTS.md');
+  expect(setup.systemPrompt).toContain('not after every task');
   await setup.shell!.execute('one', { command: 'git commit -am x' });
   const junior = await workspace(f.workspace, f.base.approve, true, undefined, false, 'tea-junior-alfa');
   await junior.shell!.execute('two', { command: 'git log' });
@@ -434,10 +438,81 @@ it('makes a workspace a git repository once, committing as the orchestrator or a
   expect(await readFile(join(folder, '.gitignore'), 'utf8')).toBe('.scratch/\ncustom/\n');
 });
 
+it.each([false, true])('seeds concise workspace docs without resetting them (existing repository: %s)', async existing => {
+  const folder = await directory('teapilot-workspace-docs-');
+  if (existing) await mkdir(join(folder, '.git'));
+  const sandbox = fakeSandbox(async folder => { await mkdir(join(folder, '.git'), { recursive: true }); });
+  const status = { available: true, shell: 'bash' as const, tools: [{ name: 'git', kind: 'git', version: '2.45.1' }] };
+  expect(await ensureRepository(folder, sandbox, status)).toBe(true);
+  const readme = await readFile(join(folder, 'README.md'), 'utf8');
+  const agents = await readFile(join(folder, 'AGENTS.md'), 'utf8');
+  expect(readme).toContain('.scratch/user-attachments/');
+  expect(readme).not.toMatch(/commit|instructions|keyword/);
+  expect(agents).toContain('commit after each meaningful step');
+  expect(agents).toContain('keep README.md for people');
+  expect(agents).toContain('keep AGENTS.md for agents');
+  expect(agents).toContain('edit or remove stale text instead of appending');
+  expect(agents).toContain('read the code for implementation details');
+  expect(sandbox.commands).toHaveLength(existing ? 0 : 1);
+  await writeFile(join(folder, 'README.md'), 'custom workspace overview\n');
+  await writeFile(join(folder, 'AGENTS.md'), 'custom workspace instructions\n');
+  expect(await ensureRepository(folder, sandbox, status)).toBe(true);
+  expect(await readFile(join(folder, 'README.md'), 'utf8')).toBe('custom workspace overview\n');
+  expect(await readFile(join(folder, 'AGENTS.md'), 'utf8')).toBe('custom workspace instructions\n');
+  expect(sandbox.commands).toHaveLength(existing ? 0 : 1);
+});
+
+it.each([false, true])('preserves existing instructions on first initialization (custom README: %s)', async customReadme => {
+  const folder = await directory('teapilot-workspace-docs-');
+  await writeFile(join(folder, 'AGENTS.md'), 'my rules\n');
+  if (customReadme) await writeFile(join(folder, 'README.md'), 'my overview\n');
+  const sandbox = fakeSandbox(async folder => { await mkdir(join(folder, '.git')); });
+  const status = { available: true, shell: 'bash' as const, tools: [{ name: 'git', kind: 'git', version: '2.45.1' }] };
+  expect(await ensureRepository(folder, sandbox, status)).toBe(true);
+  expect(await readFile(join(folder, 'AGENTS.md'), 'utf8')).toBe('my rules\n');
+  if (customReadme) expect(await readFile(join(folder, 'README.md'), 'utf8')).toBe('my overview\n');
+});
+
+it.each(['stock', 'customized', 'existing instructions'])('migrates only the untouched legacy workspace README (%s)', async variant => {
+  const folder = await directory('teapilot-workspace-docs-');
+  await mkdir(join(folder, '.git'));
+  const legacy = `# workspace
+
+this folder is a git repo and you (teapilot) own it. files people attach land here too.
+
+- commit after each meaningful step - small commits are easy to roll back
+- messages: a short imperative subject, plus a line of why when it isn't obvious
+- tag milestones people may want back (\`git tag first-draft\`)
+- \`git log --oneline\` and \`git diff\` show what was done before - check them when picking work back up
+- juniors commit under their own names (tea-junior-*) - read their commits before building on them
+`;
+  const original = legacy + (variant === 'customized' ? '\nmy notes\n' : '');
+  await writeFile(join(folder, 'README.md'), original);
+  if (variant === 'existing instructions') await writeFile(join(folder, 'AGENTS.md'), 'my rules\n');
+  const sandbox = fakeSandbox();
+  const status = await sandbox.status();
+  expect(await ensureRepository(folder, sandbox, status)).toBe(true);
+  const readme = await readFile(join(folder, 'README.md'), 'utf8');
+  if (variant === 'customized') expect(readme).toBe(original);
+  else {
+    expect(readme).toContain('.scratch/user-attachments/');
+    expect(readme).not.toContain('commit');
+  }
+  const agents = await readFile(join(folder, 'AGENTS.md'), 'utf8');
+  if (variant === 'existing instructions') expect(agents).toBe('my rules\n');
+  else expect(agents).toContain('commit after each meaningful step');
+  expect(await ensureRepository(folder, sandbox, status)).toBe(true);
+  expect(await readFile(join(folder, 'README.md'), 'utf8')).toBe(readme);
+  expect(await readFile(join(folder, 'AGENTS.md'), 'utf8')).toBe(agents);
+  expect(sandbox.commands).toHaveLength(0);
+});
+
 it('leaves a workspace without git as it is', async () => {
   const f = await agentSetup(() => undefined);
   const setup = await workspace(f.workspace, f.base.approve, true);
   expect(existsSync(join(f.store.folder('dm:1'), '.gitignore'))).toBe(false);
+  expect(existsSync(join(f.store.folder('dm:1'), 'README.md'))).toBe(false);
+  expect(existsSync(join(f.store.folder('dm:1'), 'AGENTS.md'))).toBe(false);
   expect(setup.systemPrompt).not.toContain('git repo');
 });
 
