@@ -32,7 +32,7 @@ describe('VS Code integration boundaries', () => {
   it('keeps complete recent turns and rejects oversized current context', () => {
     const turn = { user: 'first', assistant: 'answer' };
     expect(prepareConversation('current', [], [turn, turn], 180)).toMatchObject({ history: [turn], omitted: 1 });
-    expect(() => prepareConversation('x'.repeat(101), [], [], 100)).toThrow('Current request');
+    expect(() => prepareConversation('x'.repeat(101), [], [], 100)).toThrow('current request and attachments exceed 100 characters');
   });
   it('streams a standalone model and settles its cost without executing tools', async () => {
     const f = await local((body, _request, response) => {
