@@ -30,7 +30,7 @@ function ui(overrides: Partial<SetupUI> = {}): SetupUI & { lines: string[] } {
 
 interface Tabby {
   up: boolean; foreign?: boolean; folders: Set<string>;
-  loaded?: { id: string; max_seq_len: number; draft?: string };
+  loaded?: { id: string; max_seq_len: number; draft?: string; vision?: boolean };
   downloadError?: string; loadError?: string;
   requests: Array<{ path: string; body: any; auth?: string }>;
   chats: any[];
@@ -54,7 +54,7 @@ async function tabbyServer(root: string) {
     if (path === '/v1/model') {
       if (!state.loaded) { response.writeHead(503); response.end('{}'); return; }
       // Like the ExLlamaV3 backend, the card never names the drafter.
-      response.end(JSON.stringify({ id: state.loaded.id, parameters: { max_seq_len: state.loaded.max_seq_len }, draft: null }));
+      response.end(JSON.stringify({ id: state.loaded.id, parameters: { max_seq_len: state.loaded.max_seq_len, use_vision: Boolean(state.loaded.vision) }, draft: null }));
       return;
     }
     if (path === '/v1/model/draft/list') { response.end(JSON.stringify({ object: 'list', data: state.loaded?.draft ? [{ id: state.loaded.draft }] : [] })); return; }
@@ -69,7 +69,7 @@ async function tabbyServer(root: string) {
     }
     if (path === '/v1/model/load') {
       if (state.loadError) { sse(response, [{ model_type: 'draft', module: 1, modules: 2, status: 'processing' }, { error: { message: state.loadError } }]); return; }
-      state.loaded = { id: body.model_name, max_seq_len: body.max_seq_len, draft: body.draft_model?.draft_model_name };
+      state.loaded = { id: body.model_name, max_seq_len: body.max_seq_len, draft: body.draft_model?.draft_model_name, vision: body.vision };
       sse(response, [
         { model_type: 'draft', module: 1, modules: 1, status: 'finished' },
         { model_type: 'model', module: 32, modules: 64, status: 'processing' },
@@ -141,6 +141,8 @@ it('installs a pinned runtime, starts it, downloads and loads the preset as sepa
   expect(config).toContain(`port: ${h.tabby.port}`);
   expect(config).toContain('host: 127.0.0.1');
   expect(config).toContain('cache_size: 32768');
+  expect(config).toContain('vision: true');
+  expect(config).not.toContain('vision_offload');
   expect(config).not.toContain('model_name');
   expect(h.tabby.state.requests.filter(item => item.path === '/v1/download')).toEqual([]);
 
@@ -153,7 +155,7 @@ it('installs a pinned runtime, starts it, downloads and loads the preset as sepa
   ]);
   expect(downloads.every(item => item.auth === `Bearer ${saved.keys.admin}`)).toBe(true);
   expect(h.tabby.state.requests.find(item => item.path === '/v1/model/load')!.body).toEqual({
-    model_name: preset.model.folder, max_seq_len: 32768, cache_size: 32768, cache_mode: 'Q8', draft_model: { draft_model_name: preset.drafter!.folder },
+    model_name: preset.model.folder, max_seq_len: 32768, cache_size: 32768, cache_mode: 'Q8', vision: true, draft_model: { draft_model_name: preset.drafter!.folder },
   });
   expect(saved.downloads).toEqual({ [preset.model.folder]: preset.model.revision, [preset.drafter!.folder]: preset.drafter!.revision });
   expect(prompts.lines).toContain('Loading model: 50%');
@@ -164,7 +166,7 @@ it('installs a pinned runtime, starts it, downloads and loads the preset as sepa
     roles: ['capable'], source: expect.any(String), apiKeyEnv: 'TABBY_API_KEY', apiKey: saved.keys.api,
     model: {
       id: preset.model.folder, provider: 'tabbyapi', baseUrl: `http://127.0.0.1:${h.tabby.port}/v1`, contextTokens: 32768, maxOutputTokens: 16384,
-      toolCalling: true, supportsDeveloperRole: false, supportsUsage: true, sampling: preset.sampling,
+      toolCalling: true, vision: true, supportsDeveloperRole: false, supportsUsage: true, sampling: preset.sampling,
       reasoning: { type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, low: { enable_thinking: true, reasoning_effort: 'low' }, medium: { enable_thinking: true, reasoning_effort: 'medium' }, xhigh: { enable_thinking: true, reasoning_effort: 'xhigh' } } },
     },
   }]);
@@ -189,7 +191,7 @@ it('reuses a healthy managed install, its downloads and its loaded model', async
   expect(h.tabby.state.requests.map(item => item.path)).not.toContain('/v1/model/load');
 
   // After a restart the server is started again, and loads the model itself from its config.
-  h.tabby.state.up = false; h.tabby.state.loaded = { id: preset.model.folder, max_seq_len: 32768, draft: preset.drafter!.folder };
+  h.tabby.state.up = false; h.tabby.state.loaded = { id: preset.model.folder, max_seq_len: 32768, draft: preset.drafter!.folder, vision: true };
   const launch = vi.fn(async () => { h.tabby.state.up = true; return 1; });
   await tabbyDriver({ ...h.boundaries, launch }).start(context());
   expect(launch).toHaveBeenCalledTimes(1);
@@ -332,6 +334,21 @@ it('reloads a model running without its drafter, and warns about it and about a 
   await h.driver.start(context());
   expect(h.tabby.state.requests.find(item => item.path === '/v1/model/load')?.body).toMatchObject({ draft_model: { draft_model_name: preset.drafter!.folder } });
   expect((await h.driver.inspect(signal())).warnings).toEqual([expect.stringContaining('logging errors')]);
+});
+
+it('reloads a model running without vision, and keeps vision offload to the server settings', async () => {
+  const h = await harness();
+  await h.driver.ensure(context()); await h.driver.provision(context());
+  h.tabby.state.loaded!.vision = false;
+  h.tabby.state.requests.length = 0;
+  await h.driver.provision(context());
+  expect(h.tabby.state.requests.find(item => item.path === '/v1/model/load')?.body).toMatchObject({ vision: true });
+  expect(h.tabby.state.loaded!.vision).toBe(true);
+  const offloaded = await harness({ preset: { ...preset, load: { ...preset.load, visionOffload: true } } });
+  await offloaded.driver.ensure(context());
+  const config = await readFile(join(offloaded.root, 'tabbyAPI', 'config.yml'), 'utf8');
+  expect(config).toContain('vision_offload: true');
+  expect(config).toContain('use_as_default: ["max_batch_size", "vision_offload"]');
 });
 
 it('sets a large server log aside before starting the server', async () => {

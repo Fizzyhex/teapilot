@@ -7,13 +7,13 @@ import type { Config, ModelConfig, Tier, PhysicalModel } from '../config.js';
 import { effectiveProfile, modelFor, profileFor, type ExecutionProfile, type ThinkingLevel } from '../routing/execution.js';
 import { BudgetError, callCeiling, type SpendGovernor } from './budget.js';
 import type { Telemetry } from '../telemetry/outcome.js';
-import { calibratedTokens, estimateInputTokens, estimatePayloadTokens, MAX_PAYLOAD_BYTES, replyRoom, wellFormedText } from './context.js';
+import { calibratedTokens, estimateInputTokens, estimatePayloadTokens, imageBytes, MAX_IMAGE_PAYLOAD_BYTES, MAX_PAYLOAD_BYTES, replyRoom, wellFormedText } from './context.js';
 import { reasoningFields, samplingFor } from './reasoning.js';
 
 export function piModel(config: ModelConfig, profile?: ExecutionProfile): Model<'openai-completions'> {
   return {
     id: config.id, name: config.id, api: 'openai-completions', provider: config.provider,
-    baseUrl: config.baseUrl, reasoning: false, input: ['text'],
+    baseUrl: config.baseUrl, reasoning: false, input: config.vision ? ['text', 'image'] : ['text'],
     contextWindow: config.contextTokens, maxTokens: profile?.maxOutputTokens ?? config.maxOutputTokens,
     cost: { input: config.inputUsdPerMillion, output: config.outputUsdPerMillion, cacheRead: config.inputUsdPerMillion, cacheWrite: config.inputUsdPerMillion },
     compat: { supportsDeveloperRole: config.supportsDeveloperRole, supportsUsageInStreaming: config.supportsUsage, maxTokensField: 'max_tokens' },
@@ -161,7 +161,8 @@ function observeBilling(response: Response, observed: Observed): Response {
  * servers fail the whole request on a lone surrogate (a tokenizer that needs valid UTF-8, say).
  */
 export function wellFormed(value: unknown): unknown {
-  if (typeof value === 'string') return wellFormedText(value);
+  // A picture's data URL is base64, which cannot hold a lone surrogate.
+  if (typeof value === 'string') return value.startsWith('data:image/') ? value : wellFormedText(value);
   if (Array.isArray(value)) return value.map(wellFormed);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, wellFormed(item)]));
   return value;
@@ -224,11 +225,13 @@ export function guardedStream(
           },
           fetch: async (input, init) => {
             const body = typeof init?.body === 'string' ? init.body : '';
-            const payloadBytes = Buffer.byteLength(body);
-            lexicalTokens = body && payloadBytes <= MAX_PAYLOAD_BYTES ? estimateInputTokens(body) : undefined;
+            // Pictures are bytes in the request but a few hundred tokens to the model, so they have a ceiling of their own.
+            const pictureBytes = imageBytes(body);
+            const payloadBytes = Buffer.byteLength(body) - pictureBytes;
+            lexicalTokens = body && payloadBytes <= MAX_PAYLOAD_BYTES && pictureBytes <= MAX_IMAGE_PAYLOAD_BYTES ? estimateInputTokens(body) : undefined;
             const calibration = state.calibration;
             const estimatedInputTokens = lexicalTokens === undefined ? undefined : calibratedTokens(lexicalTokens, calibration);
-            const rejection = payloadBytes > MAX_PAYLOAD_BYTES ? 'payload_limit'
+            const rejection = payloadBytes > MAX_PAYLOAD_BYTES || pictureBytes > MAX_IMAGE_PAYLOAD_BYTES ? 'payload_limit'
               : estimatedInputTokens !== undefined && estimatedInputTokens + floor > profile.contextTokens ? 'context_limit' : undefined;
             await telemetry.event('context_admission', { tier, model: spec.id, payloadBytes, estimatedInputTokens, lexicalTokens,
               contextTokens: profile.contextTokens, reservedOutputTokens: floor, maxOutputTokens: maxTokens, method: calibration ? 'calibrated-lexical' : 'conservative-lexical', rejection });

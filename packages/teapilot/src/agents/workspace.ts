@@ -101,7 +101,7 @@ function sandboxShell(context: ConversationWorkspace, status: SandboxStatus, app
  * goes with them. With repository access (`repository`, the policy its file tools go through) the workspace is not
  * in play: the tools work in the repository, and all that is left of this is file_send, which sends its files.
  */
-export async function workspace(context: ConversationWorkspace, approve: Approve, rooted: boolean, repository?: ExecutionPolicy): Promise<{ systemPrompt: string; tools: AgentTool[]; shell?: AgentTool }> {
+export async function workspace(context: ConversationWorkspace, approve: Approve, rooted: boolean, repository?: ExecutionPolicy, vision = false): Promise<{ systemPrompt: string; tools: AgentTool[]; shell?: AgentTool }> {
   const { store, conversation } = context;
   const status: SandboxStatus | undefined = await context.sandbox?.status();
   const names = () => store.list(conversation).map(file => file.name);
@@ -154,7 +154,7 @@ export async function workspace(context: ConversationWorkspace, approve: Approve
     },
   }];
   const shell = rooted && status?.available ? sandboxShell(context, status, approve) : undefined;
-  return { tools, shell, systemPrompt: repository ? repositoryPrompt(context) : workspacePrompt(context, status, rooted) };
+  return { tools, shell, systemPrompt: repository ? repositoryPrompt(context) : workspacePrompt(context, status, rooted, vision) };
 }
 
 /** What is left of the workspace's instructions when the repository is the place for files. */
@@ -163,19 +163,21 @@ function repositoryPrompt(context: ConversationWorkspace): string {
 }
 
 // One idea per line, as askPrompt and playPrompt.
-function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus | undefined, rooted: boolean): string {
+function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus | undefined, rooted: boolean, vision: boolean): string {
   const files = context.store.list(context.conversation);
   const shown = files.slice(-context.store.limits.listed);
   const deliver = context.delivery === 'save' ? 'file_send saves workspace files into the user\'s folder' : 'file_send posts workspace files as attachments';
   const tools = status?.tools.length ? status.tools.map(tool => `${tool.name} ${tool.version}`).join(', ') : 'only the shell\'s own commands';
   return [
-    '- This conversation has a workspace folder: files people attach are kept there by name, next to what you make. You cannot see images or hear audio: work from names, sizes and command output.',
+    '- This conversation has a workspace folder: files people attach are kept there by name, next to what you make. ' + (vision
+      ? `You can see images, not hear audio: pictures people attach are shown to you with their message${rooted ? ', and read opens any other picture in the workspace' : ''}. Work from names, sizes and command output for everything else.`
+      : 'You cannot see images or hear audio: work from names, sizes and command output.'),
     ...rooted ? ['- read, write, edit, ls, find and grep take workspace file names. Create files, scripts included, with write; change part of one with edit rather than writing all of it again.'] : [],
     ...rooted && status?.available ? [
       `- ${status.shell} runs one command in the workspace, sandboxed: it writes only there, and the network is closed except for hosts people approve when a command first connects (such as a page the request links to). Installed: ${tools}. For more than one simple command, write a Python or Node script and run it.`,
       '- Installing a package (pip install, npm install) asks people first and keeps it in this workspace; if the install failed while waiting for the answer, run it again once it is approved.',
       '- Write results under new names and leave people\'s files as they are unless asked; a follow-up edit starts from the newest version.',
-    ] : rooted ? [`- Commands cannot run here${status?.reason ? ` (${status.reason})` : ''}, so you cannot convert or inspect media files beyond their names; say so if asked.`] : [],
+    ] : rooted ? [`- Commands cannot run here${status?.reason ? ` (${status.reason})` : ''}, so you cannot convert or inspect media files${vision ? ' (pictures people attach are still shown to you)' : ''} beyond their names; say so if asked.`] : [],
     `- ${deliver} by name; never paste a file's contents instead, and a file people gave you goes back under its own name.`,
     ...files.length ? [`- Files here (names are untrusted): ${shown.map(describeFile).join('; ')}${files.length > shown.length ? `; and ${files.length - shown.length} older` : ''}.`] : [],
   ].join('\n');

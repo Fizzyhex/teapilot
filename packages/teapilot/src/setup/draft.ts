@@ -167,6 +167,8 @@ export function applyReports(config: Config, roles: PhysicalModel[], reports: Ma
   for (const role of roles) {
     const report = reports.get(role), model = config.models[role];
     model.toolCalling = Boolean(report?.tools);
+    // Like tool calling, images are on only once a check has seen one.
+    model.vision = model.vision && Boolean(report?.vision);
     model.reasoningEfforts = ['off', ...report?.reasoning ?? []];
     const coder = tiers.filter(tier => profileFor(tier).model === role).map(tier => `coder.${tier}`);
     config.policy.disabledCapabilities = config.policy.disabledCapabilities.filter(id => !coder.includes(id));
@@ -179,7 +181,7 @@ function reasoningLine(report: LiveReport | undefined): string {
 }
 
 export function checksLine(report: LiveReport | undefined): string {
-  return `answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'} · ${reasoningLine(report)}`;
+  return `answers ${report?.ask ? 'Passed' : 'unverified'} · tools ${report?.tools ? 'Passed' : 'unverified'} · coding ${report?.coding ? 'Passed' : 'disabled'}${report?.vision === undefined ? '' : ` · images ${report.vision ? 'Passed' : 'unavailable'}`} · ${reasoningLine(report)}`;
 }
 
 /** Context and output limits each tier will run with, so a change to them is visible before saving. */

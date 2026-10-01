@@ -7,6 +7,7 @@ import { compact, convertToLlm, DEFAULT_COMPACTION_SETTINGS, SessionManager, sho
 import type { ConversationTurn } from '../integration/events.js';
 import { estimateValueTokens, replyRoom } from '../inference/context.js';
 import type { Scratch } from '../workspace/scratch.js';
+import { withoutPictures } from './history.js';
 
 /**
  * pi's session compaction, run on teapilot's conversations. When earlier context nears the model's limit, pi's own
@@ -168,7 +169,7 @@ export class SessionLog {
   }
 
   record(message: Message): void {
-    const id = this.manager.appendMessage(message);
+    const id = this.manager.appendMessage(withoutPictures(message));
     this.entries.set(message, id);
     this.write(id);
   }

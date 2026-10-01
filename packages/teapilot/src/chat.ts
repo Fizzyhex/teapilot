@@ -235,7 +235,7 @@ export async function runSession(options: {
       } else if (command === '/convo') {
         if (value === 'clear' && !extra) {
           await clearConvo();
-          options.log?.(['Cleared the conversation.', keptNote(files?.count() ?? 0)].filter(Boolean).join(' '));
+          options.log?.(['cleared the conversation.', keptNote(files?.count() ?? 0)].filter(Boolean).join(' '));
         } else options.log?.('Conversation commands: /convo clear');
       } else if (command === '/workspace') options.log?.((await workspaceCommand(files, prompt))!);
       else if (command === '/new' && !value) {

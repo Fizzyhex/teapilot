@@ -30,7 +30,7 @@ const files = (count: number) => `${count} file${count === 1 ? '' : 's'}`;
 
 /** After /convo clear: files that stayed, and how to remove them. */
 export const keptNote = (count: number): string | undefined =>
-  count ? `note: the workspace still contains ${files(count)}.` : undefined;
+  count ? `\n-# note: the workspace still contains ${files(count)}.` : undefined;
 
 /** Runs `/workspace …`; the reply to show, or undefined when the text is not a workspace command. */
 export async function workspaceCommand(controls: WorkspaceControls | undefined, text: string): Promise<string | undefined> {

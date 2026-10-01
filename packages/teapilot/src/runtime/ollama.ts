@@ -200,7 +200,7 @@ export async function ensureServerSettings(ui: SetupUI, server: NonNullable<Olla
 
 /** reasoning lists candidate levels only; live checks decide which are enabled. */
 export interface PreparedModel {
-  id: string; source: string; context: number; tools: boolean; reasoning?: ThinkingLevel[]; sampling?: ThinkingSampling; roles: PhysicalModel[];
+  id: string; source: string; context: number; tools: boolean; vision?: boolean; reasoning?: ThinkingLevel[]; sampling?: ThinkingSampling; roles: PhysicalModel[];
   /** How much of the loaded model and its context Ollama placed in GPU memory, from 0 to 1. */
   gpuShare?: number;
 }
@@ -320,7 +320,7 @@ export async function prepareOllamaModel(ui: SetupUI, signal: AbortSignal, id: s
   if (gpuShare !== undefined && gpuShare > 0 && gpuShare < 0.99) ui.log(`Only ${Math.floor(gpuShare * 100)}% of ${id} fits in GPU memory at this context; the rest runs on the CPU, several times slower. A smaller context, or closing other GPU programs, helps.`);
   // Ollama reports thinking support as a capability, not as a list of levels. It sends xhigh to
   // chat templates as "max", which Qwen3.8's template rejects, so xhigh is not offered.
-  return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true, reasoning: metadata.capabilities?.includes('thinking') ? ['low', 'medium'] : [], sampling, gpuShare };
+  return { id: alias, source: id, context, tools: metadata.capabilities?.includes('tools') ?? true, vision: metadata.capabilities?.includes('vision') ?? false, reasoning: metadata.capabilities?.includes('thinking') ? ['low', 'medium'] : [], sampling, gpuShare };
 }
 
 /** An ordinary OpenAI-compatible model entry for a prepared Ollama model. */
@@ -329,7 +329,7 @@ export function provisionedOllama(model: PreparedModel): ProvisionedModel {
     roles: model.roles, source: model.source, apiKeyEnv: 'LOCAL_API_KEY', apiKey: null,
     model: {
       id: model.id, provider: 'ollama', baseUrl: `${ollamaURL}/v1`, contextTokens: model.context,
-      maxOutputTokens: Math.min(16384, Math.floor(model.context / 2)), toolCalling: model.tools,
+      maxOutputTokens: Math.min(16384, Math.floor(model.context / 2)), toolCalling: model.tools, vision: Boolean(model.vision),
       supportsDeveloperRole: false, supportsUsage: true, ...model.sampling ? { sampling: model.sampling } : { temperature: 0.2 },
       reasoning: { type: 'reasoning_effort', values: { off: 'none', ...Object.fromEntries((model.reasoning ?? []).map(level => [level, level])) } },
     },

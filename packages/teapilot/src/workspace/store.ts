@@ -110,6 +110,19 @@ export class WorkspaceStore {
     return new WorkspaceStore(join(stateDir, 'workspaces'), join(stateDir, 'workspace-index'), join(stateDir, 'discord-files'));
   }
 
+  /** Pictures people attached since a request last took them, by conversation. Not kept across a restart. */
+  private readonly arrived = new Map<string, string[]>();
+  /** Notes that a picture just arrived, to be shown to the model with its next request. */
+  arrive(conversation: string, name: string): void {
+    this.arrived.set(conversation, [...(this.arrived.get(conversation) ?? []).filter(known => known !== name), name].slice(-this.limits.perMessage));
+  }
+  /** The pictures that arrived since the last call, which forgets them: one request shows them to the model. */
+  takeImages(conversation: string): string[] {
+    const names = this.arrived.get(conversation) ?? [];
+    this.arrived.delete(conversation);
+    return names;
+  }
+
   private id(conversation: string): string { return createHash('sha256').update(conversation).digest('hex').slice(0, 24); }
   private indexPath(conversation: string): string { return join(this.indexes, `${this.id(conversation)}.json`); }
 

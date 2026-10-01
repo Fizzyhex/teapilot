@@ -3,7 +3,7 @@ import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
 import { Type, type Message } from '@earendil-works/pi-ai';
-import { calibratedTokens, estimateValueTokens, replyRoom } from '../inference/context.js';
+import { calibratedTokens, estimateValueTokens, IMAGE_TOKENS, replyRoom } from '../inference/context.js';
 import type { Config, Tier, Workload } from '../config.js';
 import { modelFor, effectiveProfile } from '../routing/execution.js';
 import { modeFor, sideReadable, withPrerequisites, type Mode, type Permission } from '../execution/grants.js';
@@ -19,12 +19,13 @@ import { casualPrompt } from './casual.js';
 import { delegateTool, delegationMinContext, delegationPrompt, juniorPrompt, juniorPlayWithheld, juniorReportMargin, reportTool, type JuniorRole } from './delegate.js';
 import { coder } from './coder.js';
 import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, shouldCompact, summarise, summaryLength, summaryMessage, turnMark, type Compaction } from './compaction.js';
-import { carryOver, fitHistory, supersedePlayCalls, supersedeReads, turnForms, turnSteps, withoutOldThinking, type HistoryFit } from './history.js';
+import { carryOver, fitHistory, supersedePlayCalls, supersedeReads, turnForms, turnSteps, withoutOldPictures, withoutOldThinking, type HistoryFit } from './history.js';
 import { pastedEmoji, play, type PlayContext } from './play.js';
 import { workspace, type ConversationWorkspace } from './workspace.js';
 import { captureResult, fixtureTool, scratchPrompt, scratchTouched } from './scratchpad.js';
 import { pickTip, shownTips, tipText } from './tips.js';
 import { inventory, sessionTools, toolGuidelines } from './tools.js';
+import { workspaceImages } from '../workspace/images.js';
 import { Scratch, secretsOf } from '../workspace/scratch.js';
 import type { WebController } from '../web/controller.js';
 
@@ -64,6 +65,8 @@ export interface AttemptInput {
   requestText?: string;
   /** An earlier attempt at this request on the same model: this one carries on from what it showed the model, and `prompt` says why it stopped. */
   resume?: Resume;
+  /** Workspace pictures people attached with this request, shown to a model that can see. */
+  images?: string[];
 }
 /** What an attempt last showed the model of its request (after any compaction, without earlier turns), and the summary before it. */
 export interface Resume { messages: Message[]; summary?: Compaction }
@@ -146,7 +149,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     if (repository && !repositorySetup) {
       input.onAgenticWork?.();
       input.onActivity?.({ kind: 'waiting', label: 'Inspecting repository...' });
-      repositorySetup = await coder(effectiveConfig, policy);
+      repositorySetup = await coder(effectiveConfig, policy, model.vision);
       repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${await inventory(policy)}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
       await telemetry.event('repository_inventory', { succeeded: true });
     }
@@ -178,14 +181,14 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     ownFiles = !repository && ownRoot !== undefined && model.toolCalling;
     let shell: AgentTool | undefined;
     if (input.workspace) {
-      const shared = await workspace(input.workspace, input.approve, ownFiles, repository ? policy : undefined);
+      const shared = await workspace(input.workspace, input.approve, ownFiles, repository ? policy : undefined, model.vision);
       setup.tools.push(...shared.tools);
       shell = shared.shell;
       setup.systemPrompt += '\n' + shared.systemPrompt;
     }
     if (ownFiles) {
       ownPolicy ??= new ExecutionPolicy(ownRoot!, effectiveConfig, input.approve, undefined, scratchFolder, ownRoot !== scratchFolder);
-      setup.tools.push(...sessionTools(ownPolicy, { shell, stateDir: config.stateDir, changed: reconcile }));
+      setup.tools.push(...sessionTools(ownPolicy, { shell, stateDir: config.stateDir, changed: reconcile, vision: model.vision }));
       // Guidance for writing and editing, which a side question cannot do.
       if (!input.side) setup.systemPrompt += '\n' + toolGuidelines();
     }
@@ -263,7 +266,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   if (!model.toolCalling && setup.tools.length) throw new Error('Selected model cannot use the required tools');
   // Earlier turns get at most half of what the instructions, tools and request leave, so this turn's own
   // calls and results still fit. The admission check at the provider remains the exact limit.
-  const fixed = 2048 + estimateValueTokens([setup.systemPrompt, input.prompt]) + estimateValueTokens(setup.tools.map(({ name, description, parameters }) => ({ name, description, parameters })));
+  // An attempt carrying on from another already has the pictures in what it carries.
+  const pictures = model.vision && input.workspace && input.images?.length && !input.resume ? await workspaceImages(input.workspace.store, input.workspace.conversation, input.images) : [];
+  const fixed = 2048 + estimateValueTokens([setup.systemPrompt, input.prompt]) + pictures.length * IMAGE_TOKENS + estimateValueTokens(setup.tools.map(({ name, description, parameters }) => ({ name, description, parameters })));
   // A benchmark can squeeze or compact earlier turns to force the compaction it measures (TEAPILOT_TEST_HISTORY_*).
   const historyBudget = Math.min(Math.floor((profile.contextTokens - replyRoom(profile) - fixed) / 2), config.test?.historyTokens ?? Infinity);
   const settings = compactionSettings(profile, config.compaction?.enabled !== false && !input.casual);
@@ -352,7 +357,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     const given = context.messages as Message[];
     // A model rewriting an app several times otherwise fills the window with versions already replaced.
     let messages = playing ? supersedePlayCalls(given, estimateValueTokens(given) > (profile.contextTokens - replyRoom(profile)) / 2) : given;
-    messages = withoutOldThinking(supersedeReads(messages, path => (ownFiles ? ownPolicy! : policy).resolve(path)));
+    messages = withoutOldPictures(withoutOldThinking(supersedeReads(messages, path => (ownFiles ? ownPolicy! : policy).resolve(path))));
     messages.forEach((message, index) => { if (message !== given[index]) originals.set(message, original(given[index]!)); });
     const trimmed = messages === given ? context : { ...context, messages };
     return await compactContext(trimmed) ?? trimmed;
@@ -547,7 +552,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   input.signal?.addEventListener('abort', cancel, { once: true });
   try {
     input.signal?.throwIfAborted();
-    await agent.prompt(input.prompt);
+    await agent.prompt(input.prompt, pictures.length ? pictures : undefined);
   } finally {
     clearTimeout(timer);
     input.signal?.removeEventListener('abort', cancel);
@@ -617,7 +622,9 @@ function sent(message: unknown): unknown {
   const { role, content } = message as { role?: string; content?: unknown };
   if (!Array.isArray(content)) return { role, content };
   return { role, content: content.map((part: { type?: string; text?: string; thinking?: string; name?: string; arguments?: unknown }) =>
-    part.type === 'text' ? part.text : part.type === 'thinking' ? part.thinking : part.type === 'toolCall' ? { name: part.name, arguments: part.arguments } : part.type) };
+    part.type === 'text' ? part.text : part.type === 'thinking' ? part.thinking : part.type === 'toolCall' ? { name: part.name, arguments: part.arguments }
+      // A picture is counted by its size on screen, never by its bytes (inference/context.ts).
+      : part.type === 'image' ? { type: 'image', data: '' } : part.type) };
 }
 
 export function claimsChange(text: string): boolean {

@@ -1,5 +1,5 @@
 import { readFileSync, type Dirent } from 'node:fs';
-import { access, glob, readdir, readFile, stat } from 'node:fs/promises';
+import { access, glob, open, readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import {
@@ -7,7 +7,9 @@ import {
   createReadTool, createWriteTool, createWriteToolDefinition, type FindOperations, type LsOperations,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
+import { sniffImage } from '../discord/images.js';
 import { cleanChildEnvironment, protectedPart, within, type ExecutionPolicy } from '../execution/policy.js';
+import { IMAGE_MAX_BYTES, IMAGE_SIDE } from '../inference/context.js';
 import { gitBash } from '../execution/shell.js';
 import { ensureRipgrep } from '../workspace/toolchain.js';
 
@@ -140,7 +142,22 @@ function hostShell(root: string): AgentTool | undefined {
   return createBashTool(root, { exposeSessionEnvironment: false, spawnHook: context => ({ ...context, env: cleanChildEnvironment() }) });
 }
 
+/** read, for a model that can see: a picture comes back as one, at the size a model is sent (inference/context.ts). */
+function seeingRead(root: string): AgentTool {
+  const detectImageMimeType = async (path: string) => {
+    const file = await open(path, 'r');
+    try {
+      const head = Buffer.alloc(12);
+      const { bytesRead } = await file.read(head, 0, 12, 0);
+      return sniffImage(head.subarray(0, bytesRead)) ?? null;
+    } finally { await file.close(); }
+  };
+  return boundedRead(createReadTool(root, { operations: { readFile, access, detectImageMimeType }, resizeOptions: { maxWidth: IMAGE_SIDE, maxHeight: IMAGE_SIDE, maxBytes: IMAGE_MAX_BYTES } }));
+}
+
 export interface SessionToolOptions {
+  /** Whether the model can see pictures, so that read shows them rather than their bytes. */
+  vision?: boolean;
   /** The session's shell: on the host, the sandboxed one of a workspace root (agents/workspace.ts), or none. */
   shell?: 'host' | AgentTool;
   /** Where teapilot keeps its own tools, such as the pinned rg. */
@@ -167,7 +184,7 @@ export function sessionTools(policy: ExecutionPolicy, options: SessionToolOption
   } } : tool;
   const shell = options.shell === 'host' ? hostShell(root) : options.shell;
   return [
-    boundedRead(createReadTool(root, { operations: { readFile, access, detectImageMimeType: async () => null } })),
+    options.vision ? seeingRead(root) : boundedRead(createReadTool(root, { operations: { readFile, access, detectImageMimeType: async () => null } })),
     createWriteTool(root), createEditTool(root),
     createLsTool(root, { operations: lsOperations(policy) }),
     createFindTool(root, { operations: findOperations(policy) }),

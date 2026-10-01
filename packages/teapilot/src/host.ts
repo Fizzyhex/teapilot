@@ -97,6 +97,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     web.remember(turn.user);
     for (const step of turn.steps ?? []) if (step.role === 'toolResult') web.remember(JSON.stringify(step.content));
   }
+  // Pictures people attached with this request: every attempt at it is shown them, if its model can see.
+  const images = request.workspace?.store.takeImages(request.workspace.conversation);
   const receipts: string[] = [];
   let attempts = 0;
   let selected: string | undefined;
@@ -350,7 +352,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
           await telemetry.event('approval', { kind: approval.kind, approved });
           return approved;
         },
-        signal: request.signal, resume,
+        signal: request.signal, resume, images,
         prompt: resume ? resumeNotice(config, previousTier!, tier, previous!.reason)
           : basePrompt + (previous ? `\nPrevious attempt stopped: ${previous.reason}. ${previous.changedFiles?.length || previous.shellRan ? 'Existing edits are still in the repository; inspect them before proceeding. Do not restart blindly.' : 'It changed no files; continue the task from the context below.'}\nRecent execution context:\n${previous.handoff ?? previous.text.slice(-6000)}` : ''),
       });

@@ -6,6 +6,7 @@ export interface Incoming { name: string; size: number; type?: string; data(): P
 /**
  * Keeps files people hand over in the conversation's workspace and says what arrived, for the prompt: text files in
  * full while they fit in `room` characters, anything else by type and size, since the model reaches it by commands.
+ * Pictures are also queued in the store (takeImages), for a model that can see them.
  */
 export async function receiveFiles(store: WorkspaceStore, conversation: string, incoming: Incoming[], from: string, room: number): Promise<string> {
   const notes: string[] = [];
@@ -14,6 +15,8 @@ export async function receiveFiles(store: WorkspaceStore, conversation: string, 
     try {
       const data = await file.data();
       const kept = await store.save(conversation, file.name, data, from, file.type);
+      // A picture is also shown to the model with this request, if it can see.
+      if (kept.width) store.arrive(conversation, kept.name);
       const text = kept.width ? undefined : asText(kept.name, data, file.type);
       if (text !== undefined && text.length <= room) {
         room -= text.length;

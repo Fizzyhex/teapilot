@@ -24,7 +24,7 @@ export function endpointDriver(endpoint: Endpoint): RuntimeDriver {
       // Reasoning is unknown for an arbitrary server, so none is requested.
       return [{
         roles: ['capable'], source: endpoint.id, apiKey: endpoint.key || undefined,
-        model: { id: endpoint.id, provider: 'local', baseUrl: endpoint.baseUrl, contextTokens: endpoint.contextTokens, maxOutputTokens: Math.min(16384, Math.floor(endpoint.contextTokens / 4)), toolCalling: true, reasoning: undefined },
+        model: { id: endpoint.id, provider: 'local', baseUrl: endpoint.baseUrl, contextTokens: endpoint.contextTokens, maxOutputTokens: Math.min(16384, Math.floor(endpoint.contextTokens / 4)), toolCalling: true, vision: false, reasoning: undefined },
       }];
     },
   };

@@ -29,6 +29,10 @@ const signatures: Array<[string, (data: Buffer) => boolean]> = [
   ['image/webp', data => data.subarray(0, 4).toString('latin1') === 'RIFF' && data.subarray(8, 12).toString('latin1') === 'WEBP'],
   ['image/bmp', data => data.subarray(0, 2).toString('latin1') === 'BM'],
 ];
+/** The type of a PNG, JPEG, GIF or WebP, from the first bytes of a file: the formats a vision model's tools read. */
+export function sniffImage(head: Buffer): string | undefined {
+  return signatures.find(([type, test]) => type !== 'image/bmp' && test(head))?.[0];
+}
 /** An image's type and size, read from its bytes; undefined for anything that is not a readable image. */
 export async function imageInfo(data: Buffer): Promise<{ type: string; width: number; height: number } | undefined> {
   const type = signatures.find(([, test]) => test(data))?.[0];

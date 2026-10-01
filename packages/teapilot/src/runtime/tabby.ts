@@ -126,7 +126,7 @@ const short = (revision: string) => revision.slice(0, 7);
 const lockOf = (revision: string) => createHash('sha256').update(`${revision}\n${tabbyPython}\n${tabbyRequirements}`).digest('hex');
 
 // The ExLlamaV3 backend never fills the card's draft field; /v1/model/draft/list names the loaded drafter.
-interface ModelCard { id?: string; parameters?: { max_seq_len?: number } }
+interface ModelCard { id?: string; parameters?: { max_seq_len?: number; use_vision?: boolean } }
 
 /**
  * TabbyAPI with ExLlamaV3 on one NVIDIA GPU, installed by TeaPilot into a
@@ -331,7 +331,9 @@ export class TabbyDriver implements RuntimeDriver {
       'model:', `  model_dir: ${models}`, '  inline_model_loading: false',
       ...loaded ? [`  model_name: ${quote(preset.model.folder)}`] : [],
       `  max_seq_len: ${preset.context}`, `  cache_size: ${preset.context}`, `  cache_mode: ${preset.load.cache_mode}`, `  max_batch_size: ${preset.load.max_batch_size}`,
-      '  use_as_default: ["max_batch_size"]',
+      // vision_offload is not part of the load request, so API loads take it from here as a default.
+      ...preset.vision ? ['  vision: true', ...preset.load.visionOffload ? ['  vision_offload: true'] : []] : [],
+      `  use_as_default: ["max_batch_size"${preset.vision && preset.load.visionOffload ? ', "vision_offload"' : ''}]`,
       'draft_model:', `  draft_model_dir: ${models}`,
       ...loaded && preset.drafter ? [`  draft_model_name: ${quote(preset.drafter.folder)}`] : [],
       '',
@@ -405,7 +407,7 @@ export class TabbyDriver implements RuntimeDriver {
   private async load(install: TabbyInstall, ui: SetupUI, signal: AbortSignal): Promise<void> {
     const preset = this.io.preset;
     const current = await this.currentModel(install, signal);
-    if (current?.id === preset.model.folder && current.parameters?.max_seq_len === preset.context && await this.loadedDrafter(install, signal) === preset.drafter?.folder) {
+    if (current?.id === preset.model.folder && current.parameters?.max_seq_len === preset.context && Boolean(current.parameters.use_vision) === Boolean(preset.vision) && await this.loadedDrafter(install, signal) === preset.drafter?.folder) {
       ui.log('The model is already loaded.');
       return;
     }
@@ -414,6 +416,7 @@ export class TabbyDriver implements RuntimeDriver {
     try {
       response = await this.request('/v1/model/load', { signal, key: install.keys.admin, timeoutMs: 30 * 60 * 1000, body: {
         model_name: preset.model.folder, max_seq_len: preset.context, cache_size: preset.context, cache_mode: preset.load.cache_mode,
+        ...preset.vision ? { vision: true } : {},
         ...preset.drafter ? { draft_model: { draft_model_name: preset.drafter.folder } } : {},
       } });
     } catch (error) { signal.throwIfAborted(); throw failed(String(error)); }
@@ -461,7 +464,7 @@ export class TabbyDriver implements RuntimeDriver {
       roles: [preset.role], source: preset.label.replace(/^Capable - /, ''), apiKeyEnv: 'TABBY_API_KEY', apiKey: install.keys.api,
       model: {
         id: preset.model.folder, provider: 'tabbyapi', baseUrl: this.baseUrl, contextTokens: preset.context,
-        maxOutputTokens: Math.min(16384, Math.floor(preset.context / 2)), toolCalling: true,
+        maxOutputTokens: Math.min(16384, Math.floor(preset.context / 2)), toolCalling: true, vision: Boolean(preset.vision),
         supportsDeveloperRole: false, supportsUsage: true, ...preset.sampling ? { sampling: preset.sampling } : { temperature: 0.2 },
         // Qwen3.8's chat template decides thinking: it is switched off in the template, and its effort levels are template values.
         reasoning: { type: 'chat_template_kwargs', values: { off: { enable_thinking: false }, ...Object.fromEntries((['low', 'medium', 'xhigh'] as const).map(level => [level, { enable_thinking: true, reasoning_effort: level }])) } },

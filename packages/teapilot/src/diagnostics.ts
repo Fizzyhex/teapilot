@@ -1,6 +1,6 @@
 import { during, type ActivityUI } from './activity.js';
 import { Agent, type AgentTool } from '@earendil-works/pi-agent-core';
-import { Type } from '@earendil-works/pi-ai';
+import { Type, type ImageContent } from '@earendil-works/pi-ai';
 import { randomUUID } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { Config, Tier } from './config.js';
 import { tiers } from './config.js';
 import { runAttempt } from './agents/run.js';
+import { canvasLibrary } from './discord/images.js';
 import { SpendGovernor, lockState } from './inference/budget.js';
 import { budgetedJev, guardedStream, piModel, type InferenceState } from './inference/providers.js';
 import { Telemetry } from './telemetry/outcome.js';
@@ -94,6 +95,8 @@ export async function modelStatus(config: Config, tier: Tier, signal?: AbortSign
 export type LiveFailure = 'load' | 'api' | 'answer' | 'tools' | 'coding';
 export interface LiveReport {
   ask: boolean; tools: boolean; coding: boolean; spentUsd: number;
+  /** An image sent to the model was seen; set only when the model is configured for vision. */
+  vision?: boolean;
   /** Reasoning levels whose own streamed answer passed; set only when candidates were given. */
   reasoning?: ThinkingLevel[];
   failure?: LiveFailure;
@@ -105,6 +108,16 @@ const failureAdvice: Record<LiveFailure, string> = {
   tools: 'Try another model or update the model server.',
   coding: 'Check context capacity or choose another model.',
 };
+
+/** A plain red square, large enough for a vision model's smallest image size. */
+async function probeImage(): Promise<ImageContent> {
+  const { createCanvas } = await canvasLibrary();
+  const canvas = createCanvas(128, 128);
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ff0000';
+  context.fillRect(0, 0, 128, 128);
+  return { type: 'image', data: canvas.toBuffer('image/png').toString('base64'), mimeType: 'image/png' };
+}
 
 // Uses the production metered streaming adapter and real pi file tools. The probe
 // never executes generated code; coding file tools are confined to its disposable directory.
@@ -128,7 +141,7 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     probeConfig.policy.limits.maxTurns = Math.min(6, config.policy.limits.maxTurns);
     // Probes send exactly what production sends for the tier: any reasoning
     // request comes from the model's protocol, never from a prompt suffix.
-    async function run(prompt: string, tools: AgentTool[] = [], probeTier = tier): Promise<{ text: string; ok: boolean; failure?: string; layer?: LiveFailure }> {
+    async function run(prompt: string, tools: AgentTool[] = [], probeTier = tier, images?: ImageContent[]): Promise<{ text: string; ok: boolean; failure?: string; layer?: LiveFailure }> {
       const state: InferenceState = { turns: 0 };
       const agent = new Agent({
         initialState: { model: piModel(modelFor(probeConfig, probeTier), effectiveProfile(probeConfig, probeTier)), systemPrompt: 'Follow the diagnostic task exactly. Use only the provided tools. Do not use markdown in the final answer. Align with the user\'s typing style and tone - leaning towards informal lowercase responses', tools, thinkingLevel: thinkingFor(probeConfig, probeTier) },
@@ -137,7 +150,7 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
       const abort = () => agent.abort();
       const timer = setTimeout(abort, config.policy.limits.attemptTimeoutMs);
       signal?.addEventListener('abort', abort, { once: true });
-      try { signal?.throwIfAborted(); await agent.prompt(prompt); }
+      try { signal?.throwIfAborted(); await agent.prompt(prompt, images); }
       finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
       signal?.throwIfAborted();
       const last = agent.state.messages.findLast(message => message.role === 'assistant');
@@ -154,6 +167,13 @@ export async function liveCheck(config: Config, tier: Tier, signal?: AbortSignal
     if (!report.ask) {
       report.failure = answer.layer ?? 'answer';
       progress(`Answer check failed: ${answer.failure ?? 'reply did not contain TEAPILOT_OK'}. ${failureAdvice[report.failure]}`);
+    }
+    // A server that ignores images still answers, so the colour has to come back.
+    if (report.ask && modelFor(config, tier).vision) {
+      progress('Checking image input...');
+      const seen = await run('What colour is this image? Reply with one word.', [], tier, [await probeImage()]);
+      report.vision = seen.ok && /\bred\b/i.test(seen.text);
+      if (!report.vision) progress(`Image check failed: ${seen.failure ?? `the model answered "${seen.text.trim().slice(0, 80)}" to a red image`}. Images stay off for this model.`);
     }
     const candidates = reasoning.filter(level => level !== 'off' && profileFor(reasoningTier[level]).model === profileFor(tier).model);
     if (report.ask && candidates.length) {

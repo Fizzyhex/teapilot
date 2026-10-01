@@ -33,10 +33,30 @@ export function calibratedTokens(estimate: number, observed?: { estimated: numbe
   return Math.min(estimate * 2, Math.max(Math.ceil(estimate * 0.6), scaled));
 }
 
-/** The same lexical estimate over any JSON value: strings, plus keys and structure. */
+// A picture costs by its size in pixels, not by its bytes. Pictures are scaled to at most IMAGE_SIDE pixels on a
+// side before they are sent (workspace/images.ts); at 32 pixels a token, that is about this many tokens.
+export const IMAGE_SIDE = 1024;
+export const IMAGE_TOKENS = 1024;
+/** Larger than this, a picture is not sent: it would not fit a request, and a scaled one is far smaller. */
+export const IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+
+/** Transport ceiling for the pictures in one request, apart from its text. */
+export const MAX_IMAGE_PAYLOAD_BYTES = 32 * 1024 * 1024;
+/** The bytes of the pictures (data URLs) in a serialized request body. */
+export function imageBytes(body: string): number {
+  let total = 0;
+  for (const match of body.matchAll(/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]*/gi)) total += match[0].length;
+  return total;
+}
+
+/** A picture in a message, as pi holds it or as the chat API takes it. */
+const isImage = (value: object) => 'type' in value && (value.type === 'image' && 'data' in value || value.type === 'image_url' && 'image_url' in value);
+
+/** The same lexical estimate over any JSON value: strings, plus keys and structure. A picture counts as IMAGE_TOKENS, however many bytes it holds. */
 export function estimateValueTokens(value: unknown): number {
   if (typeof value === 'string') return estimateTextTokens(value);
   if (Array.isArray(value)) return value.reduce<number>((sum, item) => sum + estimateValueTokens(item) + 2, 0);
+  if (value && typeof value === 'object' && isImage(value)) return IMAGE_TOKENS;
   if (value && typeof value === 'object') return Object.entries(value).reduce((sum, [key, item]) => sum + estimateTextTokens(key) + estimateValueTokens(item) + 4, 0);
   return estimateTextTokens(String(value));
 }

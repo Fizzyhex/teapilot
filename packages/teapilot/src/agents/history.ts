@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message, ToolResultMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, ImageContent, Message, TextContent, ToolResultMessage } from '@earendil-works/pi-ai';
 import { emptyUsage } from '../integration/inference.js';
 import type { ConversationTurn } from '../integration/events.js';
 import { estimateValueTokens } from '../inference/context.js';
@@ -7,9 +7,39 @@ import { DEFAULT_READ_LINES } from './tools.js';
 
 type Model = { provider: string; id: string };
 
+/** `message` with pictures swapped for what `replace` returns (a part it leaves undefined stays); the same message when none is. */
+function replacePictures(message: Message, replace: (picture: ImageContent) => TextContent | undefined): Message {
+  if (message.role === 'assistant' || typeof message.content === 'string' || !message.content.some(part => part.type === 'image')) return message;
+  let changed = false;
+  const content = message.content.map(part => {
+    const note = part.type === 'image' ? replace(part) : undefined;
+    changed ||= Boolean(note);
+    return note ?? part;
+  });
+  return changed ? { ...message, content } as Message : message;
+}
+const hiddenPicture = (why: string): TextContent => ({ type: 'text', text: `[picture ${why}; read the file again to see it]` });
+/** The message as a transcript keeps it: a picture is a note, since its bytes are in the workspace file. */
+export const withoutPictures = (message: Message): Message => replacePictures(message, () => hiddenPicture('not kept in the transcript'));
+
+/**
+ * The messages with every picture but the newest `keep` swapped for a note, as one model call is sent them: a
+ * picture costs about a thousand tokens each time it is sent. Returns the same array when nothing changes.
+ */
+export function withoutOldPictures(messages: Message[], keep = 2): Message[] {
+  let shown = 0, changed = false;
+  const result = [...messages];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = replacePictures(messages[index]!, () => shown++ < keep ? undefined : hiddenPicture('no longer shown, to save room'));
+    if (message !== messages[index]) { result[index] = message; changed = true; }
+  }
+  return changed ? result : messages;
+}
+
 /**
  * The part of a finished turn worth replaying: tool calls and their results, without reasoning or host
- * notices, and without a call whose result never came (a model server rejects that pairing).
+ * notices, and without a call whose result never came (a model server rejects that pairing). Pictures are not
+ * kept: their bytes would fill the saved history, and the file is one read away.
  */
 export function turnSteps(messages: Message[]): Message[] {
   const steps: Message[] = [];
@@ -17,7 +47,7 @@ export function turnSteps(messages: Message[]): Message[] {
     if (message.role === 'assistant') {
       const content = message.content.filter(part => part.type !== 'thinking');
       if (content.length) steps.push({ ...message, content });
-    } else if (message.role === 'toolResult') steps.push(message);
+    } else if (message.role === 'toolResult') steps.push(replacePictures(message, () => hiddenPicture('not kept in history')));
   }
   const answered = new Set(steps.flatMap(message => message.role === 'toolResult' ? [message.toolCallId] : []));
   const called = new Set<string>();
