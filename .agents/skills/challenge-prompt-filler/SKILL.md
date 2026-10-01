@@ -12,6 +12,13 @@ Preserve the opening unless asked to change it.
 Use this structure:
 
 ```md
+You are a professional AI Data Scientist / SWE.
+Your goal is recursive improvement and alignment of teapilot's output (response time, accuracy, successful completions), by testing its ability against realistic use-cases and evaluating the results.
+
+If ideas pop up - you are expected to tweak `teapilot` between runs - you may change system prompts, fix bugs, create tools, assign tips.
+
+DO NOT make changes that cater towards specific scenarios of the challenge; keep things generic.
+
 ## Flow
 <execution sequence>
 
@@ -35,5 +42,7 @@ Consolidate repetition and keep the result concise. Do not invent requirements o
 Trust the agents inference, do not produce verbose, depth-heavy, token-hungry instructions.
 
 Don't repeat instructions from .agents\skills\discord-play-fine-tuner\SKILL.md.
+
+Do inspect other challenges in the `.agents\skills\discord-play-fine-tuner` to get a feel for writing style.
 
 Return the completed agent prompt only.
