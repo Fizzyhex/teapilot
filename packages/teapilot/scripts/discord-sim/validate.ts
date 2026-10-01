@@ -1,6 +1,6 @@
 // What Discord would refuse, checked offline: the checks discord.js runs when it sends raw JSON, its
 // builders' per-field rules, and the API limits the builders leave to the server.
-import { ActionRowBuilder, ButtonBuilder, EmbedBuilder, embedLength, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, type APIEmbed } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ContainerBuilder, EmbedBuilder, embedLength, FileBuilder, MediaGalleryBuilder, ModalBuilder, SectionBuilder, SeparatorBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextDisplayBuilder, TextInputBuilder, type APIEmbed } from 'discord.js';
 
 /** Discord or discord.js would reject this payload; the message names where. */
 export class DiscordRejected extends Error {}
@@ -97,8 +97,90 @@ function checkSelect(data: Json, where: string): void {
   if (new Set(options.map(option => option.value)).size !== options.length) throw new DiscordRejected(`${where}: option values must be unique.`);
 }
 
-/** A message as teapilot sends it: `content`, raw `embeds` and raw action rows. */
-export function checkMessage(payload: { content?: unknown; embeds?: unknown; components?: unknown; files?: unknown[] }): void {
+/** The message flag that turns on Components V2. */
+export const componentsV2 = 1 << 15;
+const v2Limits = { components: 40, text: 4000, section: 3, gallery: 10 };
+/** What discord.js builds each Components V2 type with before sending. */
+const v2Builders: Record<number, new (data: never) => { toJSON(): unknown }> = {
+  9: SectionBuilder, 10: TextDisplayBuilder, 12: MediaGalleryBuilder, 13: FileBuilder, 14: SeparatorBuilder, 17: ContainerBuilder,
+};
+
+/** Every `attachment://` name a message's components show. */
+export function componentAttachments(components: unknown): string[] {
+  const names: string[] = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) value.forEach(visit);
+    else if (value && typeof value === 'object') for (const [key, entry] of Object.entries(value)) {
+      if (key === 'url' && typeof entry === 'string' && entry.startsWith('attachment://')) names.push(entry.slice('attachment://'.length));
+      else visit(entry);
+    }
+  };
+  visit(components);
+  return names;
+}
+
+/** A Components V2 message: no content or embeds, and within Discord's component and text limits. */
+function checkComponentsV2(payload: { content?: unknown; embeds?: unknown; components?: unknown }): void {
+  if (typeof payload.content === 'string' && payload.content) throw new DiscordRejected('content: a Components V2 message cannot have content; put text in a text display.');
+  if (records(payload.embeds, 'embeds').length) throw new DiscordRejected('embeds: a Components V2 message cannot have embeds.');
+  const top = records(payload.components, 'components');
+  if (!top.length) throw new DiscordRejected('Cannot send an empty message.');
+  let count = 0, text = 0;
+  const visit = (component: Json, where: string, inside?: number) => {
+    count++;
+    if (component.type === 10) text += typeof component.content === 'string' ? component.content.length : 0;
+    if (component.type === 1) { checkRow(component, where, new Set()); records(component.components, `${where}.components`).forEach(() => count++); return; }
+    if (component.type === 11) { if (inside !== 9) throw new DiscordRejected(`${where}: a thumbnail is only allowed as a section's accessory.`); return; }
+    if (component.type === 2 && inside === 9) return checkButton(component, where);
+    const Builder = v2Builders[component.type as number];
+    if (!Builder) throw new DiscordRejected(`${where}: component type ${String(component.type)} is not a Components V2 component.`);
+    if (inside === 17 && component.type === 17) throw new DiscordRejected(`${where}: containers cannot be nested.`);
+    if (component.type === 9) {
+      const texts = records(component.components, `${where}.components`);
+      if (!texts.length || texts.length > v2Limits.section || texts.some(entry => entry.type !== 10)) throw new DiscordRejected(`${where}: a section holds 1–${v2Limits.section} text displays.`);
+      texts.forEach((entry, index) => visit(entry, `${where}.components[${index}]`, 9));
+      if (!component.accessory) throw new DiscordRejected(`${where}: a section needs an accessory (a thumbnail or a button).`);
+      visit(component.accessory as Json, `${where}.accessory`, 9);
+    }
+    if (component.type === 17) records(component.components, `${where}.components`).forEach((entry, index) => visit(entry, `${where}.components[${index}]`, 17));
+    if (component.type === 13) {
+      const url = (component.file as { url?: unknown } | undefined)?.url;
+      if (typeof url !== 'string' || !url.startsWith('attachment://')) throw new DiscordRejected(`${where}.file: a file component only takes attachment:// urls.`);
+    }
+    if (component.type === 12) {
+      const items = records(component.items, `${where}.items`);
+      if (!items.length || items.length > v2Limits.gallery) throw new DiscordRejected(`${where}: a media gallery holds 1–${v2Limits.gallery} items, not ${items.length}.`);
+    }
+    // discord.js builds raw components into builders on send; this is that exact step.
+    at(where, () => new Builder(component as never).toJSON());
+  };
+  top.forEach((component, index) => visit(component, `components[${index}]`));
+  if (count > v2Limits.components) throw new DiscordRejected(`components: ${count} components; Discord allows ${v2Limits.components}.`);
+  if (text > v2Limits.text) throw new DiscordRejected(`components: ${text} characters of text; Discord allows ${v2Limits.text}.`);
+}
+
+function checkRow(row: Json, where: string, ids: Set<string>): void {
+  const components = records(row.components, `${where}.components`);
+  if (!components.length || components.length > limits.buttons) throw new DiscordRejected(`${where}: a row holds 1–${limits.buttons} components, not ${components.length}.`);
+  components.forEach((component, number) => {
+    const place = `${where}.components[${number}]`;
+    if (typeof component.custom_id === 'string') {
+      if (ids.has(component.custom_id)) throw new DiscordRejected(`${place}: custom_id ${component.custom_id} is used twice in one message.`);
+      ids.add(component.custom_id);
+    }
+    if (component.type === 2) checkButton(component, place);
+    else if (component.type === 3) {
+      if (components.length > 1) throw new DiscordRejected(`${place}: a select must be alone in its row.`);
+      checkSelect(component, place);
+    } else throw new DiscordRejected(`${place}: component type ${String(component.type)} is not a button or string select.`);
+  });
+  // discord.js turns raw rows into builders on send; this is that exact step.
+  at(where, () => new ActionRowBuilder(row as never).toJSON());
+}
+
+/** A message as teapilot sends it: `content`, raw `embeds` and raw action rows, or Components V2 with `flags`. */
+export function checkMessage(payload: { content?: unknown; embeds?: unknown; components?: unknown; files?: unknown[]; flags?: unknown }): void {
+  if (typeof payload.flags === 'number' && payload.flags & componentsV2) return checkComponentsV2(payload);
   const content = payload.content ?? '';
   if (typeof content !== 'string') throw new DiscordRejected('content must be a string.');
   if (content.length > limits.content) throw new DiscordRejected(`content is ${content.length} characters; Discord allows ${limits.content}.`);
@@ -109,23 +191,8 @@ export function checkMessage(payload: { content?: unknown; embeds?: unknown; com
   const ids = new Set<string>();
   rows.forEach((row, index) => {
     const where = `components[${index}]`;
-    if (row.type !== 1) throw new DiscordRejected(`${where}: expected an action row (type 1).`);
-    const components = records(row.components, `${where}.components`);
-    if (!components.length || components.length > limits.buttons) throw new DiscordRejected(`${where}: a row holds 1–${limits.buttons} components, not ${components.length}.`);
-    components.forEach((component, number) => {
-      const place = `${where}.components[${number}]`;
-      if (typeof component.custom_id === 'string') {
-        if (ids.has(component.custom_id)) throw new DiscordRejected(`${place}: custom_id ${component.custom_id} is used twice in one message.`);
-        ids.add(component.custom_id);
-      }
-      if (component.type === 2) checkButton(component, place);
-      else if (component.type === 3) {
-        if (components.length > 1) throw new DiscordRejected(`${place}: a select must be alone in its row.`);
-        checkSelect(component, place);
-      } else throw new DiscordRejected(`${place}: component type ${String(component.type)} is not a button or string select.`);
-    });
-    // discord.js turns raw rows into builders on send; this is that exact step.
-    at(where, () => new ActionRowBuilder(row as never).toJSON());
+    if (row.type !== 1) throw new DiscordRejected(`${where}: expected an action row (type 1), or the Components V2 flag.`);
+    checkRow(row, where, ids);
   });
 }
 
@@ -159,8 +226,8 @@ export function checkModal(payload: { custom_id?: unknown; title?: unknown; comp
 
 /** Discord's upload limit for bots, and how many files one message may carry. */
 const upload = { bytes: 10 * 1024 * 1024, files: 10 };
-/** Attachments: within Discord's limits, and every attachment:// an embed shows is one the message carries. */
-export function checkFiles(payload: { embeds?: unknown; files?: Array<{ name: string; data: Buffer }> }): void {
+/** Attachments: within Discord's limits, and every attachment:// an embed or component shows is one the message carries. */
+export function checkFiles(payload: { embeds?: unknown; components?: unknown; files?: Array<{ name: string; data: Buffer }> }): void {
   const files = payload.files ?? [];
   if (files.length > upload.files) throw new DiscordRejected(`files: ${files.length} attachments; Discord allows ${upload.files}.`);
   for (const file of files) if (file.data.length > upload.bytes) throw new DiscordRejected(`files: ${file.name} is ${(file.data.length / 1024 / 1024).toFixed(1)} MB; bots may upload 10 MB (Request entity too large).`);
@@ -172,4 +239,7 @@ export function checkFiles(payload: { embeds?: unknown; files?: Array<{ name: st
       }
     }
   });
+  for (const name of componentAttachments(payload.components)) {
+    if (!files.some(file => file.name === name)) throw new DiscordRejected(`components: attachment://${name} is not attached to the message, so Discord shows nothing there.`);
+  }
 }

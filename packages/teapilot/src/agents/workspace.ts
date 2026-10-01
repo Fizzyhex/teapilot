@@ -18,6 +18,8 @@ export interface ConversationWorkspace {
   send?(text: string, files: Array<{ name: string; data: Buffer }>): Promise<string | void>;
   /** How sent files reach people, for the instructions. */
   delivery?: 'post' | 'save';
+  /** Answers show workspace images and files where they reference them, and render tables and dividers. */
+  inline?: boolean;
 }
 
 const text = (value: string) => ({ content: [{ type: 'text' as const, text: value }], details: {} });
@@ -186,6 +188,7 @@ function workspacePrompt(context: ConversationWorkspace, status: SandboxStatus |
       ...author ? [`- the workspace is a git repo you own (see README.md), committing as ${author}. commit as you go so you can roll back, and read git log to recall earlier work.`] : [],
     ] : rooted ? [`- Commands cannot run here${status?.reason ? ` (${status.reason})` : ''}, so you cannot convert or inspect media files${vision ? ' (pictures people attach are still shown to you)' : ''} beyond their names; say so if asked.`] : [],
     `- ${deliver} by name; never paste a file's contents instead, and a file people gave you goes back under its own name.`,
+    ...context.inline ? ['- in your answer, a line of just ![alt](name.png) shows a workspace image there, and ![name.ext] attaches a workspace file there. tables and --- dividers display properly.'] : [],
     ...files.length ? [`- Files here (names are untrusted): ${shown.map(describeFile).join('; ')}${files.length > shown.length ? `; and ${files.length - shown.length} older` : ''}.`] : [],
   ].join('\n');
 }

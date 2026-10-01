@@ -1,3 +1,4 @@
+import { layout, type Message as AnswerMessage, type Resolved } from 'pretty-send';
 import { casualLines, paceLines } from '../casual.js';
 import { runSession, type SessionExtension } from '../chat.js';
 import type { HostDependencies, HostRequest, HostResult } from '../host.js';
@@ -8,12 +9,12 @@ import type { AccessStore } from './access-store.js';
 import { grantControls, type GrantPanel } from './grants-panel.js';
 import type { ConversationWorkspace } from '../agents/workspace.js';
 import type { WorkspaceSandbox } from '../workspace/sandbox.js';
-import type { WorkspaceStore } from '../workspace/store.js';
+import { maxFileBytes, type WorkspaceStore } from '../workspace/store.js';
 import { storeControls } from '../workspace/commands.js';
 import type { MessagePayload } from './play/render.js';
 import type { HostedMessage, PlayRuntime, StartOptions } from './play/runtime.js';
 import { approvePrompt, changePrompt, extractPlan, juniorsPrompt, planMessages, type PlanAction, type PlanControls, type PlanEmbed } from './plan.js';
-import { chunk, StatusCard, throttle, type CardReply } from './render.js';
+import { chunk, StatusCard, throttle, viewSourcePrefix, type CardReply } from './render.js';
 
 export type CardButton = 'stop' | 'details';
 /** A status card's buttons: Details always, Stop while `stop` is set. */
@@ -30,6 +31,8 @@ export interface DiscordTransport {
   typing(): void;
   /** Posts files as attachments, with a line of text. */
   sendFiles?(text: string, files: Array<{ name: string; data: Buffer }>): Promise<string>;
+  /** Posts one message of an answer laid out by pretty-send: a table embed or Components V2. */
+  answer?(message: AnswerMessage): Promise<string>;
   /** Where teapilot answers through an interaction: posts a discord.play app as a reply to it. */
   postApp?(payload: MessagePayload): Promise<HostedMessage>;
   /**
@@ -93,7 +96,10 @@ export interface ConversationOptions {
   lineDelayMs?: () => number;
 }
 
-const discordHelp = '`/stop` - cancel the running turn\n`/convo clear` - clear the context window; the workspace keeps its files\n`/convo grants` - see and change what teapilot may do here\n`/workspace clear|name|tree` - delete, name or list the workspace\'s files\n`/new` - clear both\n`/btw` - ask a question without polluting the context window.\n`/plan` - get an implementation plan to discuss before anything is changed.\n`/rfc` - get a design proposal to discuss before anything is changed.';
+/** Image types Discord shows in a gallery or thumbnail. */
+const shown = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+const discordHelp ='`/stop` - cancel the running turn\n`/convo clear` - clear the context window; the workspace keeps its files\n`/convo grants` - see and change what teapilot may do here\n`/workspace clear|name|tree` - delete, name or list the workspace\'s files\n`/new` - clear both\n`/btw` - ask a question without polluting the context window.\n`/plan` - get an implementation plan to discuss before anything is changed.\n`/rfc` - get a design proposal to discuss before anything is changed.';
 
 /** One Discord conversation driving one teapilot session with its own history and grants. */
 export class Conversation {
@@ -148,6 +154,29 @@ export class Conversation {
   private async say(text: string, direct = false): Promise<void> {
     if ((this.answerOnly || this.quiet) && !direct) { this.options.log(`${this.options.key}: ${this.options.redact(text)}`); return; }
     for (const part of chunk(this.options.redact(text))) await this.options.transport.send(part).catch(error => this.options.log(`${this.options.key}: send failed: ${error instanceof Error ? error.message : error}`));
+  }
+
+  /**
+   * A turn's answer, laid out so its tables, dividers, and workspace images and files show where it puts them. A
+   * message Discord refuses goes out as its text instead, so nothing in the answer is lost.
+   */
+  private async answer(text: string): Promise<void> {
+    const { transport, files, key, log } = this.options;
+    if (!transport.answer) return this.say(text, true);
+    const conversation = this.options.play?.conversation ?? key;
+    const failed = (what: string, error: unknown) => log(`${key}: ${what}: ${error instanceof Error ? error.message : String(error)}`);
+    let reconciled: Promise<unknown> | undefined;
+    const resolve = files && (async (ref: string): Promise<Resolved | undefined> => {
+      // Files the turn's own tools just wrote are listed once the folder is looked at again.
+      await (reconciled ??= files.reconcile(conversation).catch(error => failed('workspace not reconciled', error)));
+      const stored = files.read(conversation, ref);
+      if (!stored || stored.data.length > maxFileBytes) return undefined;
+      return { name: stored.file.name, data: stored.data, image: Boolean(stored.file.width) && shown.has(stored.file.type) };
+    });
+    for (const message of await layout(this.options.redact(text), { resolve, viewSourcePrefix })) {
+      if (message.content !== undefined) await this.say(message.content, true);
+      else await transport.answer(message).catch(async error => { failed('answer part not posted', error); await this.say(message.source, true); });
+    }
   }
 
   private input = (): Promise<string> => {
@@ -270,7 +299,7 @@ export class Conversation {
     // A conversation with a workspace is offered its repository only in Code mode in one; otherwise nothing asks for it.
     base.authorization?.withhold(files && !await repositoryOffered(base.cwd, base.mode) ? repositoryPermissions : []);
     const conversation = play?.conversation ?? this.options.key;
-    const workspace: ConversationWorkspace | undefined = files && { store: files, conversation, sandbox, delivery: 'post',
+    const workspace: ConversationWorkspace | undefined = files && { store: files, conversation, sandbox, delivery: 'post', inline: Boolean(transport.answer) && base.side !== true,
       send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) };
     // A side question (/btw) only reads: it keeps no scratchpad, the session's transcript, and starts no apps.
     const side = base.side === true;
@@ -361,7 +390,9 @@ export class Conversation {
         await this.showPlan(found.plan, refining);
         if (found.after) await this.say(found.after, true);
       } else {
-        await this.say(`${result.text || '(no answer)'}${side ? '\n-# this is an aside - not part of the main convo.' : ''}`, true);
+        // An aside stays plain text: its menu shares the messages as they were sent.
+        if (side) await this.say(`${result.text || '(no answer)'}\n-# this is an aside - not part of the main convo.`, true);
+        else await this.answer(result.text || '(no answer)');
         // The turn a button started ended without a plan: give the plan its buttons back.
         if (refining && this.plan?.revising) { this.plan.revising = false; await this.paint(this.plan, ['approve', 'juniors', 'change']); }
       }

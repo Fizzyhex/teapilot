@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { Message as AnswerMessage } from 'pretty-send';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { AccessStore } from '../src/discord/access-store.js';
 import { Conversation, TurnQueue, type CardButton, type CardControls, type ConversationOptions, type DiscordTransport } from '../src/discord/bridge.js';
@@ -352,4 +353,23 @@ it('saves session grants as they change, and restores them only within the ceili
   expect((await SessionGrants.create(f.cwd, f.config, 'ask', false, { root: elsewhere, granted: ['inference', 'repository.read'] })).list()).toEqual(['inference']);
   f.config.policy.permissions = ['inference'];
   expect((await SessionGrants.create(f.cwd, f.config, 'ask', false, { root: f.cwd, granted: ['inference', 'web.search'] })).list()).toEqual(['inference']);
+});
+
+it('lays an answer out with workspace pictures and files, and sends a part Discord refuses as text', async () => {
+  const f = await fixture(); cleanups.push(f.cleanup);
+  const files = WorkspaceStore.at(join(f.cwd, 'workspaces'));
+  await files.save('dm:test', 'chart.png', Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'), 'teapilot');
+  await files.save('dm:test', 'script.py', Buffer.from('print(1)'), 'teapilot');
+  const { sent, cards, transport } = discord();
+  const answered: AnswerMessage[] = [];
+  transport.answer = vi.fn(async (message: AnswerMessage) => { if (message.embeds) throw new Error('refused'); answered.push(message); return 'a'; });
+  const table = '| a | b |\n|---|---|\n| 1 | secret-token |';
+  const run = vi.fn<ConversationOptions['run']>(async () => ({ ...result, text: `here it is\n\n---\n\n![chart](chart.png)\n![script.py]\n\n${table}\n\nbye` }));
+  const { chat } = conversation({ transport, files, run });
+  chat.push('chart please');
+  await finished(cards);
+  expect(run.mock.calls[0]![0].workspace?.inline).toBe(true);
+  expect(answered.map(message => message.components!.map(component => component.type))).toEqual([[10, 14, 12, 13], [10]]);
+  expect(answered[0]!.files!.map(file => file.name)).toEqual(['chart.png', 'script.py']);
+  expect(sent).toEqual([table.replace('secret-token', '[REDACTED]')]);
 });

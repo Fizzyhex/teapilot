@@ -4,12 +4,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { IS_COMPONENTS_V2, layout } from 'pretty-send';
 import { afterEach, expect, it, vi } from 'vitest';
 import { serveDiscord } from '../src/discord/index.js';
+import { viewSourcePrefix } from '../src/discord/render.js';
 import { PlayRuntime } from '../src/discord/play/runtime.js';
 import { PlayStore } from '../src/discord/play/store.js';
 import { SkippableClock } from '../scripts/discord-sim/clock.js';
-import { checkMessage, checkModal, DiscordRejected } from '../scripts/discord-sim/validate.js';
+import { checkFiles, checkMessage, checkModal, DiscordRejected } from '../scripts/discord-sim/validate.js';
 import { channelId, people, SimError, World } from '../scripts/discord-sim/world.js';
 import { completion, fixture, jev, mockServer } from './helpers.js';
 
@@ -114,6 +116,28 @@ it('resends a buried app at the bottom and turns away clicks on the old copy', a
   expect(world.render(world.find(fresh))).toContain('Count 1');
   expect(world.logs.filter(line => line.startsWith('⚠'))).toEqual([]);
   expect(await world.click('op', fresh, 'add')).toContain('Count 2');
+});
+
+it('holds Components V2 answers to Discord\'s rules, shows them, and reads tables back for view source', async () => {
+  const rejected = (payload: Parameters<typeof checkMessage>[0]) => { try { checkMessage(payload); checkFiles(payload as never); } catch (error) { expect(error).toBeInstanceOf(DiscordRejected); return (error as Error).message; } return 'accepted'; };
+  const v2 = { flags: IS_COMPONENTS_V2 };
+  expect(rejected({ ...v2, content: 'hi', components: [{ type: 10, content: 'hi' }] })).toMatch(/cannot have content/);
+  expect(rejected({ ...v2, components: [{ type: 11, media: { url: 'https://example.com/a.png' } }] })).toMatch(/only allowed as a section's accessory/);
+  expect(rejected({ ...v2, components: Array.from({ length: 41 }, () => ({ type: 14 })) })).toMatch(/41 components; Discord allows 40/);
+  expect(rejected({ ...v2, components: [{ type: 13, file: { url: 'attachment://a.py' } }], files: [] })).toMatch(/attachment:\/\/a\.py is not attached/);
+  expect(rejected({ ...v2, components: [{ type: 13, file: { url: 'https://example.com/a.py' } }] })).toMatch(/only takes attachment:\/\//);
+
+  const world = new World();
+  const resolve = (ref: string) => ref === 'a.png' ? { name: 'a.png', data: Buffer.from('png'), image: true } : ref === 'a.py' ? { name: 'a.py', data: Buffer.from('x'), image: false } : undefined;
+  const messages = await layout('see this\n![a](a.png)\n\n---\n\n![a.py]\n\n| item | a | b | c |\n|---|---|---|---|\n| tea | 1 | 2 | 3 |', { resolve, viewSourcePrefix });
+  const transport = world.transport(world.channel('channel'));
+  for (const message of messages) await transport.answer!(message);
+  expect(world.logs.filter(line => line.startsWith('⚠'))).toEqual([]);
+  const screen = world.screen('channel');
+  expect(screen).toContain('🖼 thumbnail: attachment://a.png');
+  expect(screen).toContain('───');
+  expect(screen).toContain('📄 file: attachment://a.py');
+  expect(await world.click('stranger', 'm2', 'rows')).toContain('| item | a | b | c |\n  | --- | --- | --- | --- |\n  | tea | 1 | 2 | 3 |');
 });
 
 it('flags what Discord would reject instead of accepting it', async () => {

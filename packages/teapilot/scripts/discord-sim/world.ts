@@ -13,12 +13,14 @@ import { planButtons, planModal, type PlanAction, type PlanControls } from '../.
 import { parseCustomId, type ModalPayload } from '../../src/discord/play/render.js';
 import type { PlayInteraction } from '../../src/discord/play/runtime.js';
 import type { DiscordSettings } from '../../src/discord/settings.js';
-import { checkFiles, checkMessage, checkModal, DiscordRejected } from './validate.js';
+import { viewSource } from 'pretty-send';
+import { viewSourcePrefix } from '../../src/discord/render.js';
+import { checkFiles, checkMessage, checkModal, componentsV2, DiscordRejected } from './validate.js';
 
 type Json = Record<string, unknown>;
 type Row = { type: number; components: Json[] };
 interface Upload { name: string; data: Buffer }
-interface Payload { content?: string; embeds?: Json[]; components?: Row[]; files?: Upload[] }
+interface Payload { content?: string; embeds?: Json[]; components?: Row[]; files?: Upload[]; flags?: number }
 /** An attachment as the simulator keeps it: on disk, so whoever drives it can open the file. */
 export interface Attachment { name: string; size: number; path: string }
 const kilobytes = (bytes: number) => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -37,7 +39,7 @@ export const channelId = '200000000000000001';
 
 export interface Channel { id: string; name: string; kind: 'dm' | 'channel' | 'thread'; parent?: string }
 export interface Message {
-  id: string; channel: Channel; author: string; content: string; embeds: Json[]; components: Row[]; files: Attachment[];
+  id: string; channel: Channel; author: string; content: string; embeds: Json[]; components: Row[]; files: Attachment[]; flags?: number;
   /** Ephemeral: only this person sees it. */
   only?: string;
   /** The message this one replies to; teapilot's replies never ping. */
@@ -187,7 +189,7 @@ export class World {
   private post(channel: Channel, author: string, payload: Payload, only?: string, replyTo?: Message): Message {
     if (author === bot.name) this.check(`a message in #${channel.name}`, () => { checkMessage(payload); checkFiles(payload); });
     const id = `m${++this.counters.message}`;
-    const message: Message = { id, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], files: this.store(id, payload.files ?? []), only, replyTo: replyTo?.id, edits: 0, reactions: [] };
+    const message: Message = { id, channel, author, content: payload.content ?? '', embeds: payload.embeds ?? [], components: payload.components ?? [], files: this.store(id, payload.files ?? []), flags: payload.flags, only, replyTo: replyTo?.id, edits: 0, reactions: [] };
     this.messages.push(message);
     this.recent = channel;
     this.emit(this.render(message));
@@ -195,7 +197,8 @@ export class World {
   }
 
   private update(message: Message, payload: Payload): void {
-    const next = { content: payload.content ?? message.content, embeds: payload.embeds ?? message.embeds, components: payload.components ?? message.components };
+    // Discord keeps the Components V2 flag once a message has it.
+    const next = { content: payload.content ?? message.content, embeds: payload.embeds ?? message.embeds, components: payload.components ?? message.components, flags: (payload.flags ?? 0) | (message.flags ?? 0) || undefined };
     const uploads = payload.files;
     // Attachments the edit leaves in place still count for attachment:// references.
     const kept = uploads ?? message.files.map(file => ({ name: file.name, data: Buffer.alloc(file.size) }));
@@ -212,6 +215,7 @@ export class World {
     return {
       send: async text => this.post(channel, bot.name, { content: text }, undefined, reply()).id,
       sendFiles: async (text, files) => this.post(channel, bot.name, { content: text, files }, undefined, reply()).id,
+      answer: async ({ embeds, components, flags, files }) => this.post(channel, bot.name, { embeds: embeds as unknown as Json[], components: components as Row[], flags, files }, undefined, reply()).id,
       edit: async (id, text) => this.update(this.find(id), { content: text }),
       card: async (text, controls, id) => {
         const payload = { content: text, components: [{ type: 1, components: [
@@ -306,7 +310,7 @@ export class World {
     if (message.only && message.only !== person.name) throw new SimError(`${person.name} cannot see ${message.id}; only ${message.only} can.`);
     return message;
   }
-  private controls(message: Message): Json[] { return message.components.flatMap(row => row.components); }
+  private controls(message: Message): Json[] { return message.components.flatMap(row => row.type === 1 ? row.components : []); }
   private controlId(control: Json): string | undefined {
     if (typeof control.custom_id !== 'string') return undefined;
     return parseCustomId(control.custom_id)?.id ?? control.custom_id.split(':').at(-1);
@@ -333,6 +337,7 @@ export class World {
     if (custom.startsWith(browsePrefix)) return this.pressBrowse(person, message, custom.slice(browsePrefix.length));
     if (custom.startsWith(grantPrefix)) return this.pressGrant(person, message, custom.slice(grantPrefix.length) as Permission);
     if (custom.startsWith('teapilot-card:')) return this.pressCard(person, message, custom.slice('teapilot-card:'.length) as CardButton);
+    if (custom.startsWith(viewSourcePrefix)) return this.pressViewSource(person, message, custom);
     return this.interact(person, message, 'button', custom, `clicked [${this.label(control)}]`);
   }
 
@@ -406,6 +411,13 @@ ${this.render(this.post(message.channel, bot.name, { content: note }, person.nam
   }
 
   /** Like the real gateway: anyone may press, the conversation decides, and only the presser sees the answer. */
+  /** Like the real gateway: anyone may press, and the table is read back from the embed, privately. */
+  private pressViewSource(person: Person, message: Message, custom: string): string {
+    const source = viewSource(custom, message.embeds[0] as never, viewSourcePrefix);
+    const note = this.post(message.channel, bot.name, { content: source ? `\`\`\`md\n${source}\n\`\`\`` : 'this table can no longer be read back.' }, person.name);
+    return `${person.name} clicked [view source] on ${message.id}.\n${this.render(note)}`;
+  }
+
   private pressCard(person: Person, message: Message, button: CardButton): string {
     const press = this.cards.get(message.id);
     const reply = press ? press(button, person.id) : { text: 'This turn is no longer available: teapilot restarted since, or the turn is too old.' };
@@ -618,6 +630,23 @@ ${this.render(this.post(form.message.channel, bot.name, { content: note }, perso
     return `<select ${this.controlId(control)}${min === 1 && max === 1 ? '' : ` ${min}–${max}`}${control.disabled ? ', disabled' : ''}${control.placeholder ? ` "${String(control.placeholder)}"` : ''}: ${options.join(' | ')}>`;
   }
 
+  /** A Components V2 component as lines: text as it reads, a divider as a rule, and media by url. */
+  private renderComponent(component: Json): string[] {
+    const children = (component.components as Json[] | undefined) ?? [];
+    const media = (item: Json) => String((item.media as { url?: string } | undefined)?.url ?? '');
+    switch (component.type) {
+      case 1: return [children.map(control => this.renderControl(control)).join(' ')];
+      case 9: return [...children.flatMap(child => this.renderComponent(child)), ...this.renderComponent(component.accessory as Json)];
+      case 10: return this.display(String(component.content)).split('\n');
+      case 11: return [`🖼 thumbnail: ${media(component)}`];
+      case 12: return [`🖼 gallery: ${(component.items as Json[]).map(media).join(', ')}`];
+      case 13: return [`📄 file: ${String((component.file as { url?: string }).url)}`];
+      case 14: return [component.divider === false ? '' : '───'];
+      case 17: return children.flatMap(child => this.renderComponent(child)).map(line => `│ ${line}`);
+      default: return [`(component type ${String(component.type)})`];
+    }
+  }
+
   private renderEmbed(embed: Json): string[] {
     const lines: string[] = [];
     const color = typeof embed.color === 'number' ? ` (#${embed.color.toString(16).padStart(6, '0')})` : '';
@@ -644,7 +673,7 @@ ${this.render(this.post(form.message.channel, bot.name, { content: note }, perso
     const lines = [
       ...(message.content ? this.display(message.content).split('\n') : []),
       ...message.embeds.flatMap(embed => this.renderEmbed(embed)),
-      ...message.components.map(row => row.components.map(control => this.renderControl(control)).join(' ')),
+      ...(message.flags && message.flags & componentsV2 ? message.components.flatMap(component => this.renderComponent(component)) : message.components.map(row => row.components.map(control => this.renderControl(control)).join(' '))),
       ...message.files.map(file => `📎 ${file.name} (${kilobytes(file.size)}) → ${file.path}`),
       ...(message.reactions.length ? [`reactions: ${message.reactions.join(' ')}`] : []),
     ];

@@ -11,7 +11,8 @@ import type { Permission } from '../execution/grants.js';
 import { grantPrefix, grantsGone, grantView, type GrantPanel } from './grants-panel.js';
 import { InteractionFeed, type FeedLink } from './feed.js';
 import { planButtons, planModal, type PlanAction, type PlanControls } from './plan.js';
-import { chunk, MESSAGE_LIMIT, quoteMessage, type QuotedMessage, type ReplyChain } from './render.js';
+import { viewSource, type Message as AnswerMessage } from 'pretty-send';
+import { chunk, MESSAGE_LIMIT, quoteMessage, viewSourcePrefix, type QuotedMessage, type ReplyChain } from './render.js';
 import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
 import type { DiscordSettings } from './settings.js';
@@ -172,6 +173,9 @@ const incoming = (file: Attachment): IncomingFile => ({ name: file.name, size: f
     return Buffer.from(await response.arrayBuffer());
   } });
 const attachments = (files: Array<{ name: string; data: Buffer }>) => files.map(file => ({ attachment: file.data, name: file.name }));
+/** A pretty-send message as discord.js takes it: raw embeds and components, which it accepts in place of builders. */
+const answerPayload = ({ embeds, components, flags, files }: AnswerMessage) =>
+  ({ ...(embeds ? { embeds } : {}), components, ...(flags ? { flags } : {}), files: attachments(files ?? []), ...quiet }) as unknown as BaseMessageOptions & { flags?: number };
 
 /**
  * A dispatcher from the undici discord.js itself loads. Its REST client otherwise uses undici's process-wide
@@ -251,6 +255,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     return {
       async send(text) { const message = await channel.send({ content: text, ...reply() }); sent.set(message.id, message); return message.id; },
       async sendFiles(text, files) { return (await channel.send({ content: text, files: attachments(files), ...reply() })).id; },
+      async answer(message) { const posted = await channel.send({ ...answerPayload(message), ...reply() }); sent.set(posted.id, posted); return posted.id; },
       async edit(id, text) { const message = sent.get(id) ?? await channel.messages.fetch(id); await message.edit({ content: text, ...quiet }); },
       async card(text, controls, id) {
         const payload = cardPayload(text, controls);
@@ -317,6 +322,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     return {
       send: text => feed.post({ content: text, components: buttons(), ...quiet }),
       sendFiles: (text, files) => feed.post({ content: text, files: attachments(files), components: buttons(), ...quiet }),
+      answer: message => feed.post(answerPayload(message) as CardMessage),
       edit: (id, text) => feed.revise(id, { content: text, ...quiet }),
       card(text, given, id) {
         controls = given;
@@ -787,6 +793,15 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       if (!resume) { await interaction.reply({ content: 'This turn is no longer available: teapilot restarted since, or the turn is too old.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
       await interaction.deferUpdate().catch(noop);
       await resume(interaction).catch(error => log(`Discord: could not resume a status card: ${failure(error)}`));
+      return;
+    }
+    if (interaction.customId.startsWith(viewSourcePrefix)) {
+      // Read back from the embed itself, so the button works for anyone, and after a restart.
+      const source = viewSource(interaction.customId, interaction.message.embeds[0]?.toJSON(), viewSourcePrefix);
+      const block = source && `\`\`\`md\n${source}\n\`\`\``;
+      const content = !block ? 'this table can no longer be read back.' : block.length <= MESSAGE_LIMIT ? block : 'the table is attached.';
+      const files = block && block.length > MESSAGE_LIMIT ? [{ attachment: Buffer.from(`${source}\n`), name: 'table.md' }] : [];
+      await interaction.reply({ content, files, flags: MessageFlags.Ephemeral, ...quiet }).catch(noop);
       return;
     }
     if (interaction.customId.startsWith(cardPrefix)) {

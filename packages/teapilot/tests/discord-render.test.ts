@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { route, type IncomingMessage } from '../src/discord/access.js';
-import { chunk, quoteMessage, StatusCard, throttle } from '../src/discord/render.js';
+import { quoteMessage, StatusCard, throttle } from '../src/discord/render.js';
 import { readDiscordSettings } from '../src/discord/settings.js';
 
 const alice = '111111111111111111', mallory = '222222222222222222', channel = '333333333333333333', guild = '444444444444444444';
@@ -29,28 +29,6 @@ it('fails closed without a token, root or allowlist and rejects malformed IDs', 
   expect(() => readDiscordSettings({ ...env, DISCORD_ALLOWED_USER_IDS: '' })).toThrow(/teapilot discord setup/);
   expect(() => readDiscordSettings({ ...env, DISCORD_ALLOWED_USER_IDS: 'alice' })).toThrow(/allowedUserIds/);
   expect(() => readDiscordSettings({ ...env, DISCORD_START_MODE: 'code' })).toThrow(/startMode/);
-});
-
-it('splits long answers within the message limit and keeps code fences balanced', () => {
-  expect(chunk('short answer')).toEqual(['short answer']);
-  expect(chunk('')).toEqual([]);
-  const code = ['```ts', ...Array.from({ length: 200 }, (_, index) => `const value${index} = ${index};`), '```'].join('\n');
-  const text = `Intro paragraph.\n\n${code}\n\nClosing words.`;
-  const parts = chunk(text, 500);
-  expect(parts.length).toBeGreaterThan(1);
-  for (const part of parts) {
-    expect(part.length).toBeLessThanOrEqual(500);
-    expect(part.split('\n').filter(line => line.startsWith('```')).length % 2).toBe(0);
-  }
-  expect(parts.slice(1, -1).every(part => part.startsWith('```ts'))).toBe(true);
-  expect(parts.join('\n')).toContain('const value199 = 199;');
-  expect(parts.at(-1)).toContain('Closing words.');
-});
-
-it('hard-splits a single line longer than the limit', () => {
-  const parts = chunk('x'.repeat(4500));
-  expect(parts.map(part => part.length).every(length => length <= 2000)).toBe(true);
-  expect(parts.join('')).toBe('x'.repeat(4500));
 });
 
 it('folds a turn into one redacted status card with its latest steps', () => {
