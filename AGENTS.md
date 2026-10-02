@@ -77,3 +77,9 @@ teapilot uses a concise, casual lower-case style for it's user-facing text. do s
 ## Agent-Facing Text (System & Tools)
 
 teapilot often uses a concise, casual lower-case style for it's agent-facing text. this doesn't apply to you, it applies to `teapilot`. but for teapilot & its interfaces - follow those rules when whenever it doesn't have a tangible impact on usability - such as malforming code or breaking case-sensitive data.
+
+## Contextual First
+
+System prompts or tool descriptioons that aims to fix specific problems (such as logical errors made by teapilot) are unpreferrable. They eat token budgets, are harder to maintain, and may confuse the model. Prefer contextual advice that's derived from the agent's actions, such as tool usage.
+
+For situations where general advice is preferrable, keep it short and concise, ideally no more than a sentence. In system prompts, short organisational comments are useful to help organise out multi-line guidelines.
