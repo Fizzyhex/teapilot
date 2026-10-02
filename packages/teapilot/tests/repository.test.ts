@@ -1,7 +1,8 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { inventory, sessionTools } from '../src/agents/tools.js';
+import { guardedMutation, inventory, sessionTools } from '../src/agents/tools.js';
+import { RequestRecovery } from '../src/agents/recovery.js';
 import { ExecutionPolicy } from '../src/execution/policy.js';
 import { Evidence } from '../src/routing/escalation.js';
 import { completion, fixture, mockServer } from './helpers.js';
@@ -11,6 +12,64 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 async function setup() { const f = await fixture(); cleanup.push(f.cleanup); return f; }
 const noApproval = async () => { throw new Error('Unexpected approval'); };
+
+it('refuses an identical failed edit until its file changes, across tool instances', async () => {
+  const f = await setup(), recovery = new RequestRecovery();
+  const path = join(f.cwd, 'target.txt');
+  await writeFile(path, 'original');
+  const execute = vi.fn(async () => { throw new Error(`Could not find the exact text in ${path}.`); });
+  const base = { name: 'edit', label: 'edit', description: '', parameters: {} as never, execute };
+  const args = () => ({ path, edits: [{ oldText: 'missing', newText: 'replacement' }] });
+  const first = guardedMutation(base, recovery);
+  expect((await first.execute('1', args())).details).toMatchObject({ outcome: { code: 'invalid_edit', changed: false } });
+  const resumed = guardedMutation(base, recovery);
+  expect((await resumed.execute('2', args())).details).toMatchObject({ outcome: { code: 'repeat_refused' } });
+  expect(execute).toHaveBeenCalledTimes(1);
+  await writeFile(path, 'changed externally');
+  await resumed.execute('3', args());
+  expect(execute).toHaveBeenCalledTimes(2);
+  await resumed.execute('4', { path, edits: [{ oldText: 'different', newText: 'replacement' }] });
+  expect(execute).toHaveBeenCalledTimes(3);
+});
+
+it('does not run no-op mutations, but allows mixed edit batches that really change content', async () => {
+  const f = await setup();
+  const path = join(f.cwd, 'target.txt');
+  await writeFile(path, 'original');
+  const execute = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'changed' }], details: {} }));
+  const tool = guardedMutation({ name: 'edit', label: 'edit', description: '', parameters: {} as never, execute }, new RequestRecovery());
+  await tool.execute('1', { path, edits: [{ oldText: 'same\r\n', newText: 'same\n' }] });
+  expect(execute).not.toHaveBeenCalled();
+  await tool.execute('2', { path, edits: [{ oldText: 'same', newText: 'same' }, { oldText: 'old', newText: 'new' }] });
+  expect(execute).toHaveBeenCalledTimes(1);
+});
+
+it('keeps inspection-loop warnings across attempts and does not clear them for notes or no-op writes', () => {
+  const recovery = new RequestRecovery();
+  const thresholds = { repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 };
+  const first = new Evidence(thresholds, [], path => path.startsWith('/s/'), recovery);
+  first.observe('ls', {}, false, 'empty');
+  first.observe('ls', {}, false, 'empty');
+  expect(first.warning).toContain('Change approach');
+  first.observe('write', { path: '/s/note.md' }, false);
+  first.observe('write', { path: 'unchanged.txt' }, false, 'no change', undefined, false);
+  const resumed = new Evidence(thresholds, [], undefined, recovery);
+  resumed.observe('ls', {}, false, 'empty');
+  expect(resumed.reason).toBe('ineffective_calls');
+});
+
+it('keeps command failure evidence for unrelated scratch notes and clears it for relevant script edits', () => {
+  const evidence = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 }, [], path => path.startsWith('/s/'));
+  evidence.observe('bash', { command: 'python /s/helper.py' }, true, 'missing dependency');
+  evidence.observe('write', { path: '/s/notes.md' }, false);
+  evidence.observe('bash', { command: 'python /s/helper.py' }, true, 'missing dependency');
+  expect(evidence.reason).toBe('tool_failures');
+  const relevant = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 }, [], path => path.startsWith('/s/'));
+  relevant.observe('bash', { command: 'python /s/helper.py' }, true, 'missing dependency');
+  relevant.observe('edit', { path: '/s/helper.py' }, false);
+  relevant.observe('bash', { command: 'python /s/helper.py' }, true, 'missing dependency');
+  expect(relevant.reason).toBeUndefined();
+});
 
 it('lists, finds and searches without approval, respecting ignore rules and file boundaries', async () => {
   const f = await setup(), outside = await setup();

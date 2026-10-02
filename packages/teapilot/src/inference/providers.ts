@@ -93,6 +93,8 @@ export interface InferenceState {
   calibration?: { estimated: number; reported: number };
   /** Server-side failure text, kept only when it matches a known load/runtime signature. */
   providerDetail?: string;
+  /** Protocol metadata only: never provider text or tool arguments. Replaced on each call. */
+  termination?: { responseId?: string; finishReason?: string; eosReason?: string; toolData: boolean; malformedTools?: boolean; parsedCalls: number; outputLimit: number };
 }
 
 // Provider error bodies may reflect request content, so only messages that
@@ -116,9 +118,10 @@ function errorMessage(model: Model<'openai-completions'>, message: string): Assi
   };
 }
 
-// Observe just provider billing metadata while pi parses the model/tool stream.
-// Forward the original bytes without retaining text, prompts, or tool arguments.
-interface Observed { cost?: number; model?: string; completeUsage?: boolean; sent?: number; firstChoice?: number; lastChoice?: number }
+// Observe protocol/billing metadata while pi parses the stream. Tool JSON is checked transiently,
+// never logged: pi's forgiving partial-JSON parser must not turn a malformed call into a mutation.
+interface Observed { cost?: number; model?: string; completeUsage?: boolean; sent?: number; firstChoice?: number; lastChoice?: number;
+  responseId?: string; finishReason?: string; eosReason?: string; toolData?: boolean; malformedTools?: boolean; toolArguments?: Map<number, string> }
 
 /** Decode speed, and the wait for the first token (mostly prompt reading), from when stream chunks arrived. */
 export function streamSpeed(observed: Observed, outputTokens: number | undefined): { firstTokenMs?: number; outputTokensPerSecond?: number } {
@@ -143,8 +146,25 @@ function observeBilling(response: Response, observed: Observed): Response {
       for (const line of lines) {
         if (!line.startsWith('data:')) continue;
         try {
-          const value = JSON.parse(line.slice(5)) as { model?: unknown; choices?: unknown; usage?: { cost?: unknown; prompt_tokens?: unknown; completion_tokens?: unknown } };
+          const value = JSON.parse(line.slice(5)) as { id?: unknown; model?: unknown; choices?: unknown; usage?: { cost?: unknown; prompt_tokens?: unknown; completion_tokens?: unknown } };
           if (typeof value.model === 'string') observed.model = value.model;
+          if (typeof value.id === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value.id)) observed.responseId = value.id;
+          if (Array.isArray(value.choices)) for (const choice of value.choices) {
+            if (choice.index !== 0) continue;
+            if (['stop', 'length', 'tool_calls', 'function_call', 'content_filter'].includes(choice.finish_reason)) observed.finishReason = choice.finish_reason;
+            if (['loop_detected', 'max_new_tokens', 'stop_token', 'stop_string'].includes(choice.eos_reason)) observed.eosReason = choice.eos_reason;
+            if (Array.isArray(choice.delta?.tool_calls) && choice.delta.tool_calls.length) {
+              observed.toolData = true;
+              for (const call of choice.delta.tool_calls) {
+                if (typeof call.function?.arguments !== 'string') continue;
+                if (!Number.isInteger(call.index) || call.index < 0 || call.index >= 64) { observed.malformedTools = true; continue; }
+                observed.toolArguments ??= new Map();
+                const args = (observed.toolArguments.get(call.index) ?? '') + call.function.arguments;
+                if (args.length > 1_000_000) { observed.malformedTools = true; observed.toolArguments.delete(call.index); }
+                else observed.toolArguments.set(call.index, args);
+              }
+            }
+          }
           if (Array.isArray(value.choices) && value.choices.length) { observed.lastChoice = performance.now(); observed.firstChoice ??= observed.lastChoice; }
           if (typeof value.usage?.cost === 'number' && Number.isFinite(value.usage.cost) && value.usage.cost >= 0) observed.cost = value.usage.cost;
           if (value.usage) observed.completeUsage = [value.usage.prompt_tokens, value.usage.completion_tokens].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0);
@@ -195,6 +215,7 @@ export function guardedStream(
       let lexicalTokens: number | undefined;
       let maxTokens = cap;
       const observed: Observed = {};
+      state.termination = undefined;
       // requestTimeoutMs bounds a stall, not a whole stream: long local generations keep
       // producing tokens, and attemptTimeoutMs already bounds the attempt overall.
       const stalled = new AbortController();
@@ -260,6 +281,17 @@ export function guardedStream(
           } else output.push(event);
         }
         completed ??= await stream.result();
+        for (const args of observed.toolArguments?.values() ?? []) {
+          try { JSON.parse(args); } catch { observed.malformedTools = true; }
+        }
+        observed.toolArguments?.clear();
+        state.termination = { responseId: observed.responseId, finishReason: observed.finishReason, eosReason: observed.eosReason,
+          toolData: Boolean(observed.toolData), malformedTools: observed.malformedTools, parsedCalls: completed.content.filter(part => part.type === 'toolCall').length, outputLimit: maxTokens };
+        await telemetry.event('provider_termination', { tier, model: spec.id, ...state.termination, outputTokens: completed.usage.output });
+        // A truncated call (even one pi partially parsed) is not safe to execute. Recover through the host.
+        if (observed.malformedTools || observed.eosReason === 'loop_detected' || observed.eosReason === 'max_new_tokens' && (observed.toolData || observed.finishReason === 'tool_calls')
+          || completed.stopReason === 'length' && completed.content.some(part => part.type === 'toolCall'))
+          completed = { ...completed, content: [], stopReason: 'toolUse' };
       } finally {
         clearTimeout(stallTimer);
         if (reservation) {

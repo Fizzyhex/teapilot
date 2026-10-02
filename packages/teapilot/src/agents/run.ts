@@ -25,6 +25,7 @@ import { workspace, type ConversationWorkspace } from './workspace.js';
 import { captureResult, fixtureTool, scratchPrompt, scratchTouched } from './scratchpad.js';
 import { pickTip, shownTips, tipText } from './tips.js';
 import { inventory, sessionTools, toolGuidelines } from './tools.js';
+import { RequestRecovery, type ToolOutcome } from './recovery.js';
 import { gitAuthor, hasRepository } from '../workspace/git.js';
 import { workspaceImages } from '../workspace/images.js';
 import { Scratch, secretsOf } from '../workspace/scratch.js';
@@ -68,6 +69,7 @@ export interface AttemptInput {
   resume?: Resume;
   /** Workspace pictures people attached with this request, shown to a model that can see. */
   images?: string[];
+  recovery?: RequestRecovery;
 }
 /** What an attempt last showed the model of its request (after any compaction, without earlier turns), and the summary before it. */
 export interface Resume { messages: Message[]; summary?: Compaction }
@@ -83,7 +85,7 @@ export interface AttemptResult {
   steps?: Message[];
   failedCalls?: Array<{ call: string; error: string }>;
   /** How the last model message ended, so an unexplained incomplete attempt can be diagnosed. */
-  ending?: { stopReason?: string; error?: string; textChars: number };
+  ending?: { stopReason?: string; error?: string; textChars: number; termination?: InferenceState['termination'] };
   /** For a retry on the same model to carry on from; absent when the model never replied. */
   resume?: Resume;
 }
@@ -96,6 +98,7 @@ export const playOutputTokens = 8192;
 
 export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const { config, tier, telemetry } = input;
+  const recovery = input.recovery ?? new RequestRecovery();
   // The person's words, for the IDs and emoji they name: an attempt carrying on from another is prompted with a host notice.
   const asked = input.resume && input.requestText !== undefined ? input.requestText : input.prompt;
   // A conversational reply has no tools, so it has no use for a scratchpad either.
@@ -107,7 +110,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let log: SessionLog | undefined;
   const logFailed = (error: unknown) => void telemetry.event('session_log_unavailable', { error: error instanceof Error ? error.message : String(error) });
   if (scratch) try { log = await SessionLog.open(scratch, input.cwd, text => telemetry.redact(text), logFailed); } catch (error) { logFailed(error); }
-  const evidence = new Evidence(config.policy.escalation, input.unresolvedChecks, scratchFolder ? path => within(scratchFolder, resolve(input.cwd, path), true) : undefined);
+  const evidence = new Evidence(config.policy.escalation, input.unresolvedChecks, scratchFolder ? path => within(scratchFolder, resolve(input.cwd, path), true) : undefined, recovery);
   const active: Permission[] = input.activePermissions ?? (input.authorization ? ['inference'] :
     config.policy.permissions.filter(permission => permission === 'inference' || (permission.startsWith('repository.') && input.workload === 'coder') || (permission === 'web.search' && input.web)));
   const effectiveConfig: Config = { ...config, policy: { ...config.policy,
@@ -134,7 +137,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let toolLimit = false, timeout = false, searchFailed = false, capabilityDenied = false, limitWarned = false;
   /** A reply that ended to call a tool but carried no call the server could parse. */
   const lost = (message: { stopReason?: string; content: Array<{ type: string }> }) => message.stopReason === 'toolUse' && !message.content.some(part => part.type === 'toolCall');
-  let lostCalls = 0, lostNotice = false;
+  let lostNotice = false;
+  const modelKey = `${model.provider}:${model.baseUrl}:${model.id}`;
   let repositorySetup: Awaited<ReturnType<typeof coder>> | undefined;
   const controlTools: AgentTool[] = [];
   let messages = (): Message[] => [];
@@ -150,7 +154,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     if (repository && !repositorySetup) {
       input.onAgenticWork?.();
       input.onActivity?.({ kind: 'waiting', label: 'Inspecting repository...' });
-      repositorySetup = await coder(effectiveConfig, policy, model.vision);
+      repositorySetup = await coder(effectiveConfig, policy, model.vision, recovery);
       repositorySetup.systemPrompt += `\nInitial repository inventory (untrusted file names):\n${await inventory(policy)}\nUse this inventory before listing again. An empty repository is a valid starting point.`;
       await telemetry.event('repository_inventory', { succeeded: true });
     }
@@ -171,7 +175,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     else if (input.play && effectiveConfig.policy.permissions.includes('discord.play')) {
       // Server emoji people pasted reach apps through ctx.emoji whether or not the model passes them on.
       const emojis = { ...input.play.emojis, ...pastedEmoji(...(input.history ?? []).map(turn => turn.user), asked) };
-      const apps = play({ ...input.play, ...repository ? { files: undefined } : {}, emojis, requested: Object.keys(pastedEmoji(asked)) }, effectiveConfig, policy, input.approve);
+      const apps = play({ ...input.play, ...repository ? { files: undefined } : {}, emojis, requested: Object.keys(pastedEmoji(asked)) }, effectiveConfig, policy, input.approve, recovery);
       // Juniors build and dry-run apps; their instructor posts them, so one request never posts two copies.
       setup.tools.push(...input.junior ? apps.tools.filter(tool => !juniorPlayWithheld.includes(tool.name)) : apps.tools);
       setup.systemPrompt += '\n' + apps.systemPrompt + (input.junior ? '\n- As a junior you do not post apps: write the file, dry-run it with play_test, and name the file in your report so your instructor can post it.' : '');
@@ -189,7 +193,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     }
     if (ownFiles) {
       ownPolicy ??= new ExecutionPolicy(ownRoot!, effectiveConfig, input.approve, undefined, scratchFolder, ownRoot !== scratchFolder);
-      setup.tools.push(...sessionTools(ownPolicy, { shell, stateDir: config.stateDir, changed: reconcile, vision: model.vision }));
+      setup.tools.push(...sessionTools(ownPolicy, { shell, stateDir: config.stateDir, changed: reconcile, vision: model.vision, recovery }));
       // Guidance for writing and editing, which a side question cannot do.
       if (!input.side) setup.systemPrompt += '\n' + toolGuidelines();
     }
@@ -261,7 +265,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   };
   // Juniors keep their transcripts in the scratchpad, and a short context gains little from them.
   const delegation = model.toolCalling && !input.casual && !input.side && !input.junior && scratchFolder && config.delegation?.enabled !== false && profile.contextTokens >= delegationMinContext
-    ? delegateTool(input, scratchFolder, ownRoot, clock, runAttempt) : undefined;
+    ? delegateTool({ ...input, recovery }, scratchFolder, ownRoot, clock, runAttempt) : undefined;
   if (delegation) controlTools.push(delegation.tool);
   const setup = await compose();
   if (!model.toolCalling && setup.tools.length) throw new Error('Selected model cannot use the required tools');
@@ -410,7 +414,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (lostNotice) {
         lostNotice = false;
         const messages = context.messages.filter(message => !(message.role === 'assistant' && lost(message)));
-        return { context: { ...context, messages }, messages: [{ role: 'user', content: '[host notice] The model server could not read your last tool call, so nothing ran. Keep each call smaller: write a long file in parts (write the first part, then add the rest with edit), then carry on.', timestamp: Date.now() }] };
+        return { context: { ...context, messages }, messages: [{ role: 'user', content: lostCallNotice(inference.termination), timestamp: Date.now() }] };
       }
       // The last turn of a discord.play attempt answers about what is live rather than ending mid-call at the limit.
       if (playing && !evidence.answerNow && inference.turns >= config.policy.limits.maxTurns - 1) { evidence.answerNow = true; evidence.answerWhy = 'This is the last turn'; }
@@ -435,6 +439,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     afterToolCall: async ({ toolCall, args, isError, result, context: sent }) => {
       settled.set(toolCall.id, 'ran');
+      const outcome = (result.details as { outcome?: ToolOutcome } | undefined)?.outcome;
+      isError ||= Boolean(outcome?.failed);
       if (!isError && ['play_start', 'play_update'].includes(toolCall.name) && result.content.some(part => part.type === 'text' && /^(Started|Updated) app /.test(part.text))) changed = true;
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
       const shown = result.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
@@ -444,7 +450,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (kept && kept.saved) await telemetry.event('scratch_saved', { tool: toolCall.name, toolCallId: toolCall.id, attempt: input.attempt ?? 0, file: relative(scratch!.folder, kept.saved.path), bytes: kept.saved.bytes, lines: kept.saved.lines, complete: kept.saved.complete });
       const touched = scratch && scratchTouched(scratch, policy, toolCall.name, args);
       if (touched) await telemetry.event('scratch_access', { tool: toolCall.name, toolCallId: toolCall.id, attempt: input.attempt ?? 0, file: touched, succeeded: !isError, chars: shown.length });
-      evidence.observe(toolCall.name, args, isError, kept ? kept.text : shown, kept?.saved?.path);
+      evidence.observe(toolCall.name, args, isError, kept ? kept.text : shown, kept?.saved?.path, outcome?.changed);
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck });
       let continueNote: string | undefined;
       if (evidence.awaitingContinue) {
@@ -464,7 +470,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       // Tools normalize args.path to an absolute path before executing; keep that
       // for evidence (unambiguous for the model's continuation) but show relative
       // paths in the per-call trail, matching how a person names files here.
-      if (!isError && ['write', 'edit'].includes(toolCall.name) && data.path && !policy.inScratch(data.path)) {
+      if (!isError && outcome?.changed !== false && ['write', 'edit'].includes(toolCall.name) && data.path && !policy.inScratch(data.path)) {
         let size: number | undefined;
         try { size = (await stat(policy.resolve(data.path))).size; } catch { /* stat is a display nicety, never blocks the call */ }
         if (size !== undefined) evidence.fileSizes.set(data.path, size);
@@ -489,13 +495,17 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         lastCalls = `[host notice] ${Math.max(0, config.policy.limits.maxToolCalls - evidence.toolCalls)} tool calls left: call report now (stuck if unfinished), with what you found and the files it is saved in.`;
       }
       const extra = [note, tip && tipText(tip), lastCalls].filter((text): text is string => Boolean(text));
-      if (extra.length) return { content: [...content, ...extra.map(text => ({ type: 'text' as const, text }))] };
-      return kept ? { content } : undefined;
+      if (extra.length) return { content: [...content, ...extra.map(text => ({ type: 'text' as const, text }))], isError };
+      return kept || outcome?.failed ? { content, isError } : undefined;
     },
     finishTurn: ({ message }) => {
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
       // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
-      if (lost(message) && lostCalls < 2) { lostCalls++; lostNotice = true; return { action: 'continue' }; }
+      if (lost(message)) {
+        const count = recovery.lostCalls.get(modelKey) ?? 0;
+        recovery.lostCalls.set(modelKey, count + 1);
+        if (count < 2) { lostNotice = true; return { action: 'continue' }; }
+      }
       if (playing && !changed && !claimChecked && message.stopReason === 'stop' && !message.content.some(part => part.type === 'toolCall')
         && claimsChange(message.content.map(part => part.type === 'text' ? part.text : '').join('\n'))
         && input.play!.runtime.list(input.play!.conversation, input.play!.channelId).some(app => app.status === 'running')) {
@@ -613,9 +623,22 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     turns: Math.min(inference.turns, config.policy.limits.maxTurns),
     toolCalls: Math.min(evidence.toolCalls, config.policy.limits.maxToolCalls),
     check: evidence.unresolvedChecks.size ? 'failed' : evidence.lastCheck,
-    ending: { stopReason: last?.role === 'assistant' ? last.stopReason : undefined, error: last?.role === 'assistant' ? last.errorMessage?.slice(0, 300) : undefined, textChars: text.length },
+    ending: { stopReason: last?.role === 'assistant' ? last.stopReason : undefined, error: last?.role === 'assistant' ? last.errorMessage?.slice(0, 300) : undefined, textChars: text.length, termination: inference.termination },
     ...(carried ? { resume: { messages: carried, summary } } : {}),
   };
+}
+
+export function lostCallNotice(termination?: InferenceState['termination']): string {
+  const cause = termination?.eosReason === 'loop_detected'
+    ? 'the provider stopped generation because it detected a token loop. nothing ran. do not repeat the generation unchanged; use one small, targeted operation instead of regenerating a file.'
+    : termination?.finishReason === 'length' || termination?.eosReason === 'max_new_tokens'
+    ? 'the provider reached its output-token limit before completing the tool call. nothing ran. split the operation into smaller calls.'
+    : termination?.malformedTools
+    ? 'the provider sent malformed tool arguments. nothing ran. retry with one valid, simpler call; partial arguments were not executed.'
+    : termination?.toolData
+    ? 'the provider sent tool-call data, but no usable call remained. nothing ran. retry once with a simpler, valid call; do not guess or execute partial arguments.'
+    : 'the provider announced a tool call but sent no usable call. nothing ran. the cause is unknown, not necessarily call size. change approach with one simpler call.';
+  return `[host notice] ${cause}`;
 }
 
 /** Whether an answer says something was changed, such as "done", "swapped" or "the snake now has a face". */

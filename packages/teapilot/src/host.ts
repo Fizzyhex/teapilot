@@ -22,6 +22,7 @@ import { capabilityPlanner, conversationQuestions, playQuestion, readCasual, rea
 import { markWork } from './teachat/busy.js';
 import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
+import { RequestRecovery } from './agents/recovery.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
   /** A side question (/btw): it sees the conversation but only reads, and its turn is not kept. */
@@ -92,6 +93,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   const budget = new SpendGovernor(join(config.stateDir, 'spend.jsonl'), requestId, config.policy.budget);
   // URLs the user wrote or earlier tools returned may be read; anything the model composes may not.
   const web = new WebController(config, { event: (type, fields) => telemetry.event(type, fields) });
+  const recovery = new RequestRecovery();
   web.remember(currentPrompt);
   for (const turn of request.history ?? []) {
     web.remember(turn.user);
@@ -155,9 +157,16 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   const incomplete = (attempt: AttemptResult, fallback?: string) => {
     const stop = attempt.stopped ?? attempt.reason ?? 'incomplete';
     const usedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
+    const termination = attempt.ending?.termination;
     const actions: Record<string, string> = {
       approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
-      provider_error: 'Run teapilot doctor --live with this configuration to check the models. A very large single reply can also hit the output token cap and be rejected by the server; ask for large files in smaller pieces, or raise maxOutputTokens in the models config.',
+      provider_error: termination?.eosReason === 'loop_detected'
+        ? 'the provider stopped a token loop; affected calls did not run. retry a targeted step rather than the same generation, or check the model with teapilot doctor --live.'
+        : termination?.eosReason === 'max_new_tokens' || termination?.finishReason === 'length'
+        ? 'the tool call reached its output-token limit and did not run. split it into smaller operations.'
+        : termination?.malformedTools
+        ? 'the provider sent malformed tool arguments; affected calls did not run. check its tool protocol with teapilot doctor --live.'
+        : 'the provider failed or returned no usable tool call. check the models with teapilot doctor --live; call size is not a confirmed cause.',
       unsupported: 'Check model context and tool support with teapilot doctor --live.',
       context_limit: 'Type /convo clear to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
       payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',
@@ -330,7 +339,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       // over from a summary of it and reading everything again.
       const resume = previous?.resume && previousTier && profileFor(previousTier).model === profileFor(tier).model ? previous.resume : undefined;
       previous = await runAttempt({
-        config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry,
+        config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry, recovery,
         mode: request.mode, conversational: request.conversational, side: request.side, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
@@ -380,6 +389,9 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       const fallback = onward.map(nextTier => {
         const candidate = capabilities(config, budget, localOnline, { workload, tier: nextTier }, { physicalOnline, relatedLock: request.relatedTier }).find(c => c.id === `${workload}.${nextTier}`)!;
         if (request.web && !modelFor(config, nextTier).toolCalling) candidate.availability = { available: false, reason: 'Web search requires tool calling' };
+        const currentModel = modelFor(config, tier), nextModel = modelFor(config, nextTier);
+        if (previous?.reason === 'provider_error' && currentModel.provider === nextModel.provider && currentModel.baseUrl === nextModel.baseUrl && currentModel.id === nextModel.id)
+          candidate.availability = { available: false, reason: 'this provider/model already exhausted recovery; a different tier is not a different model' };
         return { tier: nextTier, assessment: assessCandidate(config, candidate) };
       });
       const next = fallback.find(item => item.assessment.allowed)?.tier;

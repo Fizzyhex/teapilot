@@ -7,8 +7,9 @@ import { asText } from '../workspace/store.js';
 import { workspaceName, type ConversationWorkspace } from './workspace.js';
 import type { Approve, ExecutionPolicy } from '../execution/policy.js';
 import { PlayError } from '../discord/play/render.js';
-import { hashFile, type PlayRuntime, type Source, type StartOptions, type TestAction } from '../discord/play/runtime.js';
+import { hashFile, playLimits, type PlayRuntime, type Source, type StartOptions, type TestAction, type TestExpectation, type TestReport } from '../discord/play/runtime.js';
 import { checkAssetName, collectAssets, sandboxIdentity, type AssetFiles } from '../discord/play/assets.js';
+import { fingerprint, RequestRecovery, type ToolOutcome } from './recovery.js';
 
 /** The Discord conversation a request comes from; the host builds this, never the model. */
 export interface PlayContext {
@@ -53,7 +54,7 @@ const assets = Type.Optional(Type.Record(Type.String(), Type.String(), { maxProp
  * workspace, made with write and changed with edit, so a fix costs an edit rather than the whole app again. Mistakes
  * in an app come back as ordinary results to fix and retry, not tool failures, since iterating is the normal workflow.
  */
-export function play(context: PlayContext, config: Config, policy: ExecutionPolicy, approve: Approve): { systemPrompt: string; tools: AgentTool[] } {
+export function play(context: PlayContext, config: Config, policy: ExecutionPolicy, approve: Approve, recovery = new RequestRecovery()): { systemPrompt: string; tools: AgentTool[] } {
   const has = (permission: Config['policy']['permissions'][number]) => config.policy.permissions.includes(permission);
   // With repository access apps are files of the repository, and the conversation's workspace is not in play (run.ts leaves `files` out);
   // without it they are files of the workspace. Never both, so a name always means one file.
@@ -94,10 +95,13 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     if (!path) throw new PlayError(`asset file ${JSON.stringify(name)} is missing or not a plain file in this conversation's workspace.`);
     return path;
   });
+  let validationState: unknown;
+  const validationKey = (identity: string, state = validationState) => fingerprint([context.conversation, identity, state ?? null, context.emojis]);
   const prepare = async (code: string, file: string, assetFiles: AssetFiles, retry: boolean) => {
     const source: Extract<Source, { kind: 'sandbox' }> = { kind: 'sandbox', code, assets: await snapshot(assetFiles) };
     const identity = sandboxIdentity(source);
-    if (!retry && identity === rejected) return `${file} is unchanged since it was rejected (including its assets). Fix the problem with edit first, then call this again.`;
+    const key = validationKey(identity);
+    if (!retry && (key === rejected || recovery.rejectedApps.has(key) || recovery.failedTests.has(key))) return `${file} is unchanged since it was rejected by validation or testing (including its assets). nothing was posted or updated. fix the demonstrated defect with edit first; testing exhaustion is not permission to publish broken code.`;
     trying = { code: identity, file };
     return { source, file, assetFiles };
   };
@@ -145,21 +149,29 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
     const missing = source?.kind === 'sandbox' ? (context.requested ?? []).filter(name => !source.code.includes(name)) : [];
     return missing.length ? `\nNote: the request pasted ${missing.map(name => context.emojis![name]).join(' ')}, which the app never uses. Server emoji show like any other emoji in text, grid cells and buttons: write each exactly as pasted, or ctx.emoji("${missing[0]}"), instead of a lookalike.` : '';
   };
-  /** Dry runs since the last start or update; small models loop on them until their context is full. */
-  let tests = 0;
   /** Whether this turn dry-ran anything, so a long app posted untried gets a nudge to play it through. */
   let tested = false;
+  let testReport: TestReport | undefined;
+  let toolOutcome: ToolOutcome | undefined;
   const attempt = async (tool: string, work: () => Promise<string>) => {
     require();
     trying = undefined;
-    try { return text(await work()); }
+    validationState = undefined;
+    testReport = undefined; toolOutcome = undefined;
+    try {
+      const result = text(await work());
+      const report = testReport as TestReport | undefined;
+      const { text: _text, ...test } = report ?? {};
+      return { ...result, details: { ...(toolOutcome ? { outcome: toolOutcome } : {}), ...(report ? { test } : {}) } };
+    }
     catch (error) {
       if (!(error instanceof PlayError)) throw error;
       // Set by resolve() while the work ran.
       const tried = trying as { code: string; file?: string } | undefined;
-      rejected = tried?.code;
+      rejected = tried?.code ? validationKey(tried.code) : undefined;
+      if (rejected) recovery.rejectedApps.add(rejected);
       const fix = tried?.file ? `\nFix it with edit on ${tried.file} (small exact replacements), then call ${tool} again with the same file, rather than writing the whole app again.` : '';
-      return text(`App problem, nothing was changed: ${error.message}${fix}`);
+      return { ...text(`App problem, nothing was changed: ${error.message}${fix}`), details: { outcome: { code: 'runtime_error' as const, changed: false, failed: true } } };
     }
   };
 
@@ -199,10 +211,10 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         if (typeof loaded === 'string') return loaded;
         const { source, file, assetFiles } = loaded;
         const { record, preview } = await context.runtime.start({ title, channelId: context.channelId, post: context.post, conversation: context.conversation, owner, source, assetFiles, participants: participants as never, emojis: known(args.emojis), ...(file ? { file } : {}) });
-        tests = 0; rejected = undefined; started = { id: record.id, title };
+        rejected = undefined; started = { id: record.id, title };
         // Probing presses each control once; rules that play out over many turns only show up when played through.
         const untried = !tested && source.kind === 'sandbox' && source.code.split('\n').length > 120;
-        return `Started app ${record.id} (${record.participants === 'everyone' ? 'anyone can play' : `participants: ${JSON.stringify(record.participants)}`}). It is live in the channel; do not repeat its contents in your answer.\nPreview:\n${preview}${unused(source)}${untried ? `\nThis long app was not dry-run: play it through once with play_test (a full round, acting as each player with user_id) and fix what breaks with edit and play_update before answering.` : ''}`;
+        return `Started app ${record.id} (${record.participants === 'everyone' ? 'anyone can play' : `participants: ${JSON.stringify(record.participants)}`}). It is live in the channel; do not repeat its contents in your answer.\nPreview:\n${preview}${unused(source)}${untried ? '\nonly basic control checks ran, not a full playthrough. use a short targeted simulation if practical; otherwise give the user a brief gameplay checklist. do not claim untested rules passed.' : ''}`;
       }),
     },
     {
@@ -222,6 +234,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         const id = args.id ?? newest();
         if (!id) return 'No running app in this conversation; pass id (see play_list) or use play_start.';
         const current = context.runtime.source(id, context.conversation);
+        validationState = args.reset ? undefined : context.runtime.state(id, context.conversation);
         updating = id;
         let file = args.file, path = args.path;
         let adopted = false;
@@ -244,7 +257,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
           : `Nothing to change: ${loaded.file ?? 'the file'} and its assets are the same as the running snapshot. Change them with edit first, then call play_update.`;
         const { record, preview } = await context.runtime.update(id, context.conversation, same ? undefined : loaded.source, Boolean(args.reset), args.timers, known(), args.title, loaded.assetFiles ?? {});
         if (loaded.file && loaded.file !== record.file) context.runtime.adopt(id, context.conversation, loaded.file);
-        tests = 0; rejected = undefined;
+        rejected = undefined;
         return `Updated app ${record.id}${renamed ? ` (${JSON.stringify(record.title)})` : ''}.\nPreview:\n${preview}${unused(loaded.source)}`;
       }),
     },
@@ -268,6 +281,7 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         assets,
         reset: Type.Optional(Type.Boolean({ description: 'Test a fresh init instead of the running app\'s current state. This does not reset the live app.' })),
         steps: Type.Optional(Type.Boolean({ description: 'Show every step, not only the last. Long; leave off unless debugging.' })),
+        expect: Type.Optional(Type.Array(Type.Object({ path: Type.String({ description: 'Final state field, dot-separated; empty checks the whole state.', maxLength: 200 }), equals: Type.Any() }), { maxItems: 20, description: 'Explicit final-state assertions; without them this is only a simulation.' })),
         actions: Type.Array(Type.Object({
           kind: Type.String({ description: 'button, select, modal, timer or consult.' }),
           id: Type.String(), values: Type.Optional(Type.Array(Type.String())), fields: Type.Optional(Type.Record(Type.String(), Type.String())),
@@ -276,12 +290,15 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         }), { maxItems: 50 }),
       }),
       execute: async (_id, params, signal) => attempt('play_test', async () => {
-        const args = params as { path?: string; file?: string; assets?: AssetFiles; reset?: boolean; actions: Array<TestAction & { user_id?: string }>; steps?: boolean };
+        const args = params as { path?: string; file?: string; assets?: AssetFiles; reset?: boolean; actions: Array<TestAction & { user_id?: string }>; steps?: boolean; expect?: TestExpectation[] };
         const kinds = ['button', 'select', 'modal', 'timer', 'consult'];
         const wrong = args.actions.find(action => !kinds.includes(action.kind));
         if (wrong) return `Action kind ${JSON.stringify(wrong.kind)} is not one of ${kinds.join(', ')}.`;
         tested = true;
-        if (++tests > 2) return 'Enough dry runs: call play_start (or play_update) now. It tries every control before posting and returns anything that breaks, so remaining problems can be fixed in place.';
+        if (recovery.playTests >= 2) {
+          toolOutcome = { code: 'testing_limit', changed: false };
+          return 'automated play-testing is exhausted for this request. stop simulating; leave remaining gameplay/visual checks to the user with a brief checklist. fix known runtime or assertion failures before posting; do not publish just because testing stopped, or claim untested rules passed.';
+        }
         const running = updating && visible().some(app => app.id === updating) ? updating : newest();
         const own = args.file === undefined && args.path === undefined && running ? await fileOf(running) : undefined;
         const candidates = context.runtime.list(context.conversation).filter(app => app.status === 'running').reverse();
@@ -290,11 +307,18 @@ export function play(context: PlayContext, config: Config, policy: ExecutionPoli
         const selected = args.assets ?? (inheriting ? context.runtime.assetFiles(inheriting.id, context.conversation) : undefined);
         const loaded = await resolve(repository ? { path: args.path ?? own, assets: selected } : { file: args.file ?? own, assets: selected }, signal, true);
         if (typeof loaded === 'string') return loaded;
+        recovery.playTests++;
         // A dry run of the running app's own file shows what its players will actually get.
         const matching = loaded.file === undefined ? undefined : candidates.find(app => app.id === running && sameFile(app.file, loaded.file))
           ?? candidates.find(app => sameFile(app.file, loaded.file));
         const state = !args.reset && matching ? context.runtime.state(matching.id, context.conversation) : undefined;
-        return context.runtime.test(loaded.source, args.actions.map(({ user_id, ...action }) => user_id ? { ...action, user: { id: user_id } } : action), owner, { steps: args.steps, state, emojis: known(), conversation: context.conversation });
+        testReport = await context.runtime.testDetailed(loaded.source, args.actions.map(({ user_id, ...action }) => user_id ? { ...action, user: { id: user_id } } : action), owner, { steps: args.steps, state, emojis: known(), conversation: context.conversation, expect: args.expect });
+        if (testReport.errors.length || testReport.assertions.failed) {
+          recovery.failedTests.add(validationKey(trying!.code, state));
+          toolOutcome = { code: 'runtime_error', changed: false, failed: true };
+        } else recovery.failedTests.delete(validationKey(trying!.code, state));
+        const handoff = recovery.playTests >= 2 ? '\nautomated play-testing is exhausted for this request; fix known defects, then leave remaining gameplay/visual checks to the user with a brief checklist. do not claim untested rules passed.' : '';
+        return testReport.text + handoff;
       }),
     },
     {
@@ -353,7 +377,8 @@ function playPrompt(repository: boolean, writable: boolean, running: Array<{ id:
     // Checking rules
     '- Every rule asked for (what blocks movement, what spans several tiles, turns, scoring) belongs in update() and state, not only in how the view draws it. A generated world stays walkable: the player never starts on or gets sealed in by blocking tiles.',
     '- For a game with many rules, first list them as short comments at the top of the code, then enforce each one. Players make every choice the rules give them (which pile, which card, when to stop) with controls, never at random for them; turn-based games keep whose turn it is in state and answer anyone else with ephemeral().',
-    '- Before posting, dry-run rules that depend on several people or steps (turns, stacking, win lines, a sample consult answer) with play_test, acting as different user_ids. After posting, compare the returned preview with each thing asked for (sizes, emoji, layout, titles) and fix any mismatch with edit and play_update before answering.',
+    '- use targeted play_test checks; if ineffective, leave gameplay verification to the user and report only what was checked.',
+    `- plans obey runtime limits: timers >= ${playLimits.minTimerMs} ms, ${playLimits.timers} pending, state <= ${playLimits.stateChars} characters.`,
     '- When play_start rejects the app or a dry run shows a mistake, fix the file with edit and call play_start again with the same file, instead of writing the whole app again.',
     // Generated content
     '- Apps built from supplied or downloaded data preserve its facts: prepare inline data or separate assets from the source, not from memory or invented substitutes, and check displayed values against it. If the source is missing a fact, show it as unknown.',

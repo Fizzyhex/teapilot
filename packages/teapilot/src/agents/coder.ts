@@ -4,11 +4,12 @@ import type { ExecutionPolicy } from '../execution/policy.js';
 import { gitBash, gitForWindows } from '../execution/shell.js';
 import type { Config } from '../config.js';
 import { sessionTools, toolGuidelines } from './tools.js';
+import type { RequestRecovery } from './recovery.js';
 
-export async function coder(config: Config, policy: ExecutionPolicy, vision = false): Promise<{ systemPrompt: string; tools: AgentTool[] }> {
+export async function coder(config: Config, policy: ExecutionPolicy, vision = false, recovery?: RequestRecovery): Promise<{ systemPrompt: string; tools: AgentTool[] }> {
   const root = policy.root;
   policy.requireRead();
-  const tools = sessionTools(policy, { shell: 'host', stateDir: config.stateDir, vision });
+  const tools = sessionTools(policy, { shell: 'host', stateDir: config.stateDir, vision, recovery });
   // Instruction files cross the same boundary as tool reads. An upstream context
   // loader must not read ancestor directories or host state behind that gate.
   const instructions: Array<{ path: string; content: string }> = [];

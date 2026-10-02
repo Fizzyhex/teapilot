@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import type { Action, Effect, Embed, Participants, User, View } from '@teapilot/discord-play';
 import { interactionLifetimeMs } from '../commands.js';
 import type { PictureSpec } from '../images.js';
@@ -56,6 +57,14 @@ export interface StartOptions {
   post?: (payload: MessagePayload) => Promise<HostedMessage>;
 }
 export interface TestAction { kind: Action['kind']; id: string; user?: User; values?: string[]; fields?: Record<string, string>; text?: string; error?: string }
+export interface TestExpectation { path: string; equals: unknown }
+export interface TestOptions { participants?: Participants; emojis?: Record<string, string>; steps?: boolean; state?: unknown; conversation?: string; expect?: TestExpectation[] }
+export interface TestReport {
+  text: string; sourceState: 'init' | 'live'; coverage: 'simulation' | 'assertions';
+  completed: number; skipped: number; unchanged: number;
+  errors: Array<{ step: number; message: string }>;
+  assertions: { passed: number; failed: number };
+}
 /** Time for apps, timers and expiry; a simulator swaps it to skip ahead. `after` returns a cancel function. */
 export interface Clock { now(): number; after(ms: number, run: () => void): () => void }
 export const systemClock: Clock = {
@@ -553,7 +562,12 @@ export class PlayRuntime {
   }
 
   /** A dry run with no message, persistence or timers, so the model can check an app before posting it. */
-  async test(source: Source, actions: TestAction[], owner: User, options: { participants?: Participants; emojis?: Record<string, string>; steps?: boolean; state?: unknown; conversation?: string } = {}): Promise<string> {
+  async test(source: Source, actions: TestAction[], owner: User, options: TestOptions = {}): Promise<string> {
+    return (await this.testDetailed(source, actions, owner, options)).text;
+  }
+
+  /** A completed simulation is not proof of correctness; assertions are explicit, final-state checks. */
+  async testDetailed(source: Source, actions: TestAction[], owner: User, options: TestOptions = {}): Promise<TestReport> {
     const engine = await this.build(source);
     const record: PlayRecord = { id: 'test', title: 'test', owner, channelId: '', conversation: options.conversation ?? '', participants: options.participants ?? 'everyone', source, state: null, seed: 1, view: {}, emojis: options.emojis ?? {}, timers: [], consults: [], status: 'running', log: [], createdAt: 0, updatedAt: 0 };
     const lines: string[] = [];
@@ -563,6 +577,8 @@ export class PlayRuntime {
     /** The view on screen before each action, and the actions that named a control it did not show. */
     let view: View | undefined;
     const skipped: string[] = [];
+    const errors: TestReport['errors'] = [];
+    let completed = 0, currentStep = 0;
     const show = (label: string, step: Advance) => {
       view = step.view;
       const now = JSON.stringify(step.state) + describe(step.view);
@@ -583,6 +599,7 @@ export class PlayRuntime {
         show('current state', { state: record.state, seed: shown.seed, view: normalizeView(shown.value) as View, payload: renderView(record.id, normalizeView(shown.value)), effects: [], timers: [] });
       }
       for (const [index, action] of actions.entries()) {
+        currentStep = index + 1;
         const label = `${index + 1}. ${action.kind} ${action.id}`;
         // Nobody can press a control that is not on screen; a wrong id would otherwise read as an app that ignores it.
         if ((action.kind === 'button' || action.kind === 'select') && !findControl(view, action.id)) {
@@ -590,13 +607,28 @@ export class PlayRuntime {
           skipped.push(`${label} (on screen: ${ids.join(', ') || 'no controls'})`);
           continue;
         }
-        try { show(label, await this.advance(engine, record, toAction(action, owner))); }
-        catch (error) { last = [`## ${label}`, `error: ${errorText(error)}`]; lines.push(...last); break; }
+        try { show(label, await this.advance(engine, record, toAction(action, owner))); completed++; }
+        catch (error) { errors.push({ step: currentStep, message: errorText(error) }); last = [`## ${label}`, `error: ${errorText(error)}`]; lines.push(...last); break; }
       }
+    } catch (error) {
+      errors.push({ step: currentStep, message: errorText(error) });
+      last = [`error: ${errorText(error)}`]; lines.push(...last);
     } finally { engine.dispose(); }
+    const assertions = { passed: 0, failed: 0 };
+    for (const expected of options.expect ?? []) {
+      let value: unknown = record.state;
+      for (const part of expected.path ? expected.path.split('.') : []) {
+        value = value !== null && typeof value === 'object' && Object.hasOwn(value, part) ? (value as Record<string, unknown>)[part] : undefined;
+      }
+      if (!errors.length && isDeepStrictEqual(value, expected.equals)) assertions.passed++;
+      else { assertions.failed++; lines.push(`assertion failed: state.${expected.path || '(root)'} did not equal the expected value.`); }
+    }
     const unchanged = idle ? `${idle} of ${actions.length} actions changed nothing` : '';
     const missing = skipped.length ? [`Skipped, no such control on screen at that point: ${skipped.join('; ')}.`] : [];
-    return clip((options.steps ? [...missing, ...lines, ...unchanged ? [`(${unchanged})`] : []] : [...missing, `(final of ${actions.length} actions${unchanged ? `; ${unchanged}` : ''}; set steps for each)`, ...last]).join('\n'), maxOutputChars / 8);
+    const summary = `start: ${options.state === undefined ? 'fresh init' : 'inherited live state'}; ${completed}/${actions.length} actions completed; ${skipped.length} skipped; ${errors.length} runtime errors. ${options.expect?.length ? `assertions: ${assertions.passed} passed, ${assertions.failed} failed.` : 'simulation only: no assertions supplied; this does not prove the requested rules work.'}`;
+    const assertionLines = lines.filter(line => line.startsWith('assertion failed:'));
+    return { text: clip([summary, ...(options.steps ? [...missing, ...lines, ...unchanged ? [`(${unchanged})`] : []] : [...missing, `(final of ${actions.length} actions${unchanged ? `; ${unchanged}` : ''}; set steps for each)`, ...last, ...assertionLines])].join('\n'), maxOutputChars / 8),
+      sourceState: options.state === undefined ? 'init' : 'live', coverage: options.expect?.length ? 'assertions' : 'simulation', completed, skipped: skipped.length, unchanged: idle, errors, assertions };
   }
 
   inspect(id: string, conversation: string): string {

@@ -13,6 +13,27 @@ const owner = { id: '111111111111111111', name: 'owner' };
 const friend = '222222222222222222';
 const stranger = '333333333333333333';
 
+it('reports fresh/live state, idle and skipped actions without claiming correctness', async () => {
+  const { runtime } = await setup();
+  const source = { kind: 'sandbox' as const, code: counter };
+  const simulation = await runtime.testDetailed(source, [{ kind: 'button', id: 'missing' }, { kind: 'button', id: 'add' }], owner);
+  expect(simulation).toMatchObject({ sourceState: 'init', coverage: 'simulation', completed: 1, skipped: 1, errors: [], assertions: { passed: 0, failed: 0 } });
+  expect(simulation.text).toContain('simulation only');
+  const live = await runtime.testDetailed(source, [{ kind: 'button', id: 'add' }], owner, { state: { count: 10, said: '' }, expect: [{ path: 'count', equals: 11 }] });
+  expect(live).toMatchObject({ sourceState: 'live', coverage: 'assertions', assertions: { passed: 1, failed: 0 } });
+  expect(live.text).toContain('inherited live state');
+});
+
+it('reports runtime errors and failed explicit assertions as failed checks', async () => {
+  const { runtime } = await setup();
+  const source = { kind: 'sandbox' as const, code: counter };
+  const broken = await runtime.testDetailed(source, [{ kind: 'button', id: 'boom' }, { kind: 'button', id: 'add' }], owner, { expect: [{ path: 'count', equals: 0 }] });
+  expect(broken).toMatchObject({ completed: 0, errors: [{ step: 1, message: expect.stringContaining('kaboom') }], assertions: { passed: 0, failed: 1 } });
+  const wrong = await runtime.testDetailed(source, [{ kind: 'button', id: 'add' }], owner, { expect: [{ path: 'count', equals: 99 }] });
+  expect(wrong).toMatchObject({ errors: [], assertions: { passed: 0, failed: 1 } });
+  expect(wrong.text).toContain('assertion failed: state.count');
+});
+
 /** A counter with every feature the runtime has to route: buttons, a modal, timers, consults, private notes and finishing. */
 const counter = `
 import { app, button, row, step, after, cancel, consult, ephemeral, finish, modal, field } from '@teapilot/discord-play';

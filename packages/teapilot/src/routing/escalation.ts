@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { basename } from 'node:path';
 import type { Policy } from '../config.js';
 import { savedLine } from '../workspace/scratch.js';
+import { RequestRecovery } from '../agents/recovery.js';
 
 /** overthinking: the reply ran out of tokens while still thinking, so a retry thinks less rather than more. */
 export type EscalationReason = 'test_failures' | 'tool_failures' | 'ineffective_calls' | 'unsupported' | 'uncertainty' | 'turn_limit' | 'provider_error' | 'overthinking';
@@ -29,29 +31,29 @@ export class Evidence {
   observations: Array<{ tool: string; args?: string; failed: boolean; detail: string; saved?: string }> = [];
   /** Distinct failed calls and the first line of each error, for a later turn to avoid repeating them. */
   failedCalls: Array<{ call: string; error: string }> = [];
-  private inspectionWarning = false;
   // Set once a search repeats after its warning: further searches are refused so the model answers instead.
   searchExhausted = false;
   // Set once page reads are spent or keep returning the same page: web_read is withdrawn like search.
   readsExhausted = false;
   // Calls refused before execution (unknown tool, invalid arguments, host refusal) never reach observe().
   // A streak of them first withdraws tools so the model answers, then stops the attempt.
-  refused = 0;
+  get refused(): number { return this.recovery.refused; }
+  set refused(value: number) { this.recovery.refused = value; }
   answerNow = false;
   /** Why tools are withdrawn when answerNow is set, for the notice that asks for the answer. */
   answerWhy = 'Those calls could not run';
-  private repeated = new Map<string, number>();
   /** `scratch` tells the agent's own scratchpad files apart: writing them changes nothing in the project. */
-  constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = [], private readonly scratch?: (path: string) => boolean) {
+  constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = [], private readonly scratch?: (path: string) => boolean,
+    private readonly recovery = new RequestRecovery()) {
     this.unresolvedChecks = new Set(unresolvedChecks);
   }
   refuse(): void {
     if (++this.refused < this.thresholds.repeatedToolCalls) return;
-    if (this.answerNow) this.reason = 'ineffective_calls';
-    else { this.answerNow = true; this.refused = 0; }
+    if (this.answerNow || this.recovery.refusalWarned) this.reason = 'ineffective_calls';
+    else { this.answerNow = true; this.refused = 0; this.recovery.refusalWarned = true; }
   }
-  observe(name: string, args: unknown, failed: boolean, result?: string, saved?: string): void {
-    this.warning = undefined; this.refused = 0;
+  observe(name: string, args: unknown, failed: boolean, result?: string, saved?: string, changed?: boolean): void {
+    this.warning = undefined; this.refused = 0; this.recovery.refusalWarned = false;
     const data = args as { path?: string; command?: string };
     const asked = args && typeof args === 'object' ? ['command', 'path', 'url', 'query'].map(key => (args as Record<string, unknown>)[key]).find(value => typeof value === 'string') as string | undefined : undefined;
     this.observations.push({ tool: name, ...(asked ? { args: asked.slice(0, 200) } : {}), failed, detail: (result ?? '').slice(0, 700), ...(saved ? { saved } : {}) });
@@ -70,9 +72,10 @@ export class Evidence {
       const first = error.split('\n').find(line => line.trim())?.trim().slice(0, 200) ?? '';
       if (!this.failedCalls.some(item => item.call === call && item.error === first)) this.failedCalls = [...this.failedCalls, { call, error: first }].slice(-8);
       // The same error from the same tool, whatever the arguments, is a loop; a project edit in between clears the count.
-      const key = createHash('sha256').update(JSON.stringify(['failed', name, error])).digest('hex');
-      const same = (this.repeated.get(key) ?? 0) + 1;
-      this.repeated.set(key, same);
+      const key = `${name}:${data.path ?? ''}:failed:${createHash('sha256').update(error).digest('hex')}`;
+      if (name === 'bash') this.recovery.commands.set(key, String(data.command ?? ''));
+      const same = (this.recovery.repeated.get(key) ?? 0) + 1;
+      this.recovery.repeated.set(key, same);
       if (same >= this.thresholds.repeatedToolCalls) this.reason = 'tool_failures';
     }
     if (name === 'bash' && /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(String((args as { command?: string }).command))) {
@@ -84,10 +87,18 @@ export class Evidence {
       this.testFailures = failed ? this.testFailures + 1 : 0;
       if (this.testFailures >= this.thresholds.consecutiveFailures) this.reason = 'test_failures';
     }
-    if (!failed && ['edit', 'write'].includes(name)) {
+    if (!failed && changed !== false && ['edit', 'write'].includes(name)) {
       // A changed file makes running the same command again a new experiment, a scratchpad script's too; only project files count as changes.
       if (!(typeof data.path === 'string' && this.scratch?.(data.path))) { this.changedFiles.add(String(data.path)); this.lastCheck = undefined; }
-      this.repeated.clear(); this.inspectionWarning = false; return;
+      // Only relevant progress unlocks retries. Notes and unrelated files do not reset inspection loops.
+      for (const key of this.recovery.repeated.keys()) {
+        if (key.startsWith(`read:${data.path}:`) || key.startsWith(`edit:${data.path}:`) || key.startsWith(`write:${data.path}:`)
+          || key.startsWith('bash:') && (!this.scratch?.(String(data.path)) || (this.recovery.commands.get(key) ?? '').includes(basename(String(data.path))))) {
+          this.recovery.repeated.delete(key); this.recovery.inspectionWarnings.delete(key);
+          this.recovery.commands.delete(key);
+        }
+      }
+      return;
     }
     const search = name === 'web_search' && !failed;
     const reading = name === 'web_read' && !failed;
@@ -100,12 +111,13 @@ export class Evidence {
     // discord.play tools read the app from the reply, so equal arguments often carry new code: only an equal result repeats.
     const play = name.startsWith('play_');
     const byResult = inspection || play;
-    const signature = createHash('sha256').update(JSON.stringify(byResult && result !== undefined ? [name, result] : [name, args])).digest('hex');
-    const count = (this.repeated.get(signature) ?? 0) + 1;
-    this.repeated.set(signature, count);
+    const signature = `${name}:${['read', 'edit', 'write'].includes(name) ? data.path ?? '' : ''}:${createHash('sha256').update(JSON.stringify(byResult && result !== undefined ? [name, result] : [name, args])).digest('hex')}`;
+    if (name === 'bash') this.recovery.commands.set(signature, String(data.command ?? ''));
+    const count = (this.recovery.repeated.get(signature) ?? 0) + 1;
+    this.recovery.repeated.set(signature, count);
     if (count >= this.thresholds.repeatedToolCalls) {
-      if (inspection && !this.inspectionWarning) {
-        this.inspectionWarning = true;
+      if (inspection && !this.recovery.inspectionWarnings.has(signature)) {
+        this.recovery.inspectionWarnings.add(signature);
         this.warning = search
           ? 'Repeated searches produced no new evidence. Stop searching now and answer from the results already found, clearly stating any gaps. Further searches will be refused.'
           : reading
@@ -115,7 +127,7 @@ export class Evidence {
       else if (reading) this.readsExhausted = true;
       // An app is shown to people as it goes, so a stuck attempt answers about what is live rather than starting over.
       else if (play && !this.answerNow) { this.answerNow = true; this.answerWhy = 'Those calls keep giving the same result'; }
-      else this.reason = 'ineffective_calls';
+      else this.reason ??= 'ineffective_calls';
     }
   }
 }

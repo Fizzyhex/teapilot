@@ -187,14 +187,14 @@ async function scripted(steps: { name: string; arguments: unknown }[], usage?: (
 }
 const write = (content: string) => ({ name: 'write', arguments: { path: 'index.html', content } });
 
-it('admits a written 13 KB indented page at 16k with 4k reserved output', async () => {
+it('admits a written 13 KB indented page at 32k with 4k reserved output', async () => {
   const page = indentedPage(13 * 1024);
   const { f, result, admissions } = await scripted([write(page)]);
   expect(result, JSON.stringify(result)).toMatchObject({ success: true, toolCalls: 1 });
   expect(await readFile(join(f.cwd, 'index.html'), 'utf8')).toBe(page);
   expect(admissions).toHaveLength(2);
   expect(admissions[1].payloadBytes).toBeGreaterThan(20000);
-  expect(admissions.every(e => e.method === 'conservative-lexical' && !e.rejection && e.reservedOutputTokens === 4096 && e.estimatedInputTokens + 4096 <= 16384)).toBe(true);
+  expect(admissions.every(e => e.method === 'conservative-lexical' && !e.rejection && e.contextTokens === 32768 && e.reservedOutputTokens === 4096 && e.estimatedInputTokens + 4096 <= 32768)).toBe(true);
 });
 
 it('admits a page in a tool call and result, and rejects clearly oversized code', () => {

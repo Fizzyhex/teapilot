@@ -70,13 +70,13 @@ it('direct routing honors permissions, risk, confirmations, and disabled capabil
   expect((await run()).success).toBe(false);
 });
 
-it('a failed fully local attempt never falls back to cloud', async () => {
+it('a failed local provider is not retried under different tier names and never falls back to cloud', async () => {
   const f = await local((_body, req, res) => {
     if (req.url?.endsWith('/models')) res.end('{}');
     else { res.writeHead(503); res.end('{}'); }
   });
   const result = await runHost(f.config, { prompt: 'Explain', workload: 'ask', cwd: f.cwd }, { approve: async () => false });
-  expect(result).toMatchObject({ success: false, attempts: 3, spentUsd: 0, status: 'escalation_unavailable' });
+  expect(result).toMatchObject({ success: false, attempts: 1, spentUsd: 0, status: 'escalation_unavailable' });
 });
 
 it('live diagnostics prove streaming, tool continuation and a real file edit', async () => {

@@ -12,6 +12,7 @@ import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { WorkspaceStore } from '../src/workspace/store.js';
 import { completion, fixture, jev, mockServer } from './helpers.js';
+import { RequestRecovery } from '../src/agents/recovery.js';
 
 const cleanups: Array<() => unknown> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -44,6 +45,44 @@ async function setup(handler: Parameters<typeof mockServer>[0]) {
 }
 const names = (body: any): string[] => (body.tools ?? []).map((tool: any) => tool.function.name);
 const last = (body: any) => JSON.stringify(body.messages.at(-1));
+
+it('keeps the testing budget across updates and attempts, then hands gameplay checks to the user', async () => {
+  const bodies: any[] = [];
+  const steps = [written(),
+    { tool: { name: 'play_start', arguments: { file: 'apps/counter.js', title: 'Counter' } } },
+    { tool: { name: 'play_test', arguments: { actions: [{ kind: 'button', id: 'add' }] } } },
+    { tool: { name: 'play_update', arguments: { title: 'Renamed' } } },
+    { tool: { name: 'play_test', arguments: { actions: [{ kind: 'button', id: 'add' }] } } },
+    { text: 'Gameplay needs your verification.' },
+    { tool: { name: 'play_test', arguments: { actions: [{ kind: 'button', id: 'add' }] } } },
+    { text: 'Please check Add increases the counter.' }];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const recovery = new RequestRecovery();
+  const input = { ...f, ...f.base, activePermissions: ['inference', 'discord.play'] as const, ...f.turn(), recovery };
+  const first = await runAttempt({ ...input, activePermissions: [...input.activePermissions], prompt: 'make and check a counter' });
+  expect(first.success).toBe(true);
+  const second = await runAttempt({ ...input, activePermissions: [...input.activePermissions], prompt: 'continue checking' });
+  expect(second.success).toBe(true);
+  expect(last(bodies[7])).toContain('automated play-testing is exhausted for this request');
+  expect(recovery.playTests).toBe(2);
+  const tests = first.steps!.filter(step => step.role === 'toolResult' && step.toolName === 'play_test');
+  expect(tests[0]).toMatchObject({ details: { test: { sourceState: 'live', coverage: 'simulation' } } });
+});
+
+it('does not publish unchanged code with a demonstrated test defect, even after testing is exhausted', async () => {
+  const bodies: any[] = [];
+  const steps = [written(),
+    { tool: { name: 'play_test', arguments: { file: 'apps/counter.js', actions: [{ kind: 'button', id: 'add' }], expect: [{ path: '', equals: 99 }] } } },
+    { tool: { name: 'play_test', arguments: { file: 'apps/counter.js', actions: [{ kind: 'button', id: 'add' }], expect: [{ path: '', equals: 99 }] } } },
+    { tool: { name: 'play_test', arguments: { file: 'apps/counter.js', actions: [] } } },
+    { tool: { name: 'play_start', arguments: { file: 'apps/counter.js', title: 'Counter' } } },
+    { text: 'The check failed; the app has not been posted.' }];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  const result = await runAttempt({ ...f, ...f.base, activePermissions: ['inference', 'discord.play'], ...f.turn(), prompt: 'check and post a counter' });
+  expect(result.success).toBe(true);
+  expect(f.posts).toEqual([]);
+  expect(last(bodies[5])).toContain('testing exhaustion is not permission to publish broken code');
+});
 
 it('gives the play tools and the file tools to a Discord conversation holding discord.play, and starts apps from files', async () => {
   const bodies: any[] = [];

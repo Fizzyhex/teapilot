@@ -12,6 +12,7 @@ import { cleanChildEnvironment, protectedPart, within, type ExecutionPolicy } fr
 import { IMAGE_MAX_BYTES, IMAGE_SIDE } from '../inference/context.js';
 import { gitBash } from '../execution/shell.js';
 import { ensureRipgrep } from '../workspace/toolchain.js';
+import { fingerprint, RequestRecovery, type ToolOutcome } from './recovery.js';
 
 // The small execution context cannot afford a whole-file read; default to a window the model can page through with offset.
 export const DEFAULT_READ_LINES = 200;
@@ -164,6 +165,41 @@ export interface SessionToolOptions {
   stateDir: string;
   /** Hears of each write or edit in the conversation's workspace, so its list of files keeps up. */
   changed?: () => Promise<unknown>;
+  recovery?: RequestRecovery;
+}
+
+/** Inside the policy boundary: inspect only a validated mutation target, never arbitrary model paths. */
+export function guardedMutation(tool: AgentTool, recovery: RequestRecovery): AgentTool {
+  if (!['edit', 'write'].includes(tool.name)) return tool;
+  return { ...tool, execute: async (id, params, ...rest) => {
+    const args = params as { path: string; content?: string; oldText?: string; newText?: string; edits?: Array<{ oldText: string; newText: string }> };
+    const outcome = (message: string, code: ToolOutcome['code'], failed = false) => ({ content: [{ type: 'text' as const, text: message }], details: { outcome: { code, changed: false, failed } } });
+    const edits = args.edits ?? (typeof args.oldText === 'string' && typeof args.newText === 'string' ? [{ oldText: args.oldText, newText: args.newText }] : []);
+    const lf = (text: string) => text.replace(/\r\n/g, '\n');
+    if (tool.name === 'edit' && edits.length && edits.every(edit => typeof edit.oldText === 'string' && typeof edit.newText === 'string' && lf(edit.oldText) === lf(edit.newText)))
+      return outcome('no change: oldText and newText are identical. nothing was written. do not repeat this replacement; provide different replacement text, or continue if no change is needed.', 'no_change');
+    const current = await readFile(args.path).catch(error => { if (error.code === 'ENOENT') return undefined; throw error; });
+    if (tool.name === 'write' && current !== undefined && typeof args.content === 'string' && current.equals(Buffer.from(args.content)))
+      return outcome('no change: the file already contains this exact content. nothing was written. do not repeat this write; continue or make a different change.', 'no_change');
+    const key = fingerprint([tool.name, args, current === undefined ? null : fingerprint(current.toString('base64'))]);
+    const previous = recovery.fileFailures.get(key);
+    if (previous) return outcome(`repeat refused: this exact edit already failed and the file is unchanged. ${previous} change the replacement or inspect the relevant lines; do not retry unchanged.`, 'repeat_refused', true);
+    try {
+      return await tool.execute(id, params, ...rest);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/No changes made .*identical content/i.test(message)) {
+        return outcome('no change: the replacement produced identical content. nothing was written. provide a replacement that changes the file; do not repeat this edit.', 'no_change');
+      }
+      if (/Could not find the exact text|Found \d+ occurrences|oldText.*unique|multiple matches/i.test(message)) {
+        const advice = /Could not find/.test(message) ? 'the replacement target was not found. read the current lines and use their exact text.'
+          : 'the replacement target is ambiguous. include enough surrounding text to make it unique.';
+        recovery.fileFailures.set(key, advice);
+        return outcome(advice, 'invalid_edit', true);
+      }
+      throw error;
+    }
+  } };
 }
 
 /**
@@ -175,11 +211,12 @@ export interface SessionToolOptions {
 export function sessionTools(policy: ExecutionPolicy, options: SessionToolOptions): AgentTool[] {
   const root = policy.root;
   const { changed } = options;
+  const recovery = options.recovery ?? new RequestRecovery();
   const noticed = (tool: AgentTool): AgentTool => changed && ['write', 'edit'].includes(tool.name) ? { ...tool, execute: async (id, params, ...rest) => {
     const result = await tool.execute(id, params, ...rest);
     // The policy has made the path absolute by now.
     const path = String((params as { path?: unknown }).path ?? '');
-    if (policy.owns(path) && !policy.inScratch(path)) await changed().catch(() => undefined);
+    if ((result.details as { outcome?: ToolOutcome })?.outcome?.changed !== false && policy.owns(path) && !policy.inScratch(path)) await changed().catch(() => undefined);
     return result;
   } } : tool;
   const shell = options.shell === 'host' ? hostShell(root) : options.shell;
@@ -190,7 +227,7 @@ export function sessionTools(policy: ExecutionPolicy, options: SessionToolOption
     createFindTool(root, { operations: findOperations(policy) }),
     guardedGrep(policy, options.stateDir),
     ...shell ? [shell] : [],
-  ].map(tool => noticed(policy.wrap(tool)));
+  ].map(tool => noticed(policy.wrap(guardedMutation(tool, recovery))));
 }
 
 /**
@@ -199,8 +236,9 @@ export function sessionTools(policy: ExecutionPolicy, options: SessionToolOption
  * is in the instructions, and edit's on exact and original-file matching are in the descriptions of its parameters.
  */
 export function toolGuidelines(): string {
-  return [createWriteToolDefinition('.'), createEditToolDefinition('.')].flatMap(definition => definition.promptGuidelines ?? [])
-    .filter(line => !/must match exactly|matched against the original file/.test(line)).map(line => `- ${line}`).join('\n');
+  return [...[createWriteToolDefinition('.'), createEditToolDefinition('.')].flatMap(definition => definition.promptGuidelines ?? [])
+    .filter(line => !/must match exactly|matched against the original file/.test(line)).map(line => `- ${line}`),
+    '- check tool/runtime limits before planning; never repeat unchanged no-op or failed calls.'].join('\n');
 }
 
 /**
