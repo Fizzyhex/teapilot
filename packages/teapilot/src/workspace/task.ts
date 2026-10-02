@@ -7,6 +7,7 @@ import { replaceFileSync } from '../replace.js';
 import { clip } from './sandbox.js';
 import { scratchLimits, type Kind, type Saved } from './scratch.js';
 import type { RequestRecovery } from '../agents/recovery.js';
+import { planReferenceSchema, type PlanReference } from './plan.js';
 
 /** Bounds apply to stored working state as well as the view: history belongs in session transcripts. */
 export const taskLimits = { steps: 8, claims: 16, artifacts: 128, receipts: 64, projectionChars: 6000, retrievalChars: scratchLimits.retrievalChars, stateBytes: 512 * 1024 };
@@ -26,6 +27,7 @@ const stateSchema = z.object({
   claims: z.array(claimSchema.extend({ actor: id })).max(taskLimits.claims),
   artifacts: z.array(artifactSchema).max(taskLimits.artifacts), receipts: z.array(receiptSchema).max(taskLimits.receipts), request: requestSchema.optional(), juniors: z.array(juniorSchema).max(30),
   juniorNames: z.array(id).max(128).default([]),
+  plan: planReferenceSchema.optional(),
   fileFailures: z.array(z.tuple([z.string().regex(/^[a-f0-9]{64}$/), z.string().max(1000)])).max(64),
 }).strict();
 export type TaskState = z.infer<typeof stateSchema>;
@@ -70,6 +72,9 @@ export class TaskStore {
   }
 
   snapshot(): TaskState { return structuredClone(this.state); }
+  setPlan(plan: PlanReference): void {
+    if (JSON.stringify(this.state.plan) !== JSON.stringify(plan)) this.change(next => { next.plan = plan; }, true);
+  }
   /** Explicit user amendments come through the host, never through task_state. */
   configure(update: { objective?: string; constraints?: string[] }): void {
     this.change(next => {
@@ -234,7 +239,7 @@ export class TaskStore {
     const artifacts = this.state.artifacts.filter(item => this.accessible(actor, item));
     let objective = clip(actor.objective ?? this.state.objective, 800);
     while (JSON.stringify(objective).length > 1000) objective = clip(objective, Math.floor(objective.length / 2));
-    const view = { task: this.state.id, revision: this.state.revision, objective, constraints: this.state.constraints, readOnly: this.state.request?.readOnly ?? false,
+    const view = { task: this.state.id, revision: this.state.revision, objective, constraints: this.state.constraints, plan: actor.name === instructor.name ? this.state.plan : undefined, readOnly: this.state.request?.readOnly ?? false,
       budget: this.remaining(),
       steps: this.state.steps.filter(item => item.actor === actor.name && item.status !== 'done').map(item => ({ ...item, goal: brief(item.goal, 160), acceptance: brief(item.acceptance, 160) })),
       claims: this.state.claims.filter(item => item.actor === actor.name).slice(-4).map(item => ({ ...item, text: brief(item.text, 240) })),

@@ -282,7 +282,7 @@ export async function runSession(options: {
     const stopped = history.at(-1)?.stopped;
     const notice = stopped ? stopNotice(stopped) : undefined;
     const result = await options.run({ ...options.request, ...extension?.request?.(), sessionId, taskId, cwd, prompt, correction, notice, tier, relatedTier, history,
-      readOnly: Boolean(proposal), taskObjective: proposal?.idea,
+      readOnly: Boolean(proposal), taskObjective: proposal?.idea, planAction: proposal?.kind === 'plan' ? 'new' : undefined,
       mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode), ...(workspace ? { workspace: workspace.context(cwd) } : {}),
       ...(options.workspace ? { scratch: options.workspace.scratch() } : {}) });
     spentUsd += result.spentUsd;
@@ -290,10 +290,10 @@ export async function runSession(options: {
     lastModel = result.models?.at(-1) ?? lastModel;
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;
     if (!result.success) exitCode = 2;
-    const user = (notice ? `${notice}\n\n` : '') + prompt + (correction ? `\nUser correction:\n${correction}` : '');
+    const user = (notice ? `${notice}\n\n` : '') + (proposal ? `/${proposal.kind} ${proposal.idea}` : prompt) + (correction ? `\nUser correction:\n${correction}` : '');
     // A failed turn's text is the host's diagnostic, and anything the host writes as the reply reads as the model's
     // own words, which it then copies. The turn keeps only what the model said; the next one opens with a notice.
-    const assistant = result.success ? result.text : result.reply ?? '';
+    const assistant = result.success ? result.historyText ?? result.text : result.reply ?? '';
     const turn: ConversationTurn = { user, assistant, taskId, ...(result.steps?.length ? { steps: result.steps } : {}),
       ...(result.success ? {} : { stopped: { status: result.status, ...(result.failedCalls?.length ? { failedCalls: result.failedCalls } : {}) } }) };
     // Only recent turns keep their steps: fitting history to a model replays older ones as text anyway.

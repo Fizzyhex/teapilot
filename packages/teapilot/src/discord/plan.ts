@@ -23,7 +23,7 @@ export interface PlanControls {
   press(action: PlanAction, user: PlanClick, request?: string): string | undefined;
 }
 
-export const approvePrompt = 'approved: save the plan to your workspace\'s scratchpad, then go ahead.';
+export const approvePrompt = 'approved: read the current saved plan, then go ahead.';
 export const juniorsPrompt =
 `you will be the orchestrator for carrying out this plan. make edits:
 1. if not present - add a high-level TODOs section.

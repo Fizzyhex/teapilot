@@ -24,6 +24,7 @@ import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from 
 import { WebController } from './web/controller.js';
 import { RequestRecovery } from './agents/recovery.js';
 import { TaskStore } from './workspace/task.js';
+import { PlanStore, compactPlan, planNotice, planText } from './workspace/plan.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
   /** A side question (/btw): it sees the conversation but only reads, and its turn is not kept. */
@@ -37,11 +38,14 @@ export interface HostRequest { prompt: string; cwd: string; workload?: Workload;
   /** Surface-provided objective without presentation templates; readOnly proposals cannot mutate project files or apps. */
   taskObjective?: string;
   readOnly?: boolean;
+  planAction?: 'new' | 'revise' | 'approve';
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
   taskId?: string;
+  /** A bounded replacement for a plan's full text in replayed conversation history. */
+  historyText?: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
   check?: 'passed' | 'failed'; models?: string[];
   tier?: Tier;
@@ -78,7 +82,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   if (!(await stat(cwd)).isDirectory()) throw new Error('Working directory is not a directory');
   const contextPolicy = new ExecutionPolicy(cwd, config, dependencies.approve);
   for (const context of request.context ?? []) if (context.path) await contextPolicy.path(context.path, false);
-  const currentPrompt = (request.notice ? `${request.notice}\n\n` : '') + prompt + (request.correction ? `\nUser correction:\n${request.correction}` : '');
+  const plans = request.scratch && !request.side && config.scratchpad?.enabled !== false ? new PlanStore(request.scratch, request.taskId ?? request.sessionId ?? 'conversation') : undefined;
+  let currentPlan = plans?.current();
+  if (currentPlan && request.planAction === 'approve') currentPlan = { ...currentPlan, status: 'approved' };
+  const currentPrompt = (currentPlan && request.planAction !== 'new' ? `${planNotice(currentPlan)}\n\n` : '') + (request.notice ? `${request.notice}\n\n` : '') + prompt + (request.correction ? `\nUser correction:\n${request.correction}` : '');
   // Leave room for system instructions and tool schemas while retaining whole,
   // recent turns. The inference boundary remains the final exact admission check.
   const currentLength = currentPrompt.length + (request.context?.length ? JSON.stringify(request.context).length + 64 : 0);
@@ -204,12 +211,22 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }), ...(casual && { casual }),
       ...(!success && previous?.text.trim() ? { reply: telemetry.redact(previous.text.trim().slice(0, 20_000)) } : {}),
       ...(!success && failedCalls.size ? { failedCalls: [...failedCalls.values()].slice(-8).map(({ call, error }) => ({ call: telemetry.redact(call), error: telemetry.redact(error) })) } : {}) };
+    const body = success && plans ? planText(result.text) : undefined;
+    if (body && plans) {
+      currentPlan = plans.save(body, request.planAction === 'new');
+      task?.setPlan(currentPlan);
+      await telemetry.event('plan_saved', { ...currentPlan });
+    }
+    const historyText = body && currentPlan ? compactPlan(result.text, currentPlan) : undefined;
+    // Research and reads remain in the transcript/evidence store; replaying them can reintroduce an old full plan.
+    const steps = historyText ? undefined : result.steps;
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
     task?.finish(status);
-    return { ...result, ...(task ? { taskId } : {}) };
+    return { ...result, steps, ...(historyText ? { historyText } : {}), ...(task ? { taskId } : {}) };
   };
   try {
     await budget.load();
+    if (request.planAction === 'approve') currentPlan = plans?.approve();
     await mkdir(config.stateDir, { recursive: true });
     await telemetry.event('request_start', { correction: Boolean(request.correction), web: Boolean(request.web) });
     if (request.authorization && !request.authorization.allows('inference')) return await finish(false, 'blocked', 'Inference access is not granted. Start a new session to restore it.');
@@ -353,7 +370,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         // Only an explicit task identity resumes state. Conversation identity alone never merges objectives.
         const scope = JSON.stringify([cwd, request.sessionId ?? request.workspace?.conversation ?? '', taskId]);
         task = TaskStore.open(config.stateDir, scope, request.taskObjective ?? prompt, request.scratch, text => telemetry.redact(text), request.constraints);
-        if (request.correction || request.constraints) task.configure({ ...(request.correction ? { objective: `${request.taskObjective ?? prompt}\nuser correction: ${request.correction}` } : {}), ...(request.constraints ? { constraints: request.constraints } : {}) });
+        if (currentPlan) task.setPlan(currentPlan);
+        if (request.planAction === 'new' || request.correction || request.constraints) task.configure({ ...(request.planAction === 'new' ? { objective: request.taskObjective ?? prompt } : {}), ...(request.correction ? { objective: `${request.taskObjective ?? prompt}\nuser correction: ${request.correction}` } : {}), ...(request.constraints ? { constraints: request.constraints } : {}) });
         const multiplier = config.policy.escalation.maxEscalations + 1;
         task.startRequest(requestId, { calls: config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * multiplier, timeoutMs: config.policy.limits.attemptTimeoutMs * multiplier, delegations: config.policy.limits.maxJuniorTurns, readOnly: request.readOnly });
         await telemetry.event('task_start', { task: task.snapshot().id, resumed: Boolean(request.taskId), revision: task.snapshot().revision });

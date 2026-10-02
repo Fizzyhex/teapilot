@@ -187,7 +187,7 @@ it('/plan asks for a read-only implementation plan as an ordinary turn that stay
   expect(planned).not.toContain('<rfc>');
   expect(run.mock.calls[0]![0]).toMatchObject({ readOnly: true, taskObjective: 'add a $& cache' });
   expect(run.mock.calls[0]![0].side).toBeUndefined();
-  expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'go ahead', readOnly: false, taskObjective: undefined, history: [{ user: planned, assistant: result.text }] });
+  expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'go ahead', readOnly: false, taskObjective: undefined, history: [{ user: '/plan add a $& cache', assistant: result.text }] });
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/plan <idea>/));
   // /planet is not /plan: it falls through to the command help.
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^Commands: .*\/plan <idea>, \/rfc <idea>/));
