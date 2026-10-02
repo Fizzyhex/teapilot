@@ -245,5 +245,5 @@ it('answers a request for already-active access without asking or re-sending ins
   expect(approvals.filter(kind => kind === 'capability').length).toBeLessThanOrEqual(1);
   const last = JSON.stringify(payloads.at(-1).messages);
   expect(last).toContain('Already active: repository.read');
-  expect(last.split('[host notice]').length - 1).toBe(1);
+  expect(last.split('[notice]').length - 1).toBe(1);
 });

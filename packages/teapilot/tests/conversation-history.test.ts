@@ -23,7 +23,7 @@ const turn = (index: number): ConversationTurn => ({ user: `request ${index}`, a
 
 it('keeps what the tools did, without reasoning or a call that never got its result', () => {
   const steps = turnSteps([
-    { role: 'user', content: '[host notice] tools changed', timestamp: 0 },
+    { role: 'user', content: '[notice] tools changed', timestamp: 0 },
     assistant([{ type: 'thinking', thinking: 'hmm' }, { type: 'toolCall', id: 'a', name: 'play_start', arguments: {} }]),
     result('a', 'Started app x.'),
     assistant([{ type: 'text', text: 'one more' }, { type: 'toolCall', id: 'b', name: 'play_update', arguments: {} }]),

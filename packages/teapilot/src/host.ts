@@ -471,7 +471,7 @@ function resumeNotice(config: Config, from: Tier, to: Tier, reason?: string): st
   const thinking = thinkingFor(config, to), reply = effectiveProfile(config, to).maxOutputTokens;
   const now = [thinking !== thinkingFor(config, from) ? `${thinking === 'off' ? 'no' : thinking} reasoning` : '', reply > effectiveProfile(config, from).maxOutputTokens ? `replies of up to ${reply} tokens` : ''].filter(Boolean).join(' and ');
   const advice = reason === 'turn_limit' ? 'Carry on from where it stopped.' : 'Work out what went wrong above before calling tools again, and do not repeat calls that already gave the same result.';
-  return `[host notice] That attempt stopped (${(reason ?? 'incomplete').replaceAll('_', ' ')}).${now ? ` It carries on here with ${now}.` : ''} ${advice}`;
+  return `[notice] That attempt stopped (${(reason ?? 'incomplete').replaceAll('_', ' ')}).${now ? ` It carries on here with ${now}.` : ''} ${advice}`;
 }
 
 /** Steps outlive the request (Discord keeps them on disk), so secrets are masked like the answer text; if masking breaks them they are dropped. */

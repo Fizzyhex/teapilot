@@ -81,7 +81,7 @@ function askPrompt(repository: boolean, webSearch: boolean, searchUnavailable: b
       ? '- `web.search` is available.'
       : searchUnavailable
       ? '- Web search already failed or ran dry earlier in this request and is off; do not request it again. Use what earlier attempts found and clearly flag anything unverified.'
-      : '- Live web access is not active. Do not imply that you searched or verified current facts, and never list sources or links you did not read - prefer `request_capabilities` & `web.search` before claiming facts.',
+      : '- Live web access is inactive. You can\'t search or verify current facts, and won\'t list sources or links you did not read - prefer `request_capabilities` & `web.search` before claiming facts.',
     reading
       ? '- `web_read` opens pages from search results or links you were given. For rules, specs or docs, read the one or two best results before answering - snippets are not enough - and cite the pages you read.'
       : undefined,

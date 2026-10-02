@@ -121,9 +121,9 @@ export const proposalPrompt = (kind: ProposalKind, idea: string): string => (kin
 /** What the model is told, as the host, about the request before this one stopping. */
 export function stopNotice(stopped: NonNullable<ConversationTurn['stopped']>): string {
   const calls = stopped.failedCalls?.length
-    ? ` These calls failed; change the approach instead of repeating them unchanged:\n${stopped.failedCalls.map(({ call, error }) => `- ${call}${error ? ` → ${error}` : ''}`).join('\n')}`
+    ? ` These calls failed; stop repeating now and change your approach:\n${stopped.failedCalls.map(({ call, error }) => `- ${call}${error ? ` → ${error}` : ''}`).join('\n')}`
     : '';
-  return `[host notice] The previous request stopped before finishing (${stopped.status.replaceAll('_', ' ')}).${calls}`;
+  return `[note] the previous request stopped before finishing (${stopped.status.replaceAll('_', ' ')}).${calls}`;
 }
 
 /** Optional behaviour layered on a session, such as teachat. Every hook is awaited in turn order. */
@@ -262,7 +262,7 @@ export async function runSession(options: {
         await clearConvo();
         if (options.workspace) await options.workspace.reset();
         else if (files) { await files.clearFiles(); files.name(''); }
-        options.log?.('Started a new task with an empty workspace. Session access and spending remain available.');
+        options.log?.('started a new task with an empty workspace');
       } else if (command === '/mode' && !extra && isMode(value)) {
         const approved = value !== 'code' || !grants || await grants.request(repositoryPermissions.filter(permission => grants.available().includes(permission)),
           'You requested Code mode.', options.approve ?? (async () => false), options.request.signal,

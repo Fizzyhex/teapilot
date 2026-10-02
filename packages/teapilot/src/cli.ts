@@ -15,7 +15,7 @@ import { SearchSetupError } from './search.js';
 import { TerminalPresentation } from './presentation.js';
 import { isMode, SessionGrants } from './execution/grants.js';
 
-const help = `teapilot — local and hosted personal agent
+const help = `teapilot!
 
 teapilot setup
 teapilot ask ["Explain dependency injection"]
@@ -33,15 +33,6 @@ teapilot serve --stdio
 
   Options: --cwd PATH  --config-dir PATH  --prompt TEXT  --web  --json  --once  --tier auto|fast|normal|reasoning|deep
          --correction TEXT  --no-motion  --verbose (setup progress)  --help
-A bare prompt (positional or --prompt) runs once; direct routing asks for a workload first.
-ask/chat/code share one session interface: the opening prompt is optional, /exit or /quit leaves, --once stops after one turn.
-Approvals require an interactive terminal. Local setup needs no API key.
-
-Unattended setup (existing local endpoint, new config only):
-teapilot setup --non-interactive --endpoint URL --model ID --context-tokens N
-Credentials are accepted through LOCAL_API_KEY, never a command-line flag.
-
-Exit codes: 0 completed/healthy; 1 configuration/runtime error; 2 incomplete/blocked.
 `;
 
 async function main(): Promise<void> {

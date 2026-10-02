@@ -63,7 +63,7 @@ it('opens the turn after a stopped request with a host notice of what failed', a
     .mockResolvedValueOnce(result).mockResolvedValueOnce(result);
   await runChat({ request: { prompt: 'Run the tests', cwd: '.' }, maxPromptChars: 2000, input, run });
   const notice = run.mock.calls[1]![0].notice;
-  expect(notice).toMatch(/^\[host notice\] The previous request stopped before finishing \(tool failures\)\./);
+  expect(notice).toMatch(/^\[notice\] The previous request stopped before finishing \(tool failures\)\./);
   expect(notice).toContain('- bash: npm tset → npm: unknown command "tset"');
   expect(run.mock.calls[1]![0].prompt).toBe('continue');
   expect(run.mock.calls[2]![0].notice).toBeUndefined();

@@ -73,7 +73,7 @@ async function teachatIdentities(config: Config): Promise<Array<{ username: stri
 }
 
 export function juniorPrompt(name: string, type: JuniorType): string {
-  return `\nJunior: your name is ${name}, working for your instructor, not the person. Your type is ${type}: ${juniorProfiles[type].task}. Its assignment is your scope; you do not see its conversation. Keep source-backed facts and provenance; missing facts stay unknown. Call report once: done with findings/changes and checks; needs_input with a question for your instructor; or stuck with partial findings and what prevented completion.`;
+  return `You are a sub-agent named ${name}. ${juniorProfiles[type].task}. Call \`report\` once: done with findings/changes and checks; \`needs_input\` with a question for your instructor; or \`stuck\` with partial findings and what prevented completion.`;
 }
 
 export function delegationPrompt(): string {
@@ -84,7 +84,7 @@ export function delegationPrompt(): string {
 export function reportTool(role: JuniorRole): AgentTool {
   return {
     name: 'report', label: 'Report',
-    description: 'Report back to your instructor and end this turn: done, needs_input (with a question), or stuck.',
+    description: 'Report back and end this turn: `done`, `needs_input` (with a question), or `stuck`.',
     parameters: Type.Object({
       status: Type.Union([Type.Literal('done'), Type.Literal('needs_input'), Type.Literal('stuck')]),
       summary: Type.String({ minLength: 1, maxLength: 4000, description: 'Findings or changes, source locations/checks, and anything unresolved. Large evidence stays in artifacts.' }),
@@ -101,9 +101,9 @@ export function reportTool(role: JuniorRole): AgentTool {
 }
 
 interface Junior { name: string; type?: JuniorType; assignment?: string; turns: ConversationTurn[]; scratch: string; turn: number }
-/** Default to part of the shared allowance, leaving the instructor room to review or continue another junior. */
-export function juniorAllowance(remaining: number, maximum: number, requested?: number): number {
-  return Math.max(0, Math.min(maximum, remaining - 4, requested ?? Math.max(2, Math.floor(remaining / 2))));
+/** Allocate the type's remaining allowance, leaving the instructor room to review or continue another junior. */
+export function juniorAllowance(remaining: number, maximum: number): number {
+  return Math.max(0, Math.min(maximum, remaining - 4));
 }
 /** The instructor's attempt clock, paused while a junior works on its own. */
 export interface Clock { pause(): void; resume(): void }
@@ -129,11 +129,10 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
       type: Type.Optional(Type.Union(juniorTypes.filter(type => !parent.readOnly || type !== 'implement').map(type => Type.Literal(type)), { description: 'Required for a new junior: research facts, plan steps, implement changes, or review defects. Fixed for its lifetime.' })),
       message: Type.Optional(Type.String({ minLength: 1, maxLength: 2000, description: 'Required unless dismissing: a self-contained goal, sources/files and completion check, or a follow-up within the existing assignment.' })),
       done: Type.Optional(Type.Boolean({ description: 'Dismiss this junior; message is ignored.' })),
-      evidence: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 4, description: 'Parent artifact IDs this junior may retrieve during this turn; omit to share none.' })),
-      max_calls: Type.Optional(Type.Integer({ minimum: 1, maximum: parent.config.policy.limits.maxToolCalls, description: 'Turn allocation including report, capped by type and shared request allowance; leaves instructor integration room.' })),
+      evidence: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 4, description: 'Any parent artifact IDs this junior needs for this turn.' })),
     }),
     execute: async (_id, args, signal) => {
-      const { junior: named, type: requestedType, message, done, evidence: references = [], max_calls: requested } = args as { junior?: string; type?: JuniorType; message?: string; done?: boolean; evidence?: string[]; max_calls?: number };
+      const { junior: named, type: requestedType, message, done, evidence: references = [] } = args as { junior?: string; type?: JuniorType; message?: string; done?: boolean; evidence?: string[] };
       if (done) {
         const existing = named && juniors.get(named);
         if (!existing) return { content: [{ type: 'text', text: `No junior named ${named ?? '(none given)'}.` }], details: {} };
@@ -148,7 +147,7 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
       if (existing?.type && requestedType && requestedType !== existing.type) return { content: [{ type: 'text', text: `this junior is ${existing.type}; start a new junior for ${requestedType} work.` }], details: {} };
       if (parent.readOnly && type === 'implement') return { content: [{ type: 'text', text: 'implementation is unavailable in a read-only request.' }], details: {} };
       const available = juniorProfiles[type].calls - (named ? allowance.usedBy(named) : 0);
-      const allocation = juniorAllowance(allowance.remaining().calls, Math.min(parent.config.policy.limits.maxToolCalls, available), requested);
+      const allocation = juniorAllowance(allowance.remaining().calls, Math.min(parent.config.policy.limits.maxToolCalls, available));
       if (allocation < 2) return { content: [{ type: 'text', text: 'junior allowance spent or too little room to work and report; finish from existing evidence.' }], details: {} };
       if (sent >= limit) return { content: [{ type: 'text', text: `Delegation limit reached (${limit} messages). Finish the work yourself.` }], details: {} };
       parent.task?.authorizeArtifacts(parent.taskActor ?? instructor, references);

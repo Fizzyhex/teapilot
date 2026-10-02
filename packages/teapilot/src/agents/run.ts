@@ -475,7 +475,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     prepareRequest: async ({ context: given }) => {
       let context = await shape(given);
       if (evidence.answerNow && context.tools?.some(tool => !input.junior || tool.name !== 'report')) {
-        context = { ...context, tools: input.junior ? context.tools.filter(tool => tool.name === 'report') : [], messages: [...context.messages, { role: 'user', content: `[host notice] ${evidence.answerWhy}; ${input.junior ? 'report partial findings and gaps now' : 'answer from existing evidence and state gaps'}.`, timestamp: Date.now() }] };
+        context = { ...context, tools: input.junior ? context.tools.filter(tool => tool.name === 'report') : [], messages: [...context.messages, { role: 'user', content: `[notice] ${evidence.answerWhy}; ${input.junior ? 'report partial findings and gaps now' : 'answer from existing evidence and state gaps'}.`, timestamp: Date.now() }] };
       }
       live = context.messages;
       nearCompaction = settings.enabled && estimate(context) >= 0.8 * (profile.contextTokens - settings.reserveTokens);
@@ -486,13 +486,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     },
     prepareNextTurnWithContext: async ({ context }) => {
       if (planRepair) {
-        const messages: Message[] = planRepairNotice ? [{ role: 'user', content: '[host notice] return the complete existing proposal inside <plan> tags; do not research or change its scope.', timestamp: Date.now() }] : [];
+        const messages: Message[] = planRepairNotice ? [{ role: 'user', content: '[notice] return the complete existing proposal inside <plan> tags; do not research or change its scope.', timestamp: Date.now() }] : [];
         planRepairNotice = false;
         return { context: { ...context, tools: [] }, messages };
       }
       if (claimNotice) {
         claimNotice = false;
-        return { messages: [{ role: 'user', content: '[host notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (edit the app\'s file, then play_update), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
+        return { messages: [{ role: 'user', content: '[notice] Your answer says the app changed, but no play_start or play_update succeeded in this turn, so nothing has changed. If people asked for a change, make it now (edit the app\'s file, then play_update), then answer. If nothing needed changing, answer again without claiming a change.', timestamp: Date.now() }] };
       }
       if (lostNotice) {
         lostNotice = false;
@@ -507,7 +507,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       }
       // A junior answers through report, so that one stays.
       if (evidence.answerNow && context.tools?.some(tool => !input.junior || tool.name !== 'report')) {
-        return { context: { ...context, tools: input.junior ? context.tools.filter(tool => tool.name === 'report') : [] }, messages: [{ role: 'user', content: `[host notice] ${evidence.answerWhy}, so tools are withdrawn for this attempt. ${input.junior ? 'Call report now with' : 'Answer now from'} what you already have, clearly stating any gaps.`, timestamp: Date.now() }] };
+        return { context: { ...context, tools: input.junior ? context.tools.filter(tool => tool.name === 'report') : [] }, messages: [{ role: 'user', content: `[notice] ${evidence.answerWhy}, so tools are withdrawn for this attempt. ${input.junior ? 'Call report now with' : 'Answer now from'} what you already have, clearly stating any gaps.`, timestamp: Date.now() }] };
       }
       // Once search or reading is exhausted, take the tool away: a refusal message alone does not stop a model retrying it.
       const withdrawn = (name: string) => (evidence.searchExhausted && name === 'web_search') || (evidence.readsExhausted && name === 'web_read') || (Boolean(delegation?.exhausted) && name === 'delegate_task');
@@ -515,7 +515,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (!toolsChanged) return context.tools?.some(tool => withdrawn(tool.name)) ? { context: { ...context, tools: withoutSearch(context.tools) } } : undefined;
       toolsChanged = false;
       const next = await compose();
-      return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[host notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
+      return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
     },
     beforeToolCall: async ({ toolCall }) => {
       sourceSaved = undefined;
@@ -599,7 +599,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       const callsLeft = Math.min(config.policy.limits.maxToolCalls - evidence.toolCalls, allowance.remaining().calls);
       if (input.junior && !limitWarned && callsLeft <= juniorReportMargin) {
         limitWarned = true;
-        lastCalls = `[host notice] ${Math.max(0, callsLeft)} tool calls left: call report now (stuck if unfinished), with what you found and the files it is saved in.`;
+        lastCalls = `[notice] ${Math.max(0, callsLeft)} tool calls left: call report now (stuck if unfinished), with what you found and the files it is saved in.`;
       }
       const sourceNote = origin === 'saved-output' ? '[source] saved execution output; this inspection does not establish the current workspace file or revision.'
         : origin === 'transcript' ? '[source] execution history, not current workspace source. task_state can list bounded receipts without replaying this transcript.' : undefined;
@@ -755,7 +755,7 @@ export function lostCallNotice(termination?: InferenceState['termination']): str
     : termination?.toolData
     ? 'the provider sent tool-call data, but no usable call remained. nothing ran. retry once with a simpler, valid call; do not guess or execute partial arguments.'
     : 'the provider announced a tool call but sent no usable call. nothing ran. the cause is unknown, not necessarily call size. change approach with one simpler call.';
-  return `[host notice] ${cause}`;
+  return `[notice] ${cause}`;
 }
 
 /** Whether an answer says something was changed, such as "done", "swapped" or "the snake now has a face". */

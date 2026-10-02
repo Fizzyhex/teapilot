@@ -297,7 +297,7 @@ async function attempt(handler: Parameters<typeof mockServer>[0]) {
   return { ...f, telemetry, budget };
 }
 const run = (f: Awaited<ReturnType<typeof attempt>>) => runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'complete the task', task: f.task });
-const isJunior = (body: any) => JSON.stringify(body.messages[0]).includes('Junior: your name is');
+const isJunior = (body: any) => body.tools?.some((tool: any) => tool.function.name === 'report');
 
 it('replaces the working projection every inference and lets a model update at the displayed revision', async () => {
   const bodies: any[] = [];

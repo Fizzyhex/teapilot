@@ -3,7 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { completion, events, fixture, mockServer } from './helpers.js';
 import { runAttempt } from '../src/agents/run.js';
-import { delegateTool, juniorAllowance, juniorName } from '../src/agents/delegate.js';
+import { delegateTool, juniorAllowance, juniorName, juniorTypes } from '../src/agents/delegate.js';
 import { RequestAllowance } from '../src/agents/allowance.js';
 import { TaskStore } from '../src/workspace/task.js';
 import { SpendGovernor } from '../src/inference/budget.js';
@@ -11,11 +11,15 @@ import { Telemetry } from '../src/telemetry/outcome.js';
 import { describeTool } from '../src/presentation.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
-it('allocates part of the request to a junior, including reporting, rather than leaving only one review call by default', () => {
-  expect(juniorAllowance(38, 40)).toBe(19);
+it('allocates the type allowance while reserving four shared calls for the instructor', () => {
+  expect(juniorAllowance(38, 40)).toBe(34);
+  expect(juniorAllowance(38, 20)).toBe(20);
   expect(juniorAllowance(3, 40)).toBe(0);
-  expect(juniorAllowance(38, 40, 6)).toBe(6);
-  expect(juniorAllowance(10, 40, 40)).toBe(6);
+  expect(juniorAllowance(4, 40)).toBe(0);
+  expect(juniorAllowance(5, 40)).toBe(1);
+  expect(juniorAllowance(6, 40)).toBe(2);
+  expect(juniorAllowance(10, 40)).toBe(6);
+  expect(juniorAllowance(38, 0)).toBe(0);
 });
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function setup(handler: Parameters<typeof mockServer>[0]) {
@@ -27,7 +31,7 @@ async function setup(handler: Parameters<typeof mockServer>[0]) {
   const budget = new SpendGovernor(join(f.config.stateDir, 'spend.jsonl'), 'delegate-test', f.config.policy.budget);
   return { ...f, budget, telemetry, scratch: join(f.cwd, '.scratch') };
 }
-const junior = (body: any) => JSON.stringify(body.messages?.[0] ?? '').includes('Junior: your name is');
+const junior = (body: any) => names(body).includes('report');
 const names = (body: any): string[] => (body.tools ?? []).map((tool: any) => tool.function.name);
 const run = (f: Awaited<ReturnType<typeof setup>>, extra: Partial<Parameters<typeof runAttempt>[0]> = {}) =>
   runAttempt({ ...f, tier: 'normal', workload: 'coder', web: false, approve: async () => true, prompt: 'Build the thing', ...extra });
@@ -222,7 +226,8 @@ it('tells a junior to report before the tool limit stops it', async () => {
   const delegated = (await events(f.config)).find(event => event.type === 'delegate');
   expect(delegated).toMatchObject({ status: 'stuck' });
   expect(delegated?.stopped).toBeUndefined();
-  expect(juniorCalls).toBe(2);
+  expect(delegated?.allocation).toBe(5);
+  expect(juniorCalls).toBe(3);
 });
 
 it('requires a type, rejects widening it, and keeps its cumulative allowance across follow-ups', async () => {
@@ -232,15 +237,16 @@ it('requires a type, rejects widening it, and keeps its cumulative allowance acr
   const parent = { ...f, tier: 'normal' as const, workload: 'coder' as const, web: false, prompt: 'parent', approve: async () => true };
   const delegated = delegateTool(parent, f.scratch, f.cwd, { pause() {}, resume() {} }, async child => {
     children.push(child);
-    for (let index = 0; index < child.config.policy.limits.maxToolCalls; index++) allowance.consumeTool(child.junior!.name);
+    for (let index = 0; index < Math.min(4, child.config.policy.limits.maxToolCalls); index++) allowance.consumeTool(child.junior!.name);
     child.junior!.onReport({ status: 'done', summary: 'source-backed findings' });
-    return { success: true, text: '', turns: 1, toolCalls: child.config.policy.limits.maxToolCalls };
+    return { success: true, text: '', turns: 1, toolCalls: Math.min(4, child.config.policy.limits.maxToolCalls) };
   }, allowance);
   const text = (result: any) => result.content[0].text;
   expect(text(await delegated.tool.execute('a', { message: 'inspect sources' }))).toContain('choose a junior type');
-  await delegated.tool.execute('b', { type: 'research', message: 'inspect sources', max_calls: 4 });
-  await delegated.tool.execute('c', { junior: 'junior-alfa', message: 'clarify findings', max_calls: 40 });
-  expect(children.map(child => child.config.policy.limits.maxToolCalls)).toEqual([4, 4]);
+  expect(delegated.tool.parameters).not.toHaveProperty('properties.max_calls');
+  await delegated.tool.execute('b', { type: 'research', message: 'inspect sources' });
+  await delegated.tool.execute('c', { junior: 'junior-alfa', message: 'clarify findings' });
+  expect(children.map(child => child.config.policy.limits.maxToolCalls)).toEqual([8, 4]);
   expect(children.every(child => child.readOnly && child.junior.type === 'research')).toBe(true);
   expect(text(await delegated.tool.execute('d', { junior: 'junior-alfa', type: 'implement', message: 'make changes' }))).toContain('start a new junior');
   expect(text(await delegated.tool.execute('e', { junior: 'junior-alfa', message: 'more research' }))).toContain('allowance spent');
@@ -262,7 +268,31 @@ it('restores typed scope, rejects implementation in plan mode, and requires clas
   const text = (result: any) => result.content[0].text;
   expect(text(await delegated.tool.execute('a', { junior: 'junior-old', message: 'continue' }))).toContain('choose a junior type');
   expect(text(await delegated.tool.execute('b', { type: 'implement', message: 'edit app' }))).toContain('unavailable in a read-only');
-  await delegated.tool.execute('c', { junior: 'junior-reader', message: 'clarify opening', max_calls: 40 });
+  await delegated.tool.execute('c', { junior: 'junior-reader', message: 'clarify opening' });
   expect(children[0].junior).toMatchObject({ type: 'research', assignment: 'door mechanics only' });
   expect(children[0].config.policy.limits.maxToolCalls).toBe(7);
+});
+
+it.each(juniorTypes)('allocates the %s type ceiling, capped by policy and shared request room', async type => {
+  const f = await setup((_body, _req, res) => completion(res, { text: 'unused' }));
+  const children: any[] = [];
+  const parent = { ...f, tier: 'normal' as const, workload: 'coder' as const, web: false, prompt: 'parent', approve: async () => true };
+  const ceiling = { research: 8, plan: 6, implement: 20, review: 8 }[type];
+  for (const [policy, shared, expected] of [[40, 40, ceiling], [5, 40, 5], [40, 9, 5], [40, 5, undefined], [40, 6, 2]] as const) {
+    f.config.policy.limits.maxToolCalls = policy;
+    const allowance = new RequestAllowance({ calls: shared, modelCalls: 50, timeoutMs: 10_000, delegations: 6 });
+    const delegated = delegateTool(parent, f.scratch, f.cwd, { pause() {}, resume() {} }, async child => {
+      children.push(child);
+      return { success: true, text: 'findings', turns: 1, toolCalls: 0 };
+    }, allowance);
+    children.length = 0;
+    const result = await delegated.tool.execute('a', { type, message: 'complete the assigned task' });
+    if (expected === undefined) {
+      expect(children).toHaveLength(0);
+      expect(result.content[0]).toMatchObject({ text: expect.stringContaining('too little room') });
+    } else {
+      expect(children).toHaveLength(1);
+      expect(children[0].config.policy.limits.maxToolCalls).toBe(expected);
+    }
+  }
 });

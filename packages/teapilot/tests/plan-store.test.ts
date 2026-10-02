@@ -91,7 +91,7 @@ it('persists host output before returning, survives forced compaction, and revis
   expect(await readFile(join(f.scratch, plan.path), 'utf8')).toContain('exactly 2 leaves');
   expect(first.historyText).toContain(plan.path);
   expect(first.historyText).not.toContain('exactly 2 leaves');
-  expect(first.historyText).not.toContain('[host notice]');
+  expect(first.historyText).not.toContain('[notice]');
   expect(first.historyText).not.toContain('read it before');
   expect(first.text).toContain('<plan>');
   expect(first.steps).toBeUndefined();
@@ -126,11 +126,11 @@ it('keeps current plan guidance in the request, not replayed assistant messages'
   const messages = bodies.at(-1).messages;
   const assistants = messages.filter((message: any) => message.role === 'assistant');
   expect(JSON.stringify(assistants)).toContain('[saved plan:');
-  expect(JSON.stringify(assistants)).not.toContain('[host notice]');
+  expect(JSON.stringify(assistants)).not.toContain('[notice]');
   expect(JSON.stringify(assistants)).not.toContain('return complete revisions');
   const current = JSON.stringify(messages.at(-1));
   expect(messages.at(-1).role).toBe('user');
-  expect(current).toContain('[host notice] current plan:');
+  expect(current).toContain('[notice] current plan:');
   expect(current).toContain('read it before revising or executing');
   expect(current).toContain('assign juniors');
   expect(f.plans.current()?.revision).toBe(1);
