@@ -68,6 +68,8 @@ AccessStore.at(spec.state, settings.allowedUserIds, config.policy.permissions).a
 const store = new PlayStore(join(spec.state, 'discord-play'));
 // Workspace commands use the tools `teapilot doctor` installed for the profile (pandoc, Pillow); a copy, since they are read-only.
 if (existsSync(toolsFolder(config.stateDir))) cpSync(toolsFolder(config.stateDir), toolsFolder(spec.state), { recursive: true });
+// Inference, telemetry, task snapshots, spending and run.lock must be isolated too, not just Discord stores.
+config.stateDir = spec.state;
 
 let fresh = '';
 const waiters = new Set<() => void>();

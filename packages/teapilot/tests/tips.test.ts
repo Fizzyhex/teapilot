@@ -26,6 +26,13 @@ it('nudges toward git only in a workspace that is a repository', () => {
   expect(pick({ tool: 'delegate_task', repository: true })).toBe('reviewJuniors');
 });
 
+it('uses bounded task state for pressure and never asks a read-only model to write notes', () => {
+  const state = pickTip(call({ tool: 'read', pressure: true, tools: new Set(['read', 'task_state']) }), () => false);
+  expect(state?.content).toContain('task_state');
+  expect(state?.content).not.toContain('markdown');
+  expect(pickTip(call({ tool: 'read', pressure: true, tools: new Set(['read']) }), () => false)).toBeUndefined();
+});
+
 it('gives nothing for failed calls, reads, or scratchpad notes', () => {
   expect(pick({ path: 'main.py', succeeded: false })).toBeUndefined();
   expect(pick({ tool: 'read', path: 'main.py' })).toBeUndefined();

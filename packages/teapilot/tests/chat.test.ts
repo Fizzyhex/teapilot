@@ -53,7 +53,7 @@ it('keeps host text out of the reply of a failed turn, keeping only what the mod
     .mockResolvedValueOnce({ ...result, success: false, status: 'timeout', text: 'Incomplete: timeout.', reply: 'The render is still running.' })
     .mockResolvedValueOnce(result);
   await runChat({ request: { prompt: 'Build it', cwd: '.' }, maxPromptChars: 2000, input, run });
-  expect(run.mock.calls[1]![0].history).toEqual([{ user: 'Build it', assistant: '', stopped: { status: 'context_limit' } }]);
+  expect(run.mock.calls[1]![0].history).toEqual([{ user: 'Build it', assistant: '', taskId: expect.any(String), stopped: { status: 'context_limit' } }]);
   expect(run.mock.calls[2]![0].history[1].assistant).toBe('The render is still running.');
 });
 
@@ -185,8 +185,9 @@ it('/plan asks for a read-only implementation plan as an ordinary turn that stay
   expect(planned).toContain('<plan>');
   expect(planned).toContain('</plan>');
   expect(planned).not.toContain('<rfc>');
+  expect(run.mock.calls[0]![0]).toMatchObject({ readOnly: true, taskObjective: 'add a $& cache' });
   expect(run.mock.calls[0]![0].side).toBeUndefined();
-  expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'go ahead', history: [{ user: planned, assistant: result.text }] });
+  expect(run.mock.calls[1]![0]).toMatchObject({ prompt: 'go ahead', readOnly: false, taskObjective: undefined, history: [{ user: planned, assistant: result.text }] });
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\/plan <idea>/));
   // /planet is not /plan: it falls through to the command help.
   expect(log).toHaveBeenCalledWith(expect.stringMatching(/^Commands: .*\/plan <idea>, \/rfc <idea>/));

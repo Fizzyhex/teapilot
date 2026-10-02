@@ -3,12 +3,18 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { completion, events, fixture, mockServer } from './helpers.js';
 import { runAttempt } from '../src/agents/run.js';
-import { juniorName } from '../src/agents/delegate.js';
+import { juniorAllowance, juniorName } from '../src/agents/delegate.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { describeTool } from '../src/presentation.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
+it('allocates part of the request to a junior, including reporting, rather than leaving only one review call by default', () => {
+  expect(juniorAllowance(38, 40)).toBe(19);
+  expect(juniorAllowance(3, 40)).toBe(2);
+  expect(juniorAllowance(38, 40, 6)).toBe(6);
+  expect(juniorAllowance(10, 40, 40)).toBe(9);
+});
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function setup(handler: Parameters<typeof mockServer>[0]) {
   const f = await fixture(); cleanups.push(f.cleanup);

@@ -37,7 +37,8 @@ export const TIPS: readonly Tip[] = [
     when: call => changes(call) && extension(call.path) === 'py' && /^\s*(import|from)\s+discord\b/m.test(call.content ?? '')
       && (call.tools.has('request_capabilities') || [...call.tools].some(tool => tool.startsWith('play_'))),
   },
-  { name: 'takeNotes', content: 'your context window is nearly full: maintain a brief `markdown` document for yourself to keep track of tasks, blockers and further work.', when: call => call.pressure },
+  { name: 'takeNotes', content: 'context is nearly full: keep only unresolved steps and source-backed findings in `task_state`; retrieve older evidence by ID rather than replaying transcripts.', when: call => call.pressure && call.tools.has('task_state') },
+  { name: 'takeNotes', content: 'your context window is nearly full: maintain a brief `markdown` document for yourself to keep track of tasks, blockers and further work.', when: call => call.pressure && !call.tools.has('task_state') && call.tools.has('write') },
   { name: 'pythonPref', content: 'the user prefers creative, minimalist decision making that uses existing dependencies', when: call => writes(call) && extension(call.path) === 'py' },
   {
     name: 'delegateForOverwhelm', content: 'if you\'re handling multiple workloads, use `delegate_task` to split workloads by feature/bug/fix. ask the user if you\'re stuck.',

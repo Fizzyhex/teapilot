@@ -187,6 +187,21 @@ it('repeated searches warn, then refuse further searches instead of aborting', (
   expect(evidence.searchExhausted).toBe(true);
 });
 
+it('does not treat fresh saved-output pointers as new inspection evidence', () => {
+  const evidence = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
+  for (let index = 1; index <= 3; index++) evidence.observe('read', { path: 'source.txt' }, false, `same body\nFull output saved to .scratch/read-${index}.txt [artifact a-${index}]`);
+  expect(evidence.reason).toBe('ineffective_calls');
+});
+
+it('uses full-result identity to distinguish changes hidden by an identical preview', () => {
+  const evidence = new Evidence({ repeatedToolCalls: 2, consecutiveFailures: 2, maxEscalations: 2 });
+  evidence.observe('read', { path: 'source.txt' }, false, 'same preview', undefined, undefined, 'first-content-hash');
+  evidence.observe('read', { path: 'source.txt' }, false, 'same preview', undefined, undefined, 'different-content-hash');
+  expect(evidence.warning).toBeUndefined(); expect(evidence.reason).toBeUndefined();
+  evidence.observe('read', { path: 'source.txt' }, false, 'same preview', undefined, undefined, 'different-content-hash');
+  expect(evidence.warning).toContain('Change approach');
+});
+
 it('refuses further searches at once when every search engine is unavailable', () => {
   const evidence = new Evidence({ repeatedToolCalls: 3, consecutiveFailures: 2, maxEscalations: 2 });
   evidence.observe('web_search', { query: 'a' }, false, 'No results: the search engines were unavailable (brave: Suspended). Retrying will not help.');

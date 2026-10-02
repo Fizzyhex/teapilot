@@ -21,7 +21,7 @@ export function scratchPrompt(scratch: Scratch, inWorkspace: boolean): string {
 }
 
 /** Tools whose results are bounded by their own source, kept by their own tool, or are the scratchpad being read. */
-const ownBounds = new Set(['read', 'web_read', 'file_send', 'request_escalation', 'request_capabilities']);
+const ownBounds = new Set(['web_read', 'file_send', 'request_escalation', 'request_capabilities', 'task_state', 'artifact_read']);
 const shells = new Set(['bash']);
 
 /** pi's shell tools keep output they cut in a temp file of their own, and name it at the end of the result. */
@@ -50,6 +50,8 @@ async function head(path: string, lines = 20, bytes = 2000): Promise<string> {
  */
 export async function captureResult(scratch: Scratch | undefined, policy: ExecutionPolicy, tool: string, args: unknown, text: string, details: unknown): Promise<{ text: string; saved?: Saved } | undefined> {
   if (ownBounds.has(tool) || tool.startsWith('play_') || tool.startsWith('access_') || tool.startsWith('teachat_')) return undefined;
+  // Retrieval does not recursively generate artifacts. pi bounds read by bytes/lines, not model context.
+  if (tool === 'read' && policy.inScratch(String((args as { path?: unknown }).path ?? ''))) return text.length <= scratchLimits.retrievalChars ? undefined : { text: clip(text, scratchLimits.retrievalChars) };
   // Without a scratchpad a long result is still bounded; what it leaves out is gone. pi's shells keep up to 50 KB,
   // too much for a small context, so theirs is cut to the same size.
   if (!scratch) return text.length <= scratchLimits.previewChars ? undefined : { text: clip(text, scratchLimits.previewChars) };
@@ -64,7 +66,7 @@ export async function captureResult(scratch: Scratch | undefined, policy: Execut
         const saved = await scratch.save('logs', tool, Scratch.stream(temporary));
         await rm(temporary, { force: true }).catch(() => undefined);
         const start = await head(saved.path).catch(() => '');
-        const shown = clip(text.replace(trailer, '.]'), scratchLimits.previewChars);
+        const shown = clip(text.replace(trailer, '.]'), Math.max(200, scratchLimits.previewChars - start.length));
         return { text: `${start ? `First lines:\n${start}\n[…]\n` : ''}${shown}\n${savedNote(saved)}`, saved };
       } catch (error) {
         return { text: `${clip(text, scratchLimits.previewChars)}\n${notKept(error)}` };

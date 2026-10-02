@@ -305,7 +305,7 @@ export class Conversation {
       send: transport.sendFiles && (async (text, sent) => { await transport.sendFiles!(this.options.redact(text), sent); }) };
     // A side question (/btw) only reads: it keeps no scratchpad, the session's transcript, and starts no apps.
     const side = base.side === true;
-    const request: HostRequest = { ...base, access: admin, workspace, ...(files && !side ? { scratch: files.scratch(conversation) } : {}),
+    const request: HostRequest = { ...base, sessionId: this.options.key, access: admin, workspace, ...(files && !side ? { scratch: files.scratch(conversation) } : {}),
       play: play && !side ? { runtime: play.runtime, channelId: play.channelId, post: play.post, conversation, owner: this.speaker ? { id: this.speaker, name: this.speakerName } : undefined, files: workspace } : undefined };
     const refining = this.refining; this.refining = false;
     const turn = this.turn = new AbortController();

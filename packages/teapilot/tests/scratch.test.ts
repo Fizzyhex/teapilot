@@ -1,4 +1,5 @@
 import { afterEach, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { access, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,6 +40,8 @@ it('keeps output whole and redacted, even with a secret split across chunks, and
   const first = await pad.save('logs', 'bash', chunks());
   expect(await readFile(first.path, 'utf8')).toBe('token [REDACTED] end\nline two\n');
   expect(first).toMatchObject({ lines: 2, complete: true });
+  expect(first.id).toMatch(/^a-/);
+  expect(first.sha256).toBe(createHash('sha256').update('token [REDACTED] end\nline two\n').digest('hex'));
   const second = await pad.save('logs', 'bash', 'again');
   expect(first.path).toMatch(/bash-1\.log$/);
   expect(second.path).toMatch(/bash-2\.log$/);
@@ -76,13 +79,28 @@ it('shows long results as their start and end, with where the rest is; short one
   expect(kept.text.length).toBeLessThan(scratchLimits.previewChars + 500);
   expect(kept.text).not.toContain('MARKER-7f2a');
   expect(kept.text).toMatch(/Full output saved to .*run_import_diagnostic-1\.txt \(10000 lines\)/);
+  expect(kept.text).not.toContain('[artifact ');
   expect(await readFile(kept.saved!.path, 'utf8')).toBe(text);
   // A scratchpad that cannot be written: the outcome stands, and nothing claims a copy exists.
   await writeFile(join(cwd, 'blocked'), 'a file, not a folder');
   const failed = (await keepResult(new Scratch(join(cwd, 'blocked')), 'tool', text))!;
   expect(failed.saved).toBeUndefined();
   expect(failed.text).toMatch(/Output beyond this excerpt was not kept/);
-  expect(await keepResult(new Scratch(join(cwd, 'blocked')), 'tool', 'y'.repeat(3000))).toBeUndefined();
+  expect((await keepResult(new Scratch(join(cwd, 'blocked')), 'tool', 'y'.repeat(3000)))?.text).toContain('Output beyond this excerpt was not kept');
+});
+
+it('keeps UTF-8 valid across streamed chunks and byte-limit boundaries', async () => {
+  const { scratch } = await setup();
+  const pad = new Scratch(scratch);
+  const source = Buffer.from('a😀b');
+  async function* chunks() { yield source.subarray(0, 3); yield source.subarray(3); }
+  const whole = await pad.save('logs', 'unicode', chunks());
+  expect(await readFile(whole.path, 'utf8')).toBe('a😀b');
+  const limit = scratchLimits.fileBytes;
+  scratchLimits.fileBytes = 3; cleanups.push(async () => { scratchLimits.fileBytes = limit; });
+  const partial = await pad.save('logs', 'unicode', 'a😀b');
+  expect(await readFile(partial.path, 'utf8')).toBe('a');
+  expect(partial.complete).toBe(false);
 });
 
 it('moves the full output pi kept in its own temp file into the scratchpad, and ignores paths command output names', async () => {
@@ -122,6 +140,18 @@ it('cuts pi\'s shell output, up to 50 KB, to what a small context can take', asy
   expect(await readFile(kept.saved!.path, 'utf8')).toContain('MARKER-7f2a');
   // Without a scratchpad the rest is gone, but the result is just as bounded.
   expect((await captureResult(undefined, policy, 'bash', { command: 'make' }, shown, undefined))!.text.length).toBeLessThan(scratchLimits.previewChars + 100);
+});
+
+it('offloads large repository read windows but does not recursively archive scratch retrieval', async () => {
+  const { scratch, config, cwd } = await setup();
+  const pad = new Scratch(scratch), policy = new ExecutionPolicy(cwd, config, async () => true, undefined, scratch);
+  const text = log();
+  const kept = (await captureResult(pad, policy, 'read', { path: join(cwd, 'source.txt'), offset: 1, limit: 200 }, text, undefined))!;
+  expect(kept.text.length).toBeLessThan(scratchLimits.previewChars + 500);
+  expect(await readFile(kept.saved!.path, 'utf8')).toBe(text);
+  const retrieved = await captureResult(pad, policy, 'read', { path: kept.saved!.path }, text, undefined);
+  expect(retrieved?.saved).toBeUndefined();
+  expect(retrieved?.text.length).toBeLessThan(scratchLimits.retrievalChars + 100);
 });
 
 it('lets the agent work in its scratchpad without repository access, and never counts it as a project change', async () => {

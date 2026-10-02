@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { cp, lstat, readdir, rm } from 'node:fs/promises';
-import { extname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
 import { z } from 'zod';
 import { imageInfo } from '../discord/images.js';
 import { replaceFileSync } from '../replace.js';
+import { TaskStore } from './task.js';
 
 /** Discord's upload limit for bots in servers without boosts; files people send and teapilot posts stay within it. */
 export const maxFileBytes = 10 * 1024 * 1024;
@@ -348,6 +349,7 @@ export class WorkspaceStore {
     this.write(conversation, index);
     this.arrived.delete(conversation);
     await rm(this.scratch(conversation), { recursive: true, force: true });
+    TaskStore.clearScratch(dirname(this.directory), this.scratch(conversation));
   }
 
   /** Deletes the files, packages and caches, keeping the scratchpad, the name and the approved hosts. */
@@ -427,6 +429,7 @@ export class WorkspaceStore {
 
   /** Deletes the workspace and its index, for sessions that end with their files. */
   async remove(conversation: string): Promise<void> {
+    TaskStore.clearScratch(dirname(this.directory), this.scratch(conversation));
     await rm(join(this.directory, this.id(conversation)), { recursive: true, force: true });
     await rm(this.indexPath(conversation), { force: true });
   }

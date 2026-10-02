@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, readdirSync, statSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type { Config } from '../config.js';
 import { StreamRedactor } from '../integration/events.js';
 import { clip } from './sandbox.js';
@@ -17,7 +18,9 @@ export const scratchLimits = {
   /** Results longer than this are kept in full, since later turns replay them cut down. */
   keepChars: 2000,
   /** Results longer than this are shown as their start and end, with the rest in the saved file. */
-  previewChars: 8000,
+  previewChars: 2000,
+  /** Explicit retrieval windows can be larger than ordinary previews, but never grow without a bound. */
+  retrievalChars: 4000,
   /** How much of the folder's listing the instructions carry. */
   describeChars: 1200,
 };
@@ -30,14 +33,14 @@ export function secretsOf(config: Config): string[] {
   return [config.router.apiKey ?? '', ...Object.values(config.secrets).map(value => value ?? '')];
 }
 
-export interface Saved { path: string; lines: number; bytes: number; complete: boolean }
+export interface Saved { id: string; sha256: string; path: string; lines: number; bytes: number; complete: boolean; indexed?: boolean }
 export type Kind = 'logs' | 'pages' | 'outputs';
 
 const size = (bytes: number) => bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
 export class Scratch {
   private swept = false;
-  constructor(readonly folder: string, private readonly secrets: string[] = []) {}
+  constructor(readonly folder: string, private readonly secrets: string[] = [], private readonly onSave?: (saved: Saved, kind: Kind) => boolean | void) {}
 
   /**
    * Creates the folder, and refuses one that is not a plain folder: sandboxed commands can write in the workspace
@@ -62,23 +65,30 @@ export class Scratch {
     if (!this.swept) { this.swept = true; await this.sweep(); }
     const temporary = join(directory, `.${randomUUID()}.tmp`);
     const redactor = new StreamRedactor(this.secrets);
+    const decoder = new StringDecoder('utf8');
+    const hash = createHash('sha256');
     const file = await open(temporary, 'wx');
     let bytes = 0, lines = 0, full = false, last = '';
     const write = async (text: string) => {
       if (!text) return;
       let data = Buffer.from(text);
-      if (bytes + data.length > scratchLimits.fileBytes) { data = data.subarray(0, scratchLimits.fileBytes - bytes); full = true; }
+      if (bytes + data.length > scratchLimits.fileBytes) {
+        let end = scratchLimits.fileBytes - bytes;
+        while (end > 0 && (data[end]! & 0xc0) === 0x80) end--;
+        data = data.subarray(0, end); full = true;
+      }
       await file.write(data);
+      hash.update(data);
       bytes += data.length;
       for (const byte of data) if (byte === 10) lines++;
       if (data.length) last = String.fromCharCode(data[data.length - 1]!);
     };
     try {
       for await (const chunk of typeof source === 'string' ? [source] : source) {
-        await write(redactor.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8')));
+        await write(redactor.push(typeof chunk === 'string' ? decoder.end() + chunk : decoder.write(chunk)));
         if (full) break;
       }
-      if (!full) await write(redactor.push('', true));
+      if (!full) await write(redactor.push(decoder.end(), true));
     } catch (error) {
       await file.close(); await rm(temporary, { force: true });
       throw error;
@@ -93,7 +103,9 @@ export class Scratch {
     while (taken.has(`${safe}-${index}${extension}`) || taken.has(`${safe}-${index}.partial${extension}`)) index++;
     const path = join(directory, name());
     await rename(temporary, path);
-    return { path, lines, bytes, complete };
+    const saved = { id: `a-${randomUUID()}`, sha256: hash.digest('hex'), path, lines, bytes, complete };
+    const indexed = this.onSave ? this.onSave(saved, kind) !== false : false;
+    return { ...saved, indexed };
   }
 
   /** Where the session's transcript is kept (agents/compaction.ts); like the other kinds, never a link in its place. */
@@ -147,7 +159,7 @@ export class Scratch {
 
 /** How the model is told where a full copy went. */
 export function savedNote(saved: Saved, what: 'output' | 'page text' = 'output'): string {
-  return `Full ${what} saved to ${saved.path} (${saved.lines} lines${saved.complete ? '' : ', incomplete'}); read or search it for anything not shown here.`;
+  return `Full ${what} saved to ${saved.path} (${saved.lines} lines${saved.complete ? '' : ', incomplete'})${saved.indexed ? ` [artifact ${saved.id}]` : ''}; read or search it for anything not shown here.`;
 }
 export function notKept(error: unknown): string {
   return `Output beyond this excerpt was not kept (${error instanceof Error ? error.message : String(error)}).`;

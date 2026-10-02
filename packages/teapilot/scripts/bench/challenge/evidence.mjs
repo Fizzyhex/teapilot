@@ -173,6 +173,7 @@ export function capture(name, out, { caseId, label, interactions = [], startedAt
   const transcript = transcriptOf(name);
   if (transcript) copy(transcript.path, join(directory, 'transcript.jsonl'));
   copy(join(sessionDir(name), 'trace'), join(directory, 'trace'));
+  copy(join(sessionDir(name), 'state', 'tasks'), join(directory, 'tasks'));
   const git = workspaces(name).map(({ id, path }) => ({ id, ...gitEvidence(path, join(directory, 'git', id)) }));
 
   const requests = events.filter(event => event.type === 'request_start').length;

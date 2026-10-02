@@ -85,6 +85,39 @@ it('refuses a sessions folder that is a link', async () => {
   await expect(SessionLog.open(new Scratch(scratch), cwd)).rejects.toThrow(/link/);
 });
 
+it('selects compaction by explicit task identity instead of replaying an unrelated or legacy summary', async () => {
+  const { scratch, cwd } = await setup(), log = await SessionLog.open(new Scratch(scratch), cwd);
+  const made = { summary: 'legacy summary', firstKeptEntryId: 'kept', tokensBefore: 10, details: { readFiles: [], modifiedFiles: [] } };
+  log.compaction(made, { through: 'request', turn: 'old', request: 'r0' });
+  log.compaction({ ...made, summary: 'task A summary' }, { through: 'request', turn: 'a', request: 'r1', task: 'task-a' });
+  await log.flush();
+  const restored = await SessionLog.open(new Scratch(scratch), cwd);
+  expect(restored.latest()?.summary).toBe('task A summary');
+  expect(restored.latest('task-a')?.summary).toBe('task A summary');
+  expect(restored.latest('task-b')).toBeUndefined();
+});
+
+it('keeps conversation text but replays tool steps only from the current explicit task', async () => {
+  const f = await setup(), bodies: any[] = [];
+  const server = await mockServer((body, _req, res) => { bodies.push(body); completion(res, { text: 'answer' }); }); cleanups.push(server.close);
+  Object.assign(f.config.models.capable, { provider: 'ollama', baseUrl: server.url });
+  const log = await SessionLog.open(new Scratch(f.scratch), f.cwd);
+  log.compaction({ summary: 'unrelated-summary', firstKeptEntryId: 'kept', tokensBefore: 10, details: { readFiles: [], modifiedFiles: [] } }, { through: 'request', turn: 'old', request: 'old-request', task: 'old-task' });
+  await log.flush();
+  const history = [
+    { user: 'earlier conversation', assistant: 'earlier reply', taskId: 'old-task', steps: [call('obsolete-execution'), result('obsolete-execution', 1)] },
+    { user: 'legacy conversation', assistant: 'legacy reply', steps: [call('legacy-execution'), result('legacy-execution', 1)] },
+    { user: 'current conversation', assistant: 'current reply', taskId: 'current-task', steps: [call('current-execution'), result('current-execution', 1)] },
+  ];
+  const budget = new SpendGovernor(join(f.config.stateDir, 'spend.jsonl'), 'current-request', f.config.policy.budget);
+  const telemetry = new Telemetry(f.config.stateDir, 'current-request');
+  const outcome = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'continue', history, budget, telemetry, taskId: 'current-task' });
+  expect(outcome.success).toBe(true);
+  const sent = JSON.stringify(bodies[0]);
+  expect(sent).toContain('earlier conversation'); expect(sent).toContain('legacy conversation'); expect(sent).toContain('current-execution');
+  expect(sent).not.toContain('obsolete-execution'); expect(sent).not.toContain('legacy-execution'); expect(sent).not.toContain('unrelated-summary');
+});
+
 it('leaves the room a reply is admitted with before compacting, and keeps pi’s defaults for large contexts', () => {
   // A 16k reply limit on a 32k context is a ceiling, not room held back: compaction starts near 21k rather than 14k.
   expect(compactionSettings({ contextTokens: 32768, maxOutputTokens: 16384 })).toEqual({ enabled: true, reserveTokens: 11468, keepRecentTokens: 8192 });
@@ -129,7 +162,8 @@ it('compacts an attempt nearing the context limit with pi’s prompts, and carri
     const compacted = JSON.stringify(body.messages).includes('compacted into the following summary');
     completion(res, compacted ? { text: 'r-0042 is fine.' } : { tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } });
   });
-  for (let part = 1; part <= 8; part++) {
+  // Retrieval windows are bounded now, so enough real files must exist to reach the compaction boundary.
+  for (let part = 1; part <= 32; part++) {
     await writeFile(join(f.scratch, `part-${part}.txt`), Array.from({ length: 300 }, (_, index) => `part ${part} line ${index} record r-${index % 97} state ok`).join('\n'));
   }
   const run = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'why did r-0042 fail?', scratch: f.scratch });
@@ -149,7 +183,10 @@ it('compacts an attempt nearing the context limit with pi’s prompts, and carri
   expect(lead).toContain(JSON.stringify(footer(path)).slice(1, -1));
   // What was summarised is gone from the next request; the newest reads stay word for word.
   expect(readBeforeSummary).toBeGreaterThan(1);
-  for (let part = 1; part < readBeforeSummary; part++) expect(JSON.stringify(after.messages)).not.toContain(`part ${part} line 5 `);
+  // Smaller result windows let several recent reads fit the same keep-recent token budget.
+  const remaining = Array.from({ length: readBeforeSummary }, (_, index) => index + 1).filter(part => JSON.stringify(after.messages).includes(`part ${part} line 5 `));
+  expect(remaining[0]).toBeGreaterThan(1);
+  for (let part = 1; part < remaining[0]!; part++) expect(JSON.stringify(after.messages)).not.toContain(`part ${part} line 5 `);
   expect(JSON.stringify(after.messages)).toContain(`part ${readBeforeSummary} line 5 `);
 
   const entries = (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
@@ -168,7 +205,7 @@ it('summarises briefly and without thinking, saying so while it happens', async 
     const compacted = JSON.stringify(body.messages).includes('compacted into the following summary');
     completion(res, compacted ? { text: 'r-0042 is fine.' } : { reasoning: `thinking about part ${reads + 1} `.repeat(40), tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } });
   });
-  for (let part = 1; part <= 8; part++) {
+  for (let part = 1; part <= 32; part++) {
     await writeFile(join(f.scratch, `part-${part}.txt`), Array.from({ length: 300 }, (_, index) => `part ${part} line ${index} record r-${index % 97} state ok`).join('\n'));
   }
   const seen: string[] = [];

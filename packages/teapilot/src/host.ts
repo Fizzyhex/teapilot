@@ -23,6 +23,7 @@ import { markWork } from './teachat/busy.js';
 import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 import { RequestRecovery } from './agents/recovery.js';
+import { TaskStore } from './workspace/task.js';
 
 export interface HostRequest { prompt: string; cwd: string; workload?: Workload; web?: boolean; correction?: string; signal?: AbortSignal; history?: ConversationTurn[]; context?: TextContext[]; mode?: Mode; conversational?: boolean; authorization?: SessionGrants; access?: AccessAdmin; play?: PlayContext; workspace?: ConversationWorkspace; tier?: TierPreference; relatedTier?: Tier; sessionId?: string; taskId?: string;
   /** A side question (/btw): it sees the conversation but only reads, and its turn is not kept. */
@@ -31,10 +32,16 @@ export interface HostRequest { prompt: string; cwd: string; workload?: Workload;
   scratch?: string;
   /** A host notice put before the prompt, such as why the previous request stopped. */
   notice?: string;
+  /** Explicit task constraints supplied by a trusted surface; models cannot rewrite them. */
+  constraints?: string[];
+  /** Surface-provided objective without presentation templates; readOnly proposals cannot mutate project files or apps. */
+  taskObjective?: string;
+  readOnly?: boolean;
   /** Teachat roster (username → bio). The router call also asks which identity would get this request. */
   teachatIdentities?: Record<string, string> }
 export interface HostResult {
   requestId: string; success: boolean; status: string; text: string;
+  taskId?: string;
   capability?: string; spentUsd: number; receipts: string[]; attempts: number;
   check?: 'passed' | 'failed'; models?: string[];
   tier?: Tier;
@@ -94,6 +101,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   // URLs the user wrote or earlier tools returned may be read; anything the model composes may not.
   const web = new WebController(config, { event: (type, fields) => telemetry.event(type, fields) });
   const recovery = new RequestRecovery();
+  let task: TaskStore | undefined;
+  let taskId = request.taskId ?? requestId;
   web.remember(currentPrompt);
   for (const turn of request.history ?? []) {
     web.remember(turn.user);
@@ -196,7 +205,8 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       ...(!success && previous?.text.trim() ? { reply: telemetry.redact(previous.text.trim().slice(0, 20_000)) } : {}),
       ...(!success && failedCalls.size ? { failedCalls: [...failedCalls.values()].slice(-8).map(({ call, error }) => ({ call: telemetry.redact(call), error: telemetry.redact(error) })) } : {}) };
     await telemetry.event('request_end', { success, status, capability: selected, spentUsd: result.spentUsd, attempts });
-    return result;
+    task?.finish(status);
+    return { ...result, ...(task ? { taskId } : {}) };
   };
   try {
     await budget.load();
@@ -301,6 +311,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       // continues with current access; the agent requests more mid-run if needed.
       const plan = request.authorization && decision && !usedRoutingFallback && !casual ? readRoutingPlan(decision.raw_jev, config.policy.router.min_confidence, selectedWorkload, repositoryOnOffer) : undefined;
       if (plan) {
+        if (!previous && plan.relatedness === 'new') taskId = requestId;
         if ((!request.tier || request.tier === 'auto') && plan.tier && plan.tier !== 'auto') {
           const preferred = candidates.find(candidate => candidate.id === `${selectedWorkload}.${plan.tier}`);
           const preferredAssessment = preferred && decision?.decision.candidates.find(c => c.id === preferred.id);
@@ -338,8 +349,17 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       // A retry on the same model carries on from what it last saw, with this tier's settings, rather than starting
       // over from a summary of it and reading everything again.
       const resume = previous?.resume && previousTier && profileFor(previousTier).model === profileFor(tier).model ? previous.resume : undefined;
+      if (!task && config.taskState?.enabled !== false && config.scratchpad?.enabled !== false && request.scratch && !request.side && !casual && modelFor(config, tier).toolCalling) {
+        // Only an explicit task identity resumes state. Conversation identity alone never merges objectives.
+        const scope = JSON.stringify([cwd, request.sessionId ?? request.workspace?.conversation ?? '', taskId]);
+        task = TaskStore.open(config.stateDir, scope, request.taskObjective ?? prompt, request.scratch, text => telemetry.redact(text), request.constraints);
+        if (request.correction || request.constraints) task.configure({ ...(request.correction ? { objective: `${request.taskObjective ?? prompt}\nuser correction: ${request.correction}` } : {}), ...(request.constraints ? { constraints: request.constraints } : {}) });
+        const multiplier = config.policy.escalation.maxEscalations + 1;
+        task.startRequest(requestId, { calls: config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * multiplier, timeoutMs: config.policy.limits.attemptTimeoutMs * multiplier, delegations: config.policy.limits.maxJuniorTurns, readOnly: request.readOnly });
+        await telemetry.event('task_start', { task: task.snapshot().id, resumed: Boolean(request.taskId), revision: task.snapshot().revision });
+      }
       previous = await runAttempt({
-        config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry, recovery,
+        config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry, recovery, task, taskId: task ? taskId : undefined, readOnly: request.readOnly,
         mode: request.mode, conversational: request.conversational, side: request.side, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
@@ -379,6 +399,10 @@ export async function runHost(config: Config, request: HostRequest, dependencies
       if (accessFailure) return await finish(false, 'approval_denied', incomplete(previous, accessFailure));
       await telemetry.event('attempt_end', { decisionId: decision?.decision_id, capability: selected, success: previous.success, reason: previous.reason, stopped: previous.stopped, turns: previous.turns, toolCalls: previous.toolCalls, check: previous.check, ...(previous.success ? {} : { ending: previous.ending }) });
       if (previous.success) return await finish(true, 'completed', previous.text);
+      if (task && (!task.remaining().calls || !task.remaining().modelCalls || !task.remaining().ms)) {
+        const status = !task.remaining().ms ? 'timeout' : !task.remaining().calls ? 'tool_limit' : 'turn_limit';
+        return await finish(false, status, incomplete({ ...previous, stopped: status }));
+      }
       if (casual || !previous.reason || ['budget', 'approval_denied', 'cancelled', 'timeout', 'tool_limit', 'search_unavailable'].includes(previous.stopped ?? '') || index === config.policy.escalation.maxEscalations) {
         return await finish(false, previous.stopped ?? previous.reason ?? 'incomplete', incomplete(previous, index === config.policy.escalation.maxEscalations ? 'Fallback: configured escalation limit reached.' : undefined));
       }

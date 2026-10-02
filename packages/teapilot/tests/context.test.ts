@@ -215,15 +215,15 @@ it('calibrates from reported input within an attempt, bounded below', async () =
   expect(calibratedTokens(10000, { estimated: 5000, reported: 3000 })).toBe(6600);
   expect(calibratedTokens(10000, { estimated: 5000, reported: 10 })).toBe(6000);
   expect(calibratedTokens(10000, { estimated: 5000, reported: 50000 })).toBe(20000);
-  // Written and read back: the page appears twice (~37 KB). Lexically too large,
-  // but the provider's earlier counts show it fits.
+  // Written and read back: the call retains the page while the read result is bounded.
+  // Earlier provider counts calibrate the next request without removing the admission floor.
   const page = indentedPage(13 * 1024);
   const twice = await scripted([write(page), { name: 'read', arguments: { path: 'index.html' } }], bytes => Math.ceil(bytes / 4));
   expect(twice.result, JSON.stringify(twice.result)).toMatchObject({ success: true, toolCalls: 2 });
   const last = twice.admissions.at(-1);
   expect(twice.admissions.map(e => e.method)).toEqual(['conservative-lexical', 'calibrated-lexical', 'calibrated-lexical']);
-  expect(last.payloadBytes).toBeGreaterThan(30000);
-  expect(last.lexicalTokens + 4096).toBeGreaterThan(16384);
+  expect(last.payloadBytes).toBeGreaterThan(25000);
+  expect(last.estimatedInputTokens).toBeLessThan(last.lexicalTokens);
   expect(last.estimatedInputTokens + 4096).toBeLessThanOrEqual(16384);
   // A tiny provider report cannot admit ~120 KB of code: the floor still rejects it.
   const large = await scripted([write(indentedPage(120 * 1024))], () => 10);

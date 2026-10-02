@@ -44,7 +44,7 @@ export class Evidence {
   answerWhy = 'Those calls could not run';
   /** `scratch` tells the agent's own scratchpad files apart: writing them changes nothing in the project. */
   constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = [], private readonly scratch?: (path: string) => boolean,
-    private readonly recovery = new RequestRecovery()) {
+    private readonly recovery = new RequestRecovery(), private readonly readOnly = false) {
     this.unresolvedChecks = new Set(unresolvedChecks);
   }
   refuse(): void {
@@ -52,7 +52,7 @@ export class Evidence {
     if (this.answerNow || this.recovery.refusalWarned) this.reason = 'ineffective_calls';
     else { this.answerNow = true; this.refused = 0; this.recovery.refusalWarned = true; }
   }
-  observe(name: string, args: unknown, failed: boolean, result?: string, saved?: string, changed?: boolean): void {
+  observe(name: string, args: unknown, failed: boolean, result?: string, saved?: string, changed?: boolean, identity?: string): void {
     this.warning = undefined; this.refused = 0; this.recovery.refusalWarned = false;
     const data = args as { path?: string; command?: string };
     const asked = args && typeof args === 'object' ? ['command', 'path', 'url', 'query'].map(key => (args as Record<string, unknown>)[key]).find(value => typeof value === 'string') as string | undefined : undefined;
@@ -105,13 +105,15 @@ export class Evidence {
     // A search with every engine down cannot improve on retry; refuse further searches at once.
     if (search && result?.startsWith(SEARCH_UNAVAILABLE)) this.searchExhausted = true;
     if (reading && result?.startsWith(READS_SPENT)) this.readsExhausted = true;
-    const inspection = (['ls', 'find', 'grep', 'read'].includes(name) && !failed) || search || reading;
+    const inspection = (['ls', 'find', 'grep', 'read', 'artifact_read'].includes(name) && !failed) || search || reading;
     // Equal bounded inspection results provide no new evidence, even if the
     // caller varies query spelling or optional arguments. Never normalize shell grammar.
     // discord.play tools read the app from the reply, so equal arguments often carry new code: only an equal result repeats.
     const play = name.startsWith('play_');
     const byResult = inspection || play;
-    const signature = `${name}:${['read', 'edit', 'write'].includes(name) ? data.path ?? '' : ''}:${createHash('sha256').update(JSON.stringify(byResult && result !== undefined ? [name, result] : [name, args])).digest('hex')}`;
+    // Fresh handles are storage metadata, not progress. A full result/image identity distinguishes changes hidden by a preview.
+    const observed = identity ?? result?.replace(savedLine, '').trim();
+    const signature = `${name}:${['read', 'edit', 'write'].includes(name) ? data.path ?? '' : ''}:${createHash('sha256').update(JSON.stringify(byResult && observed !== undefined ? [name, observed] : [name, args])).digest('hex')}`;
     if (name === 'bash') this.recovery.commands.set(signature, String(data.command ?? ''));
     const count = (this.recovery.repeated.get(signature) ?? 0) + 1;
     this.recovery.repeated.set(signature, count);
@@ -122,9 +124,14 @@ export class Evidence {
           ? 'Repeated searches produced no new evidence. Stop searching now and answer from the results already found, clearly stating any gaps. Further searches will be refused.'
           : reading
           ? 'Repeated reads returned the same page. Stop reading it again and answer from what you have, clearly stating any gaps. Further repeats withdraw web_read.'
+          : this.readOnly ? 'Repeated inspection added no evidence; finish the proposal from verified sources, stating missing evidence. Further repeats withdraw tools for a synthesis turn.'
           : 'Repeated inspection produced no new evidence. Change approach now: use the information already found [*clearly* stating knowledge gaps!], narrow the search, or create the requested files if the repository is empty. Another repeated inspection will stop this attempt.';
       } else if (search) this.searchExhausted = true;
       else if (reading) this.readsExhausted = true;
+      else if (inspection && this.readOnly) {
+        this.answerNow = true;
+        this.answerWhy = 'repeated inspection added no evidence to this read-only request';
+      }
       // An app is shown to people as it goes, so a stuck attempt answers about what is live rather than starting over.
       else if (play && !this.answerNow) { this.answerNow = true; this.answerWhy = 'Those calls keep giving the same result'; }
       else this.reason ??= 'ineffective_calls';

@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { HostRequest, HostResult } from './host.js';
 import { prepareConversation, type ConversationTurn } from './integration/events.js';
@@ -171,6 +172,8 @@ export async function runSession(options: {
   let correction = options.request.correction;
   let tier: TierPreference = options.request.tier ?? 'auto';
   let relatedTier: Tier | undefined = options.request.relatedTier;
+  const sessionId = options.request.sessionId ?? randomUUID();
+  let taskId = options.request.taskId ?? history.at(-1)?.taskId ?? randomUUID();
   let exitCode = 0;
   let spentUsd = 0;
   let lastModel: string | undefined;
@@ -178,6 +181,7 @@ export async function runSession(options: {
   /** /convo clear: the conversation starts over; access, spending and the workspace's files stay. */
   const clearConvo = async () => {
     history = []; options.onHistory?.(history); correction = undefined; relatedTier = undefined; tier = 'auto';
+    taskId = randomUUID();
     await extension?.reset?.(); await files?.clearScratch();
   };
   while (!options.request.signal?.aborted) {
@@ -277,10 +281,12 @@ export async function runSession(options: {
     // without them the mode's workload is fixed for the turn.
     const stopped = history.at(-1)?.stopped;
     const notice = stopped ? stopNotice(stopped) : undefined;
-    const result = await options.run({ ...options.request, ...extension?.request?.(), cwd, prompt, correction, notice, tier, relatedTier, history,
+    const result = await options.run({ ...options.request, ...extension?.request?.(), sessionId, taskId, cwd, prompt, correction, notice, tier, relatedTier, history,
+      readOnly: Boolean(proposal), taskObjective: proposal?.idea,
       mode, conversational: !options.once, workload: grants ? undefined : workloadFor(mode), ...(workspace ? { workspace: workspace.context(cwd) } : {}),
       ...(options.workspace ? { scratch: options.workspace.scratch() } : {}) });
     spentUsd += result.spentUsd;
+    taskId = result.taskId ?? taskId;
     lastModel = result.models?.at(-1) ?? lastModel;
     if (result.tier && result.tier !== 'fast') relatedTier = result.tier;
     if (!result.success) exitCode = 2;
@@ -288,11 +294,11 @@ export async function runSession(options: {
     // A failed turn's text is the host's diagnostic, and anything the host writes as the reply reads as the model's
     // own words, which it then copies. The turn keeps only what the model said; the next one opens with a notice.
     const assistant = result.success ? result.text : result.reply ?? '';
-    const turn: ConversationTurn = { user, assistant, ...(result.steps?.length ? { steps: result.steps } : {}),
+    const turn: ConversationTurn = { user, assistant, taskId, ...(result.steps?.length ? { steps: result.steps } : {}),
       ...(result.success ? {} : { stopped: { status: result.status, ...(result.failedCalls?.length ? { failedCalls: result.failedCalls } : {}) } }) };
     // Only recent turns keep their steps: fitting history to a model replays older ones as text anyway.
     const turns = [...history, turn];
-    history = prepareConversation('', [], turns.map((turn, index) => index < turns.length - keptSteps ? { user: turn.user, assistant: turn.assistant } : turn), options.maxPromptChars).history;
+    history = prepareConversation('', [], turns.map((turn, index) => index < turns.length - keptSteps ? { user: turn.user, assistant: turn.assistant, taskId: turn.taskId } : turn), options.maxPromptChars).history;
     options.onHistory?.(history);
     await extension?.turnEnd?.({ user, assistant }, result);
     correction = undefined;

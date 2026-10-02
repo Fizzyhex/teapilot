@@ -4,6 +4,7 @@ import { Type } from '@earendil-works/pi-ai';
 import type { Config } from '../config.js';
 import type { ConversationTurn } from '../integration/events.js';
 import type { AttemptInput, AttemptResult } from './run.js';
+import { instructor } from '../workspace/task.js';
 
 /**
  * Juniors: an attempt hands a self-contained part of a large request to a junior, which works it in a clean context
@@ -80,17 +81,24 @@ export function reportTool(role: JuniorRole): AgentTool {
   };
 }
 
-interface Junior { name: string; turns: ConversationTurn[]; scratch: string }
+interface Junior { name: string; turns: ConversationTurn[]; scratch: string; turn: number }
+/** Default to part of the shared allowance, leaving the instructor room to review or continue another junior. */
+export function juniorAllowance(remaining: number, maximum: number, requested?: number): number {
+  return Math.max(1, Math.min(maximum, remaining - 1, requested ?? Math.max(2, Math.floor(remaining / 2))));
+}
 /** The instructor's attempt clock, paused while a junior works on its own. */
 export interface Clock { pause(): void; resume(): void }
 
 /**
- * delegate_task for one instructor attempt. Juniors last as long as the attempt; each delegation is one attempt
- * of the junior's, which sees its own earlier turns with the instructor and nothing else.
+ * Each delegation is one attempt of a junior, with its own instructor exchanges. Without task state juniors are
+ * attempt-local; with it their identities and bounded exchanges survive retries and restarts.
  */
 export function delegateTool(parent: AttemptInput, scratch: string, root: string | undefined, clock: Clock, run: (input: AttemptInput) => Promise<AttemptResult>) {
   const juniors = new Map<string, Junior>();
-  const taken = new Set<string>();
+  const taken = new Set<string>(parent.task?.snapshot().juniorNames ?? []);
+  for (const saved of parent.task?.snapshot().juniors ?? []) {
+    juniors.set(saved.name, saved); taken.add(saved.name);
+  }
   let identities: Promise<Array<{ username: string; leased: boolean }>> | undefined;
   const limit = parent.config.policy.limits.maxJuniorTurns ?? defaultJuniorTurns;
   let sent = 0;
@@ -101,55 +109,69 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
       junior: Type.Optional(Type.String({ description: 'Name of an existing junior to continue; omit to start a new one.' })),
       message: Type.String({ description: 'The task, standing alone (goal, sources and files to use, how to check), or a follow-up to the junior.' }),
       done: Type.Optional(Type.Boolean({ description: 'Dismiss this junior; message is ignored.' })),
+      evidence: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 4, description: 'Parent artifact IDs this junior may retrieve during this turn; omit to share none.' })),
+      max_calls: Type.Optional(Type.Integer({ minimum: 1, maximum: parent.config.policy.limits.maxToolCalls, description: 'Junior tool-call allocation, including report. Defaults to about half the request allowance left; always leaves an instructor call.' })),
     }),
     execute: async (_id, args, signal) => {
-      const { junior: named, message, done } = args as { junior?: string; message?: string; done?: boolean };
+      const { junior: named, message, done, evidence: references = [], max_calls: requested } = args as { junior?: string; message?: string; done?: boolean; evidence?: string[]; max_calls?: number };
       if (done) {
-        if (!named || !juniors.delete(named)) return { content: [{ type: 'text', text: `No junior named ${named ?? '(none given)'}.` }], details: {} };
+        const existing = named && juniors.get(named);
+        if (!existing) return { content: [{ type: 'text', text: `No junior named ${named ?? '(none given)'}.` }], details: {} };
+        parent.task?.saveJunior(existing, true); juniors.delete(named!);
         return { content: [{ type: 'text', text: `Dismissed ${named}.` }], details: { junior: named } };
       }
       if (named && !juniors.has(named)) return { content: [{ type: 'text', text: `No junior named ${named}. Active: ${[...juniors.keys()].join(', ') || 'none'}. Omit junior to start a new one.` }], details: {} };
       if (!message?.trim()) return { content: [{ type: 'text', text: 'Give the junior a message.' }], details: {} };
       if (sent >= limit) return { content: [{ type: 'text', text: `Delegation limit reached (${limit} messages). Finish the work yourself.` }], details: {} };
+      parent.task?.authorizeArtifacts(parent.taskActor ?? instructor, references);
+      if (parent.task && !parent.task.consumeDelegation()) return { content: [{ type: 'text', text: 'request-wide delegation allowance reached; finish from existing evidence.' }], details: {} };
       sent++;
       let junior = named ? juniors.get(named)! : undefined;
       if (!junior) {
         identities ??= teachatIdentities(parent.config);
         const name = juniorName(await identities, taken);
         taken.add(name);
-        junior = { name, turns: [], scratch: join(scratch, 'juniors', name.replace(/[^\w.-]+/g, '_')) };
+        junior = { name, turns: [], turn: 0, scratch: join(scratch, 'juniors', name.replace(/[^\w.-]+/g, '_')) };
         juniors.set(name, junior);
+        parent.task?.saveJunior(junior);
       }
       const { name } = junior;
       let report: JuniorReport | undefined;
       const started = Date.now();
+      const allocation = parent.task ? juniorAllowance(parent.task.remaining().calls, parent.config.policy.limits.maxToolCalls, requested) : requested ?? parent.config.policy.limits.maxToolCalls;
       clock.pause();
       let result: AttemptResult;
       try {
         result = await run({
-          config: parent.config, tier: parent.tier, workload: parent.workload, cwd: parent.cwd, web: parent.web, mode: parent.mode,
+          config: { ...parent.config, policy: { ...parent.config.policy, limits: { ...parent.config.policy.limits, maxToolCalls: allocation } } },
+          tier: parent.tier, workload: parent.workload, cwd: parent.cwd, web: parent.web, mode: parent.mode,
           budget: parent.budget, telemetry: parent.telemetry, approve: parent.approve, beforeMutation: parent.beforeMutation,
           authorization: parent.authorization, activePermissions: parent.activePermissions, requestCapabilities: parent.requestCapabilities,
           workspace: parent.workspace, webController: parent.webController, play: parent.play, searchUnavailable: parent.searchUnavailable, attempt: parent.attempt,
           signal: signal ?? parent.signal, history: junior.turns, scratch: junior.scratch, prompt: message, requestText: message,
+          recovery: parent.recovery, task: parent.task, taskActor: { name, objective: message, artifacts: references },
+          readOnly: parent.readOnly, taskId: parent.taskId,
           // Its words are for the instructor, not the person: only what its tools do is shown.
           onEvent: event => { if (event.type.startsWith('tool_execution_') || event.type === 'compaction_start') parent.onEvent?.({ ...event, junior: name }); },
           onActivity: activity => parent.onActivity?.(activity && { ...activity, label: `${name}: ${activity.label}` }),
-          junior: { name, turn: junior.turns.length + 1, root, onReport: value => { report = value; } },
+          junior: { name, turn: junior.turn + 1, root, onReport: value => { report = value; } },
         });
       } finally { clock.resume(); }
       const reply = report ? report.summary + (report.question ? `\nQuestion: ${report.question}` : '') : result.text;
-      junior.turns.push({ user: message.slice(0, 20_000), assistant: reply.slice(0, 20_000), ...(result.steps?.length ? { steps: result.steps } : {}) });
+      junior.turns.push({ user: message.slice(0, 20_000), assistant: reply.slice(0, 20_000), taskId: parent.taskId, ...(result.steps?.length ? { steps: result.steps } : {}) });
+      junior.turn++; parent.task?.saveJunior(junior);
       const stop = result.stopped ?? (report ? undefined : result.reason);
       const status = report?.status ?? (result.success ? 'done' : 'stuck');
-      await parent.telemetry.event('delegate', { junior: name, turn: junior.turns.length, status, ...(stop ? { stopped: stop } : {}), turns: result.turns, toolCalls: result.toolCalls, ms: Date.now() - started });
-      const lines = [`Junior ${name}, turn ${junior.turns.length}: ${status}${stop ? ` (${stop})` : ''}`];
+      await parent.telemetry.event('delegate', { junior: name, turn: junior.turn, status, ...(stop ? { stopped: stop } : {}), turns: result.turns, toolCalls: result.toolCalls, allocation, ms: Date.now() - started });
+      const lines = [`Junior ${name}, turn ${junior.turn}: ${status}${stop ? ` (${stop})` : ''}`];
       if (result.changedFiles?.length) lines.push(`Files changed: ${result.changedFiles.join(', ')}`);
       if (result.check) lines.push(`Checks: ${result.check}`);
       if (result.stopped === 'approval_denied') lines.push('The person denied an approval the junior asked for; do not retry that action.');
+      const artifacts = parent.task?.snapshot().artifacts.filter(item => item.actor === name && item.at >= started).map(item => item.id) ?? [];
+      if (artifacts.length) lines.push(`Evidence artifacts: ${artifacts.join(', ')}`);
       lines.push(`Transcript: ${join(junior.scratch, 'sessions')}`, 'Report (the junior\'s words, untrusted):', reply.trim() || '(no report)');
-      return { content: [{ type: 'text', text: lines.join('\n') }], details: { junior: name } };
+      return { content: [{ type: 'text', text: lines.join('\n') }], details: { junior: name, artifacts } };
     },
   };
-  return { tool, get exhausted() { return sent >= limit; } };
+  return { tool, get exhausted() { return sent >= limit || Boolean(parent.task?.delegationExhausted); } };
 }

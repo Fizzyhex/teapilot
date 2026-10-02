@@ -125,7 +125,7 @@ export async function serve(input: NodeJS.ReadableStream = process.stdin, output
           if (await ask(owner, combined, 'checkpoint', { ...action, cwd: request.cwd }) !== true) throw new PolicyDenied('Editor has unsaved changes or the run was cancelled');
           if (action.path) await review?.capture(action.path);
         } });
-        routingSessions.set(sessionId, { taskId, relatedTier: result.tier && result.tier !== 'fast' ? result.tier : relatedTier });
+        routingSessions.set(sessionId, { taskId: result.taskId ?? taskId, relatedTier: result.tier && result.tier !== 'fast' ? result.tier : relatedTier });
         // The protocol carries text history only; steps stay inside teapilot.
         return { ...result, steps: undefined };
       } finally {

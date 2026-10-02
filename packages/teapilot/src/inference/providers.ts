@@ -191,7 +191,8 @@ export function wellFormed(value: unknown): unknown {
 export function guardedStream(
   config: Config, tier: Tier, governor: SpendGovernor, telemetry: Telemetry, state: InferenceState,
   controls?: { toolChoice?: 'auto' | 'required' | 'none'; maxOutputTokens?: number; /** Replaces the tier's reply length, within the model's own limit. */ outputTokens?: number;
-    /** Replaces the tier's reasoning level, as for summaries, which gain nothing from thinking. */ thinking?: ThinkingLevel },
+    /** Replaces the tier's reasoning level, as for summaries, which gain nothing from thinking. */ thinking?: ThinkingLevel;
+    /** Host-owned aggregate allowance, shared by attempts, summaries and juniors. */ admit?: () => boolean },
 ): StreamFn {
   const profile = effectiveProfile(config, tier);
   const spec = modelFor(config, tier);
@@ -261,6 +262,7 @@ export function guardedStream(
             }
             if (!body) throw new Error('Missing serialized request');
             if (sent) throw new Error('Unexpected provider retry blocked');
+            if (controls?.admit && !controls.admit()) { state.stop = 'turn_limit'; throw new Error('Request-wide model allowance reached'); }
             try { reservation = await governor.reserve(callCeiling(spec), `${tier}:${spec.id}`); }
             catch (error) { if (error instanceof BudgetError) state.stop = 'budget'; throw error; }
             sent = true;

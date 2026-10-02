@@ -169,7 +169,7 @@ it('reports each turn with its steps, and clears the history on /new', async () 
   chat.push('make a game');
   await vi.waitFor(() => expect(histories).toHaveLength(1));
   expect(run.mock.calls[0]![0].history).toEqual([{ user: 'earlier', assistant: 'before a restart' }]);
-  expect(histories[0]).toEqual([{ user: 'earlier', assistant: 'before a restart' }, { user: 'make a game', assistant: 'Built it.', steps: turn(1).steps }]);
+  expect(histories[0]).toEqual([{ user: 'earlier', assistant: 'before a restart' }, { user: 'make a game', assistant: 'Built it.', taskId: expect.any(String), steps: turn(1).steps }]);
   chat.push('/new');
   await vi.waitFor(() => expect(histories.at(-1)).toEqual([]));
 });

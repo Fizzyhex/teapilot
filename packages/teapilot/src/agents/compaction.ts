@@ -19,7 +19,7 @@ import { withoutPictures } from './history.js';
  * Which conversation turn a compaction reaches: through a whole earlier turn (`turns`), or into the request it ran
  * in (`request`), whose turn then keeps only what came after the cut. `turn` is a fingerprint of that turn's text.
  */
-export type Marker = { through: 'turns' | 'request'; turn: string; request: string };
+export type Marker = { through: 'turns' | 'request'; turn: string; request: string; task?: string };
 export interface CompactionDetails { readFiles: string[]; modifiedFiles: string[]; teapilot?: Marker }
 /** pi's compaction settings (the package exports only its settings-file form, where each is optional). */
 export type CompactionSettings = typeof DEFAULT_COMPACTION_SETTINGS;
@@ -164,7 +164,7 @@ export class SessionLog {
   }
 
   /** Marks where an attempt begins, so retries of one request can be told apart. */
-  mark(data: { request: string; attempt: number; tier: string; model: string }): void {
+  mark(data: { request: string; attempt: number; tier: string; model: string; task?: string }): void {
     this.write(this.manager.appendCustomEntry('teapilot.attempt', data));
   }
 
@@ -175,8 +175,10 @@ export class SessionLog {
   }
 
   /** The newest compaction teapilot made in this session. */
-  latest(): Compaction | undefined {
-    return this.manager.getEntries().findLast((entry): entry is CompactionEntry<CompactionDetails> => entry.type === 'compaction' && Boolean((entry.details as CompactionDetails | undefined)?.teapilot));
+  latest(task?: string): Compaction | undefined {
+    return this.manager.getEntries().findLast((entry): entry is CompactionEntry<CompactionDetails> => entry.type === 'compaction'
+      && Boolean((entry.details as CompactionDetails | undefined)?.teapilot)
+      && (task === undefined || (entry.details as CompactionDetails).teapilot?.task === task));
   }
 
   /** Keeps a compaction, pointing at the first message it kept when that message is in the transcript. */

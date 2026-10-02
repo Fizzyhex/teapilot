@@ -5,6 +5,7 @@ import { READS_SPENT, SEARCH_UNAVAILABLE } from '../routing/escalation.js';
 import { searchQuery, searchRepair, SearchSetupError } from '../search.js';
 import type { WebController } from '../web/controller.js';
 import { notKept, savedNote, scratchLimits, type Scratch } from '../workspace/scratch.js';
+import { clip } from '../workspace/sandbox.js';
 
 /**
  * Page reading for one attempt: the request's controller, a per-page limit, and what this attempt may still add to
@@ -50,7 +51,7 @@ export function ask(config: Config, web: boolean, repository = false, searchUnav
         const { url, title } = page.full;
         const host = (() => { try { return new URL(url).hostname; } catch { return 'page'; } })();
         const kept = `Source: ${url}\n${title ? `Title: ${title}\n` : ''}\n${page.full.text}\n`;
-        try { text += `\n${savedNote(await reader!.scratch.save('pages', host, kept, '.txt'), 'page text')}`; }
+        try { text = `${clip(text, scratchLimits.previewChars)}\n${savedNote(await reader!.scratch.save('pages', host, kept, '.txt', page.full.truncated), 'page text')}`; }
         catch (error) { text += `\n${notKept(error)}`; }
       }
       return { content: [{ type: 'text', text }], details: {} };
