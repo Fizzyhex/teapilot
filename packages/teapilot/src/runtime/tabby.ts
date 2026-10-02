@@ -331,9 +331,10 @@ export class TabbyDriver implements RuntimeDriver {
       'model:', `  model_dir: ${models}`, '  inline_model_loading: false',
       ...loaded ? [`  model_name: ${quote(preset.model.folder)}`] : [],
       `  max_seq_len: ${preset.context}`, `  cache_size: ${preset.context}`, `  cache_mode: ${preset.load.cache_mode}`, `  max_batch_size: ${preset.load.max_batch_size}`,
-      // vision_offload is not part of the load request, so API loads take it from here as a default.
+      `  tool_format: ${preset.load.tool_format}`,
+      // Parser and vision_offload settings are not part of the load request; API loads use config defaults.
       ...preset.vision ? ['  vision: true', ...preset.load.visionOffload ? ['  vision_offload: true'] : []] : [],
-      `  use_as_default: ["max_batch_size"${preset.vision && preset.load.visionOffload ? ', "vision_offload"' : ''}]`,
+      `  use_as_default: ["max_batch_size", "tool_format"${preset.vision && preset.load.visionOffload ? ', "vision_offload"' : ''}]`,
       'draft_model:', `  draft_model_dir: ${models}`,
       ...loaded && preset.drafter ? [`  draft_model_name: ${quote(preset.drafter.folder)}`] : [],
       '',

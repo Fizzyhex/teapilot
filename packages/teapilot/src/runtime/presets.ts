@@ -42,7 +42,7 @@ export interface TabbyPreset extends PresetBase {
   /** Minimum GPU, checked with nvidia-smi. */
   hardware: { minimumMemoryMiB: number; minimumDriver: string; description: string };
   /** Settings for TabbyAPI's model load, needed to reproduce the deployment. */
-  load: { cache_mode: string; max_batch_size: number; /** Keeps the vision weights in system memory, for a GPU with no room for them. */ visionOffload?: boolean };
+  load: { cache_mode: string; max_batch_size: number; tool_format: string; /** Keeps the vision weights in system memory, for a GPU with no room for them. */ visionOffload?: boolean };
   /** Loads the model's vision tower, so it can be sent images. */
   vision?: boolean;
   /** True only once the whole combination has passed TeaPilot's live checks on the described hardware. */
@@ -79,7 +79,7 @@ export const modelPresets: ModelPreset[] = [
     // RTX 3090 24 GB class. CUDA 12.8 wheels need a 570.65 or newer Windows driver.
     hardware: { minimumMemoryMiB: 23 * 1024, minimumDriver: '570.65', description: '24 GB NVIDIA GPU (RTX 3090 class)' },
     // One sequence at a time: speculative decoding keeps recurrent state per sequence slot.
-    load: { cache_mode: 'Q8', max_batch_size: 1 },
+    load: { cache_mode: 'Q8', max_batch_size: 1, tool_format: 'qwen3_coder' },
     vision: true,
     // 2026-09-26, RTX 3090 (driver 610.60, ~2.4 GB used by the desktop): all live checks including
     // medium and xhigh reasoning passed; 23.0 GB in use once loaded; ~100-116 tok/s on code with the

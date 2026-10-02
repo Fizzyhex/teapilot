@@ -141,6 +141,8 @@ it('installs a pinned runtime, starts it, downloads and loads the preset as sepa
   expect(config).toContain(`port: ${h.tabby.port}`);
   expect(config).toContain('host: 127.0.0.1');
   expect(config).toContain('cache_size: 32768');
+  expect(config).toContain('tool_format: qwen3_coder');
+  expect(config).toContain('use_as_default: ["max_batch_size", "tool_format"]');
   expect(config).toContain('vision: true');
   expect(config).not.toContain('vision_offload');
   expect(config).not.toContain('model_name');
@@ -161,6 +163,7 @@ it('installs a pinned runtime, starts it, downloads and loads the preset as sepa
   expect(prompts.lines).toContain('Loading model: 50%');
   // A restart loads the same deployment without setup.
   expect(await readFile(join(h.root, 'tabbyAPI', 'config.yml'), 'utf8')).toContain(`model_name: "${preset.model.folder}"`);
+  expect(await readFile(join(h.root, 'tabbyAPI', 'config.yml'), 'utf8')).toContain('tool_format: qwen3_coder');
   // Setup receives an ordinary OpenAI-compatible model; the key is kept apart from it.
   expect(provisioned).toEqual([{
     roles: ['capable'], source: expect.any(String), apiKeyEnv: 'TABBY_API_KEY', apiKey: saved.keys.api,
@@ -348,7 +351,7 @@ it('reloads a model running without vision, and keeps vision offload to the serv
   await offloaded.driver.ensure(context());
   const config = await readFile(join(offloaded.root, 'tabbyAPI', 'config.yml'), 'utf8');
   expect(config).toContain('vision_offload: true');
-  expect(config).toContain('use_as_default: ["max_batch_size", "vision_offload"]');
+  expect(config).toContain('use_as_default: ["max_batch_size", "tool_format", "vision_offload"]');
 });
 
 it('sets a large server log aside before starting the server', async () => {
