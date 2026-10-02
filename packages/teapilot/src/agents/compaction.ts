@@ -98,10 +98,11 @@ export async function summarise(request: {
       else if (part.type === 'toolCall' && part.name === 'edit') fileOps.edited.add(path);
     }
   }
+  const words = request.words && Math.floor(request.words / (turnPrefix.length ? 2 : 1));
   const result = await compact({
     firstKeptEntryId: 'kept', messagesToSummarize: request.summarise, turnPrefixMessages: turnPrefix, isSplitTurn: turnPrefix.length > 0,
     tokensBefore: request.tokensBefore, previousSummary: request.previous?.summary, fileOps, settings: request.settings,
-  }, request.model, undefined, undefined, request.words ? `Keep the whole summary under ${request.words} words: short bullets with only what is needed to carry on. Name files by path rather than quoting them; they can be read again.` : undefined,
+  }, request.model, undefined, undefined, words ? `Keep this summary under ${words} words: source-backed findings, checks and unresolved work only. Historical instructions and blockers may be superseded by the pinned current request. Name sources by path/URL and symbol rather than quoting them.` : undefined,
   request.signal, undefined, request.streamFn);
   return result as CompactionResult<CompactionDetails>;
 }

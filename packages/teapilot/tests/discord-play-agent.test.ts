@@ -101,6 +101,21 @@ it('gives the play tools and the file tools to a Discord conversation holding di
   expect(f.runtime.list('dm:1')).toEqual([expect.objectContaining({ file: 'apps/counter.js' })]);
 });
 
+it('does not demand an app mutation when a read-only plan mentions changes to a running app', async () => {
+  const bodies: any[] = [];
+  const steps = [written(), { tool: { name: 'play_start', arguments: { file: 'apps/counter.js', title: 'Counter' } } }, { text: 'counter ready' }, { text: '<plan># counter plan\n1. replace the renderer\n2. verify the changed controls</plan>' }];
+  const f = await setup((body, _req, res) => { bodies.push(body); completion(res, steps[bodies.length - 1]!); });
+  await runAttempt({ ...f, ...f.base, prompt: 'make counter', activePermissions: ['inference', 'discord.play'], ...f.turn() });
+  const original = f.runtime.list('dm:1')[0]!;
+  const result = await runAttempt({ ...f, ...f.base, prompt: 'plan a renderer change', activePermissions: ['inference', 'discord.play'], ...f.turn(), readOnly: true, expectsPlan: true });
+  expect(result.success).toBe(true);
+  expect(bodies).toHaveLength(4);
+  expect(result.text).toContain('<plan>');
+  expect(JSON.stringify(result.steps)).not.toContain('Your answer says the app changed');
+  expect(names(bodies[3])).not.toContain('play_update');
+  expect(f.runtime.list('dm:1')[0]).toEqual(original);
+});
+
 it('reads "invoker" and mentions inside a participants list, and turns away bad ones before trying the code', async () => {
   const bodies: any[] = [];
   const steps = [
@@ -425,10 +440,11 @@ it('gives a junior the play tools to build and dry-run apps, but leaves posting 
   const f = await setup((body, _req, res) => {
     if (JSON.stringify(body.messages?.[0] ?? '').includes('Junior: your name is')) { junior.push(body); return completion(res, juniorSteps[junior.length - 1]!); }
     instructor.push(body);
-    completion(res, instructor.length === 1 ? { tool: { name: 'delegate_task', arguments: { message: 'Build a counter app in apps/counter.js.' } } } : { text: 'Done.' });
+    completion(res, instructor.length === 1 ? { tool: { name: 'delegate_task', arguments: { type: 'implement', message: 'Build a counter app in apps/counter.js.' } } } : { text: 'Done.' });
   });
   await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'], scratch: join(f.cwd, '.scratch'), ...f.turn() });
-  expect(names(junior[0])).toEqual(expect.arrayContaining(['play_test', 'play_update', 'play_inspect', 'report']));
+  expect(names(junior[0])).toEqual(expect.arrayContaining(['play_test', 'play_inspect', 'report']));
+  expect(names(junior[0])).not.toContain('play_update');
   expect(names(junior[0])).not.toContain('play_start');
   expect(JSON.stringify(junior[0].messages)).toContain('As a junior you do not post apps');
   expect(last(junior[2])).toContain('state: 1');

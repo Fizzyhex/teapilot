@@ -15,6 +15,7 @@
   "limits": {
     "maxTurns": 500,
     "maxToolCalls": 40,
+    "planningToolCalls": 24,
     "attemptTimeoutMs": 900000,
     "requestTimeoutMs": 60000,
     "commandTimeoutSeconds": 120,

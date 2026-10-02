@@ -39,6 +39,13 @@ it('rejects linked plan directories', async () => {
   expect(await readdir(outside)).toEqual([]);
 });
 
+it('compacts plan bodies to neutral receipts while preserving surrounding assistant text', () => {
+  const plan = { path: 'plans/maze.md', revision: 2, status: 'draft' as const };
+  expect(compactPlan('before\n<plan># maze\n1. build</plan>\nafter', plan)).toBe('before\n[saved plan: .scratch/plans/maze.md, revision 2, draft]\nafter');
+  expect(compactPlan('<PLAN>first</PLAN>\n<plan>second</plan>', { ...plan, status: 'approved' })).toBe('[saved plan: .scratch/plans/maze.md, revision 2, approved]\n[saved plan: .scratch/plans/maze.md, revision 2, approved]');
+  expect(compactPlan('which source should i use?', plan)).toBe('which source should i use?');
+});
+
 it('rejects traversal in stored references rather than touching files outside plans', async () => {
   const f = await setup(); f.plans.save('plan');
   const index = (await readdir(f.plans.directory)).find(name => name.endsWith('.json'))!;
@@ -84,6 +91,9 @@ it('persists host output before returning, survives forced compaction, and revis
   expect(await readFile(join(f.scratch, plan.path), 'utf8')).toContain('exactly 2 leaves');
   expect(first.historyText).toContain(plan.path);
   expect(first.historyText).not.toContain('exactly 2 leaves');
+  expect(first.historyText).not.toContain('[host notice]');
+  expect(first.historyText).not.toContain('read it before');
+  expect(first.text).toContain('<plan>');
   expect(first.steps).toBeUndefined();
   phase = 1;
   const second = await runHost(f.config, { ...request, prompt: 'add undo without changing scope', planAction: 'revise', history: [{ user: '/plan tea maze', assistant: first.historyText!, taskId: 'task' }] }, dependencies);
@@ -100,6 +110,32 @@ it('persists host output before returning, survives forced compaction, and revis
   expect(JSON.stringify(bodies.at(-1))).toContain('approved');
 });
 
+it('keeps current plan guidance in the request, not replayed assistant messages', async () => {
+  const f = await setup(); const bodies: any[] = [];
+  const server = await mockServer((body, _req, res) => {
+    bodies.push(body);
+    completion(res, { text: bodies.length === 1 ? 'here is the proposal\n<plan># maze\n1. build two rooms\n2. verify</plan>' : 'which source should i use?' });
+  }); cleanups.push(server.close);
+  f.config.routingMode = 'direct'; Object.assign(f.config.models.capable, { provider: 'ollama', baseUrl: server.url });
+  const request = { cwd: f.cwd, prompt: 'plan a maze', workload: 'ask' as const, tier: 'normal' as const, scratch: f.scratch, taskId: 'task', readOnly: true };
+  const deps = { approve: async () => true, localProbe: async () => true };
+  const first = await runHost(f.config, { ...request, planAction: 'new' }, deps);
+  expect(first.success, JSON.stringify(first)).toBe(true);
+  const second = await runHost(f.config, { ...request, prompt: 'assign juniors', planAction: 'revise', history: [{ user: '/plan maze', assistant: first.historyText! }] }, deps);
+  expect(second.success, JSON.stringify(second)).toBe(true);
+  const messages = bodies.at(-1).messages;
+  const assistants = messages.filter((message: any) => message.role === 'assistant');
+  expect(JSON.stringify(assistants)).toContain('[saved plan:');
+  expect(JSON.stringify(assistants)).not.toContain('[host notice]');
+  expect(JSON.stringify(assistants)).not.toContain('return complete revisions');
+  const current = JSON.stringify(messages.at(-1));
+  expect(messages.at(-1).role).toBe('user');
+  expect(current).toContain('[host notice] current plan:');
+  expect(current).toContain('read it before revising or executing');
+  expect(current).toContain('assign juniors');
+  expect(f.plans.current()?.revision).toBe(1);
+});
+
 it('session history keeps the short plan reference rather than full output or presentation templates', async () => {
   const f = await setup();
   let history: any[] = [];
@@ -109,4 +145,34 @@ it('session history keeps the short plan reference rather than full output or pr
       return { requestId: 'r', success: true, status: 'completed', text: '<plan>full body</plan>', historyText: 'saved plan reference', spentUsd: 0, receipts: [], attempts: 1 };
     } });
   expect(history[0]).toMatchObject({ user: '/plan maze', assistant: 'saved plan reference' });
+});
+
+it('repairs a missing wrapper once with tools withdrawn before saving the proposal', async () => {
+  const f = await setup(); const bodies: any[] = [];
+  const server = await mockServer((body, _req, res) => {
+    bodies.push(body);
+    completion(res, { text: bodies.length === 1 ? '# implementation plan\n1. add doors\n2. verify collision' : '<plan># implementation plan\n1. add doors\n2. verify collision</plan>' });
+  }); cleanups.push(server.close);
+  f.config.routingMode = 'direct'; Object.assign(f.config.models.capable, { provider: 'ollama', baseUrl: server.url });
+  const result = await runHost(f.config, { cwd: f.cwd, prompt: 'plan doors', workload: 'ask', tier: 'normal', scratch: f.scratch, taskId: 'task', readOnly: true, planAction: 'new' }, { approve: async () => true, localProbe: async () => true });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1].tools ?? []).toHaveLength(0);
+  expect(JSON.stringify(bodies[1])).toContain('complete existing proposal');
+  expect(f.plans.current()?.revision).toBe(1);
+});
+
+it('does not manufacture a plan from a clarification or overwrite an existing plan after failed repair', async () => {
+  const f = await setup(); const original = f.plans.save('# existing plan\n1. keep exact scope');
+  let phase = 0; const bodies: any[] = [];
+  const server = await mockServer((body, _req, res) => { bodies.push(body); completion(res, { text: phase ? '# implementation plan\n1. add doors\n2. verify collision' : 'which source should I use?' }); }); cleanups.push(server.close);
+  f.config.routingMode = 'direct'; Object.assign(f.config.models.capable, { provider: 'ollama', baseUrl: server.url });
+  const request = { cwd: f.cwd, prompt: 'refine plan', workload: 'ask' as const, tier: 'normal' as const, scratch: f.scratch, taskId: 'task', readOnly: true, planAction: 'revise' as const };
+  const deps = { approve: async () => true, localProbe: async () => true };
+  expect((await runHost(f.config, request, deps)).success).toBe(true);
+  expect(bodies).toHaveLength(1); expect(f.plans.current()).toEqual(original);
+  phase = 1; bodies.length = 0;
+  const result = await runHost(f.config, request, deps);
+  expect(result.success).toBe(false); expect(result.status).toBe('invalid_plan');
+  expect(bodies).toHaveLength(2); expect(f.plans.current()).toEqual(original);
 });

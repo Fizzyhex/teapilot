@@ -340,9 +340,9 @@ it('shares a request-wide ceiling with juniors and retains child evidence withou
       return completion(res, childBodies.length === 1 ? { tool: { name: 'write', arguments: { path: 'notes.txt', content: 'child evidence' } } }
         : { tool: { name: 'report', arguments: { status: 'done', summary: 'wrote notes.txt' } } });
     }
-    completion(res, ++calls === 1 ? { tool: { name: 'delegate_task', arguments: { message: 'narrow child objective' } } } : { text: 'received report' });
+    completion(res, ++calls === 1 ? { tool: { name: 'delegate_task', arguments: { type: 'implement', message: 'narrow child objective' } } } : { text: 'received report' });
   });
-  f.task.startRequest('aggregate', { calls: 4, modelCalls: 10, timeoutMs: 10_000 });
+  f.task.startRequest('aggregate', { calls: 8, modelCalls: 10, timeoutMs: 10_000 });
   const result = await run(f);
   expect(result.success, JSON.stringify(result)).toBe(true);
   expect(f.task.snapshot().request).toMatchObject({ calls: 3, modelCalls: 4, delegations: 1 });
@@ -355,7 +355,7 @@ it('shares a request-wide ceiling with juniors and retains child evidence withou
 it('does not pause the aggregate deadline while the instructor waits', async () => {
   const f = await attempt(async (body, _req, res) => {
     if (isJunior(body)) { await new Promise(resolve => setTimeout(resolve, 400)); return completion(res, { text: 'late' }); }
-    completion(res, { tool: { name: 'delegate_task', arguments: { message: 'slow child' } } });
+    completion(res, { tool: { name: 'delegate_task', arguments: { type: 'research', message: 'slow child' } } });
   });
   f.task.startRequest('short', { calls: 10, modelCalls: 10, timeoutMs: 180 });
   const result = await run(f);
@@ -404,6 +404,10 @@ it('continues an explicitly named task across host requests without trusting mod
   expect(second.success).toBe(true);
   expect(JSON.stringify(bodies.at(-1))).toContain('persistent-goal');
   expect(second.check).toBeUndefined();
+  expect(JSON.stringify(bodies.at(-1))).toContain('follow-up');
+  const states = await readdir(join(f.config.stateDir, 'tasks'));
+  const persisted = await Promise.all(states.map(async file => JSON.parse(await readFile(join(f.config.stateDir, 'tasks', file), 'utf8'))));
+  expect(persisted.find(state => state.scope.includes('explicit') && state.currentRequest === 'follow-up')?.objective).toBe('first objective');
 });
 
 it('reserves a read-only synthesis turn even when every inspection returns new evidence', async () => {
@@ -418,6 +422,20 @@ it('reserves a read-only synthesis turn even when every inspection returns new e
   const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'plan only', task: f.task, readOnly: true });
   expect(result.success, JSON.stringify(result)).toBe(true);
   expect(result.toolCalls).toBe(3); expect(requests).toBe(4);
+});
+
+it('keeps user amendments distinct from the objective and marks earlier reported blockers as historical', async () => {
+  const f = await setup();
+  f.task.update(instructor, { revision: 0, step: { id: 'source', goal: 'reference missing', status: 'blocked' } });
+  expect(JSON.parse(f.task.project(instructor)).steps[0].historical).toBe(false);
+  f.task.configure({ currentRequest: 'use https://github.com/id-Software/wolf3d' });
+  f.task.startRequest('next', { calls: 24, modelCalls: 20, timeoutMs: 10_000, readOnly: true });
+  const state = f.task.snapshot();
+  expect(state.objective).toBe('original objective');
+  expect(state.currentRequest).toContain('id-Software/wolf3d');
+  expect(JSON.parse(f.task.project(instructor)).steps[0]).toMatchObject({ status: 'blocked', historical: true });
+  const reopened = TaskStore.open(f.config.stateDir, 'explicit-scope', 'ignored', f.scratch);
+  expect(reopened.snapshot().currentRequest).toBe(state.currentRequest);
 });
 
 it('gives a read-only model a final synthesis turn after repetitive inspection', async () => {

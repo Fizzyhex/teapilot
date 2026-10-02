@@ -23,6 +23,7 @@ import { markWork } from './teachat/busy.js';
 import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 import { RequestRecovery } from './agents/recovery.js';
+import { RequestAllowance, planningCallLimit } from './agents/allowance.js';
 import { TaskStore } from './workspace/task.js';
 import { PlanStore, compactPlan, planNotice, planText } from './workspace/plan.js';
 
@@ -75,6 +76,7 @@ export interface HostDependencies {
 export async function runHost(config: Config, request: HostRequest, dependencies: HostDependencies): Promise<HostResult> {
   if (config.routingMode === 'direct' && !request.workload && !request.authorization) throw new Error('Direct routing requires teapilot ask or teapilot code.');
   const prompt = request.prompt.trim();
+  const userRequest = `${request.planAction === 'new' ? request.taskObjective ?? prompt : prompt}${request.correction ? `\nuser correction: ${request.correction}` : ''}`;
   if (!prompt || prompt.length + (request.correction?.length ?? 0) > config.policy.limits.maxPromptChars) throw new Error(`Prompt must contain 1–${config.policy.limits.maxPromptChars} characters`);
   dependencies.onActivity?.({ kind: 'waiting', label: 'Checking request availability...' });
   const cwd = await realpath(request.cwd);
@@ -371,14 +373,17 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         const scope = JSON.stringify([cwd, request.sessionId ?? request.workspace?.conversation ?? '', taskId]);
         task = TaskStore.open(config.stateDir, scope, request.taskObjective ?? prompt, request.scratch, text => telemetry.redact(text), request.constraints);
         if (currentPlan) task.setPlan(currentPlan);
-        if (request.planAction === 'new' || request.correction || request.constraints) task.configure({ ...(request.planAction === 'new' ? { objective: request.taskObjective ?? prompt } : {}), ...(request.correction ? { objective: `${request.taskObjective ?? prompt}\nuser correction: ${request.correction}` } : {}), ...(request.constraints ? { constraints: request.constraints } : {}) });
+        task.configure({ currentRequest: userRequest, ...(request.planAction === 'new' ? { objective: request.taskObjective ?? prompt } : {}), ...(request.constraints ? { constraints: request.constraints } : {}) });
         const multiplier = config.policy.escalation.maxEscalations + 1;
-        task.startRequest(requestId, { calls: config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * multiplier, timeoutMs: config.policy.limits.attemptTimeoutMs * multiplier, delegations: config.policy.limits.maxJuniorTurns, readOnly: request.readOnly });
+        task.startRequest(requestId, { calls: request.readOnly ? Math.min(config.policy.limits.maxToolCalls, config.policy.limits.planningToolCalls ?? planningCallLimit) : config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * multiplier, timeoutMs: config.policy.limits.attemptTimeoutMs * multiplier, delegations: config.policy.limits.maxJuniorTurns, readOnly: request.readOnly });
         await telemetry.event('task_start', { task: task.snapshot().id, resumed: Boolean(request.taskId), revision: task.snapshot().revision });
       }
       previous = await runAttempt({
+        allowance: recovery.allowance ??= new RequestAllowance({ calls: request.readOnly ? Math.min(config.policy.limits.maxToolCalls, config.policy.limits.planningToolCalls ?? planningCallLimit) : config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * (config.policy.escalation.maxEscalations + 1), timeoutMs: config.policy.limits.attemptTimeoutMs * (config.policy.escalation.maxEscalations + 1), delegations: config.policy.limits.maxJuniorTurns ?? 6 }, task),
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry, recovery, task, taskId: task ? taskId : undefined, readOnly: request.readOnly,
         mode: request.mode, conversational: request.conversational, side: request.side, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
+        currentRequest: userRequest,
+        expectsPlan: request.planAction === 'new' || request.planAction === 'revise',
         activePermissions: request.authorization ? activePermissions : undefined,
         requestCapabilities: request.authorization ? async (required, reason, signal) => {
           if (required.some(permission => permission.startsWith('repository.'))) {

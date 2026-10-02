@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
+import type { RequestAllowance } from './allowance.js';
 
 /** Host-owned, request-local recovery evidence. Attempts and instruction refreshes do not reset it. */
 export class RequestRecovery {
+  allowance?: RequestAllowance;
+  readonly paging = new Map<string, { source: string; offset: number; count: number; warned: boolean }>();
   readonly repeated = new Map<string, number>();
   readonly commands = new Map<string, string>();
   readonly inspectionWarnings = new Set<string>();

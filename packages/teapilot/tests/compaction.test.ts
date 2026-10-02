@@ -11,6 +11,7 @@ import type { ConversationTurn } from '../src/integration/events.js';
 import { emptyUsage } from '../src/integration/inference.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { Scratch } from '../src/workspace/scratch.js';
+import { TaskStore } from '../src/workspace/task.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -235,7 +236,7 @@ it('summarises earlier turns that no longer fit instead of dropping them, and re
   expect(JSON.stringify(bodies[0].messages)).toContain('detail 1');
   expect(JSON.stringify(bodies[0].messages)).toContain('Use this EXACT format');
   // Each summary folds in the last, so it is held to a length for the context it has to fit in.
-  expect(JSON.stringify(bodies[0].messages)).toContain(`Keep the whole summary under ${summaryLength(16384).words} words`);
+   expect(JSON.stringify(bodies[0].messages)).toContain(`Keep this summary under ${summaryLength(16384).words} words`);
   const main = JSON.stringify(bodies[1].messages);
   expect(main).toContain('compacted into the following summary');
   expect(main).toContain('request 3');
@@ -247,4 +248,44 @@ it('summarises earlier turns that no longer fit instead of dropping them, and re
   expect(bodies.filter(summaryRequest)).toHaveLength(0);
   expect(JSON.stringify(bodies[0].messages)).toContain('compacted into the following summary');
   expect(JSON.stringify(bodies[0].messages)).not.toContain('detail 1 detail 1');
+});
+
+it('keeps the current reference outside a stale summary and stops exploration on the second context pressure', async () => {
+  const bodies: any[] = []; let reads = 0;
+  const f = await attempt((body, _req, res) => {
+    bodies.push(body);
+    if (summaryRequest(body)) return completion(res, { text: '## Goal\nold objective\n## Blocked\nreference missing; ask user to supply it' });
+    completion(res, body.tools?.some((tool: any) => tool.function.name === 'read')
+      ? { tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } }
+      : { text: '<plan># door port\nuse the supplied wolf3d reference; unverified details remain gaps</plan>' });
+  });
+  for (let part = 1; part <= 24; part++) await writeFile(join(f.scratch, `part-${part}.txt`), Array.from({ length: 300 }, (_, index) => `part ${part} record ${index} unique code and door state fields`).join('\n'));
+  const currentRequest = 'use https://github.com/id-Software/wolf3d as the reference; do not implement before approval';
+  const result = await runAttempt({ ...f, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: currentRequest, currentRequest, scratch: f.scratch, readOnly: true });
+  expect(result.success, JSON.stringify(result)).toBe(true);
+  const main = bodies.filter(body => !summaryRequest(body));
+  expect(main.length).toBeGreaterThan(3);
+  for (const body of main) {
+    expect(JSON.stringify(body.messages)).toContain(currentRequest);
+    expect(JSON.stringify(body.messages).split('[current request:').length - 1).toBe(1);
+  }
+  expect((await events(f.config)).filter(event => event.type === 'compaction' && event.trigger === 'context')).toHaveLength(1);
+  expect(main.at(-1).tools ?? []).toHaveLength(0);
+  expect(result.toolCalls).toBeLessThan(22);
+});
+
+it('preserves the complete overall objective when a follow-up and bounded task projection omit its tail', async () => {
+  const bodies: any[] = [];
+  const f = await attempt((body, _req, res) => { bodies.push(body); completion(res, { text: 'noted' }); });
+  const objective = `${'original scope detail '.repeat(180)}exact acceptance: doors must remain passable during exit checks`;
+  const task = TaskStore.open(f.config.stateDir, 'long-objective', objective, f.scratch);
+  task.configure({ currentRequest: 'use the newly supplied source' });
+  task.startRequest('amendment', { calls: 24, modelCalls: 20, timeoutMs: 10_000 });
+  const result = await runAttempt({ ...f, task, tier: 'normal', workload: 'ask', web: false, approve: async () => true, prompt: 'use the newly supplied source', scratch: f.scratch });
+  expect(result.success).toBe(true);
+  const pinned = bodies[0].messages.find((message: any) => JSON.stringify(message).includes('[current request:'));
+  const source = /complete objective in (.*?)\]/.exec(JSON.stringify(pinned))?.[1]?.replaceAll('\\\\', '\\');
+  expect(source).toBeTruthy();
+  expect(await readFile(source!, 'utf8')).toBe(objective);
+  expect(JSON.stringify(pinned)).toContain('use the newly supplied source');
 });

@@ -92,3 +92,7 @@ When specifically asked for a challenge family, use the corresponding typed case
 - `scratchpad benchmark` (ScratchBench) -> `scratchbench-1-import-audit.ts`
 - `orchestration challenge` -> `orchestration-1o-greggs.ts`
 - `git benchmark` (GitBench) -> `gitbench-1-offline-kiosk.ts`
+
+## `discord.play`
+
+Reward context-aware adaptations. For game ports, teapilot suggesting that games are adapted to use control schema that fits limitations of Discord components and emojis for display is good.

@@ -52,6 +52,26 @@ export class Evidence {
     if (this.answerNow || this.recovery.refusalWarned) this.reason = 'ineffective_calls';
     else { this.answerNow = true; this.refused = 0; this.recovery.refusalWarned = true; }
   }
+  /** Observe sequential paging, not semantic relevance: different slices may still be useful evidence. */
+  observePaging(name: string, args: unknown, failed: boolean, pressure: boolean, actor = 'instructor'): string | undefined {
+    const data = args as { path?: string; id?: string; url?: string; offset?: number; search?: string };
+    const source = name === 'web_read' ? data.url : ['read', 'artifact_read'].includes(name) && !data.search ? data.path ?? data.id : undefined;
+    if (failed || !source) { this.recovery.paging.delete(actor); return undefined; }
+    const offset = data.offset ?? 1;
+    const previous = this.recovery.paging.get(actor);
+    const consecutive = previous?.source === source && (name === 'web_read' || offset >= previous.offset);
+    const current = { source, offset, count: consecutive ? previous.count + 1 : 1, warned: consecutive ? previous.warned : false };
+    this.recovery.paging.set(actor, current);
+    if (current.count >= 6 && current.warned && pressure && this.readOnly) {
+      this.answerNow = true; this.answerWhy = 'continued sequential paging under context pressure';
+      return 'exploration is finished: report source-backed findings and gaps from the evidence already read.';
+    }
+    if (current.count >= 4 && !current.warned) {
+      current.warned = true;
+      return 'you have read several consecutive sections of this source; search for the specific question or report the findings you already have.';
+    }
+    return undefined;
+  }
   observe(name: string, args: unknown, failed: boolean, result?: string, saved?: string, changed?: boolean, identity?: string): void {
     this.warning = undefined; this.refused = 0; this.recovery.refusalWarned = false;
     const data = args as { path?: string; command?: string };
