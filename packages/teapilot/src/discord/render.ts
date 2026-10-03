@@ -1,6 +1,7 @@
 import { MESSAGE_LIMIT } from 'pretty-send';
 import { describeCompaction, describeTip, describeTool } from '../presentation.js';
 import type { HostEvent } from '../integration/events.js';
+import { interruptionDetails, type Interruption } from '../interruption.js';
 
 export { chunk, MESSAGE_LIMIT } from 'pretty-send';
 /** Starts the custom id of a table's "view source" button. */
@@ -74,6 +75,7 @@ export class StatusCard {
   private readonly started: number;
   /** Set by `summary`: the turn is over and its clock stops. */
   private ended?: number;
+  private result?: { status: string; spentUsd: number; requestId?: string; interruption?: Interruption };
   constructor(private readonly redact: (text: string) => string, private readonly options: { now?: () => number; maxSteps?: number } = {}) {
     this.started = this.now();
   }
@@ -124,20 +126,25 @@ export class StatusCard {
     return `${status} · ${count} step${count === 1 ? '' : 's'} · ${elapsed((this.ended ?? this.now()) - this.started)}`;
   }
   /** The card once the turn has ended: one line, with the whole log behind Details. */
-  summary(result: { status: string; spentUsd: number; requestId?: string }): string {
+  summary(result: { status: string; spentUsd: number; requestId?: string; interruption?: Interruption }): string {
     this.ended ??= this.now();
-    return `-# Result: ${this.facts(result.status)} · accounted $${result.spentUsd.toFixed(6)}${result.requestId ? ` · request ${result.requestId}` : ''}`;
+    this.result = result;
+    return result.status === 'cancelled' || result.status === 'stopped' ? `-# ${this.facts('stopped')}` : `-# Result: ${this.facts(result.status)}`;
   }
   /** Every step, with the reasoning between them; attached as a file when too long for a message. */
   details(status: string): CardReply {
     const { steps } = this;
     const title = `**Turn details** · ${this.facts(status)}`;
-    if (!steps.length) return { text: `${title}\n${this.ended === undefined ? 'No steps yet.' : 'No steps.'}` };
+    const diagnostics = this.result ? [
+      `accounted $${this.result.spentUsd.toFixed(6)}`,
+      this.result.requestId ? `request ${escapeMarkdown(this.redact(this.result.requestId))}` : undefined,
+      this.result.interruption ? this.redact(interruptionDetails(this.result.interruption)) : undefined,
+    ].filter(Boolean).join('\n') : '';
     const markdown = steps.map(step => 'reasoning' in step ? step.reasoning.trim().split('\n').map((line, index) => `> ${index ? '' : '💭 '}${escapeMarkdown(line)}`).join('\n') : `- ${escapeMarkdown(line(step))}`).join('\n');
-    const text = `${title}\n${markdown}`;
+    const text = [title, diagnostics || undefined, markdown || (this.ended === undefined ? 'No steps yet.' : 'No steps.')].filter(Boolean).join('\n');
     if (text.length <= MESSAGE_LIMIT) return { text };
     const plain = steps.map(step => 'reasoning' in step ? `\n${step.reasoning.trim()}\n` : `- ${line(step)}`).join('\n');
-    return { text: `${title}\nThe full log is attached.`, file: { name: 'turn-details.md', content: `${this.facts(status)}\n\n${plain.trim()}\n` } };
+    return { text: `${title}\nThe full log is attached.`, file: { name: 'turn-details.md', content: `${this.facts(status)}\n\n${diagnostics ? `${diagnostics}\n\n` : ''}${plain.trim()}\n` } };
   }
 }
 

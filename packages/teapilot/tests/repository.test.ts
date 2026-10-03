@@ -235,10 +235,10 @@ it('a local inspection loop preserves same-tier recovery and reports its final f
   f.config.models.fast.enabled = false;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Create Pong' }, { approve: async () => false });
   expect(result).toMatchObject({ success: false, status: 'ineffective_calls', attempts: 4 });
-  expect(result.text).toContain('ineffective calls');
-  expect(result.text).toContain('configured escalation limit reached');
-  expect(result.text).toContain('Checks after latest observed edit: not run');
-  expect(result.text).toContain('Next:');
+  expect(result.text).toContain('the calls weren’t making progress');
+  expect(result.interruption?.detail).toContain('configured escalation limit reached');
+  expect(result.text).not.toContain('checks');
+  expect(result.text).toContain('ask for a smaller concrete change');
 });
 
 it('does not claim a denied shell command executed or changed files', async () => {
@@ -250,6 +250,7 @@ it('does not claim a denied shell command executed or changed files', async () =
   f.config.routingMode = 'direct'; f.config.models.capable.baseUrl = server.url;
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'coder', prompt: 'Run a command' }, { approve: async () => false });
   expect(result.status).toBe('approval_denied');
-  expect(result.text).not.toContain('Shell commands ran');
-  expect(result.text).not.toContain('Existing edits remain');
+  expect(result.interruption).toMatchObject({ shellRan: false, edits: [] });
+  expect(result.text).not.toContain('commands ran');
+  expect(result.text).not.toContain('edits to');
 });

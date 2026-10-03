@@ -2,6 +2,7 @@ import { layout, type Message as AnswerMessage, type Resolved } from 'pretty-sen
 import { casualLines, paceLines } from '../casual.js';
 import { runSession, type SessionExtension } from '../chat.js';
 import type { HostDependencies, HostRequest, HostResult } from '../host.js';
+import { formatInterruption } from '../interruption.js';
 import { repositoryOffered, repositoryPermissions } from '../execution/grants.js';
 import type { Approval, Approve } from '../execution/policy.js';
 import type { ConversationTurn, EventSink } from '../integration/events.js';
@@ -139,8 +140,8 @@ export class Conversation {
     const [command] = trimmed.split(/\s+/);
     if (trimmed === '/clear') { void this.say('Use /convo clear to clear the conversation, or /new to clear the workspace as well.', true); return; }
     if (command === '/stop') {
-      if (this.turn && !this.turn.signal.aborted) { this.stop(); void this.say('Stopping the current turn. Edits already made remain on disk.', true); }
-      else void this.say('Nothing is running.', true);
+      if (this.turn && !this.turn.signal.aborted) this.stop();
+      else void this.say('nothing is running.', true);
       return;
     }
     if (command === '/cd') { void this.say('The repository root is fixed for Discord sessions. Change it with teapilot discord setup.', true); return; }
@@ -324,7 +325,7 @@ export class Conversation {
       if (userId !== speaker && !this.operator(userId)) return { text: 'Only the person who asked, or an operator, can stop this turn.' };
       this.options.log(`${this.options.key}: stopped from the status card by ${userId}`);
       this.stop();
-      return { text: 'Stopping. Edits already made remain on disk.' };
+      return { text: 'stopping…' };
     } });
     const failed = (error: unknown) => { this.options.log(`${this.options.key}: status card failed: ${error instanceof Error ? error.message : String(error)}`); return undefined; };
     let posted: Promise<string | undefined> | undefined;
@@ -369,7 +370,7 @@ export class Conversation {
       if (!stopped && this.options.request.signal?.aborted) throw error;
       const message = error instanceof Error ? error.message : String(error);
       this.options.log(`${this.options.key}: ${stopped ? 'stopped' : `failed: ${this.options.redact(message)}`}`);
-      result = { requestId: '', success: false, status: stopped ? 'stopped' : 'error', text: stopped ? 'Stopped.' : `teapilot could not finish: ${message}`, spentUsd: 0, receipts: [], attempts: 0 };
+      result = { requestId: '', success: false, status: stopped ? 'stopped' : 'error', text: stopped ? 'stopped' : `couldn’t finish — ${message}`, spentUsd: 0, receipts: [], attempts: 0 };
     } finally {
       clearTimeout(pending);
       clearInterval(typing);
@@ -379,6 +380,9 @@ export class Conversation {
       this.live = undefined;
       if (this.turn === turn) this.turn = undefined;
     }
+    const stopped = !result.success && (result.status === 'cancelled' || result.status === 'stopped');
+    const reply = result.interruption ? formatInterruption(result.interruption, true) : result.text;
+    const quietStop = stopped && (result.interruption ? !result.interruption.edits.length && !result.interruption.shellRan : reply === 'stopped');
     // A conversational reply goes out a line at a time with typing between, and without a card or result line.
     const lines = result.casual && result.success ? casualLines(this.options.redact(result.text)) : undefined;
     if (lines) {
@@ -393,8 +397,8 @@ export class Conversation {
         if (found.after) await this.say(found.after, true);
       } else {
         // An aside stays plain text: its menu shares the messages as they were sent.
-        if (side) await this.say(`${result.text || '(no answer)'}\n-# this is an aside - not part of the main convo.`, true);
-        else await this.answer(result.text || '(no answer)');
+        if (side) await this.say(`${reply || '(no answer)'}\n-# this is an aside - not part of the main convo.`, true);
+        else if (!quietStop || answerOnly) await this.answer(reply || '(no answer)');
         // The turn a button started ended without a plan: give the plan its buttons back.
         if (refining && this.plan?.revising) { this.plan.revising = false; await this.paint(this.plan, ['approve', 'juniors', 'change']); }
       }

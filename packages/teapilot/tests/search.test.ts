@@ -53,7 +53,7 @@ it('a search outage during execution cannot produce a successful unverified answ
   const result = await runHost(f.config, { cwd: f.cwd, workload: 'ask', web: true, prompt: 'Research current facts' }, { approve: async () => false });
   expect(result).toMatchObject({ success: false, status: 'search_unavailable', attempts: 1 });
   expect(inference).toBe(1);
-  expect(result.text).toContain('Check the search service');
+  expect(result.text).toContain('check the search connection');
 });
 
 const downSearch = async (model: (body: any) => Parameters<typeof completion>[1]) => {

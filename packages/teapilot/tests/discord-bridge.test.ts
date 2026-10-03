@@ -37,7 +37,7 @@ function discord() {
 }
 /** An operator, a whitelisted user, and anyone else. */
 const access = { roleOf: (id: string) => ({ op: 'operator', bob: 'user' } as const)[id as 'op' | 'bob'], adminFor: () => undefined, callerFor: () => () => ({ permissions: [] }) } as unknown as AccessStore;
-const finished = (cards: Array<{ text: string }>) => vi.waitFor(() => expect(cards.at(-1)?.text).toMatch(/^-# Result: /));
+const finished = (cards: Array<{ text: string }>) => vi.waitFor(() => expect(cards.at(-1)?.text).toMatch(/^-# (Result: |stopped · )/));
 
 function conversation(overrides: Partial<ConversationOptions> & Pick<ConversationOptions, 'transport'>) {
   const controller = new AbortController();
@@ -62,7 +62,8 @@ it('runs a turn per message, posts the redacted answer, then collapses the statu
   expect(run.mock.calls[0]![0]).toMatchObject({ prompt: 'What does this repo do?', mode: 'ask' });
   expect(sent).toEqual(['Done with [REDACTED].']);
   expect(cards[0]!.text).toMatch(/^🫖 thinking\.+ · 0s$/);
-  expect(cards.at(-1)!.text).toBe('-# Result: completed · 0 steps · 0s · accounted $0.000000 · request req-1');
+  expect(cards.at(-1)!.text).toBe('-# Result: completed · 0 steps · 0s');
+  expect(cards.at(-1)!.controls.press('details', 'anyone').text).toContain('accounted $0.000000\nrequest req-1');
   // Stop goes with the turn; Details stays.
   expect(cards[0]!.controls.stop).toBe(true);
   expect(cards.at(-1)!.controls.stop).toBe(false);
@@ -141,11 +142,38 @@ it('lets the person who asked, or an operator, stop the turn from its card', asy
   chat.push('long task', { sender: 'bob' });
   await vi.waitFor(() => expect(cards).not.toHaveLength(0));
   expect(press('stop', 'mallory').text).toMatch(/^Only the person who asked/);
-  expect(press('stop', 'bob').text).toMatch(/^Stopping/);
+  expect(press('stop', 'bob').text).toBe('stopping…');
   await finished(cards);
-  expect(sent).toEqual(['Stopped.']);
-  expect(cards.at(-1)!.text).toMatch(/^-# Result: stopped/);
+  expect(sent).toEqual([]);
+  expect(cards.at(-1)!.text).toMatch(/^-# stopped · /);
   expect(press('stop', 'op').text).toBe('This turn is already ending.');
+});
+
+it.each(['button', 'command'])('acknowledges a %s stop with edits without a failure report', async source => {
+  const { sent, cards, transport, press } = discord();
+  const run: ConversationOptions['run'] = request => new Promise(resolve => {
+    request.signal!.addEventListener('abort', () => resolve({ ...result, success: false, status: 'cancelled', text: 'host fallback', interruption: {
+      reason: 'cancelled', edits: [{ path: 'secret-token.md', size: 2048 }], shellRan: false,
+    } }), { once: true });
+  });
+  const { chat } = conversation({ transport, run, access });
+  chat.push('edit a file', { sender: 'bob' });
+  await vi.waitFor(() => expect(cards).not.toHaveLength(0));
+  if (source === 'button') press('stop', 'bob');
+  else chat.push('/stop', { sender: 'bob' });
+  await finished(cards);
+  expect(sent).toEqual(['stopped — edits to `[REDACTED].md` are still there.\n\n-# those edits haven’t been checked.']);
+  expect(cards.at(-1)!.text).toMatch(/^-# stopped · /);
+  expect(press('details', 'bob').text).toContain('edited `[REDACTED].md` (2 KB)');
+  expect(press('details', 'bob').text).not.toContain('secret-token');
+});
+
+it('keeps an answer-only stop visible when there is no status card', async () => {
+  const { sent, cards, transport } = discord();
+  const { chat } = conversation({ transport, run: async () => ({ ...result, success: false, status: 'cancelled', text: 'stopped', interruption: { reason: 'cancelled', edits: [], shellRan: false } }) });
+  chat.push('/btw quick question');
+  await vi.waitFor(() => expect(sent).toContain('stopped\n-# this is an aside - not part of the main convo.'));
+  expect(cards).toHaveLength(0);
 });
 
 it('says on the card when a turn waits for an approval, then carries on', async () => {
@@ -244,7 +272,7 @@ it('refuses /cd so the repository root stays fixed', async () => {
 });
 
 it('/stop cancels only the running turn; the conversation continues', async () => {
-  const { sent, transport } = discord();
+  const { sent, cards, transport } = discord();
   let calls = 0;
   const run = vi.fn(async request => {
     if (++calls > 1) return result;
@@ -255,7 +283,8 @@ it('/stop cancels only the running turn; the conversation continues', async () =
   chat.push('long task');
   await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
   chat.push('/stop');
-  await vi.waitFor(() => expect(sent).toContain('Stopped.'));
+  await finished(cards);
+  expect(sent).toEqual([]);
   chat.push('next');
   await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
   expect(chat.active).toBe(true);

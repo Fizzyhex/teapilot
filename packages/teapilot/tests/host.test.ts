@@ -18,6 +18,41 @@ async function setup(handler: Handler) {
 }
 
 describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
+  it('acknowledges a stop before execution without workspace warnings', async () => {
+    const f = await fixture(); cleanups.push(f.cleanup);
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'do a task', signal: AbortSignal.abort() }, {
+      approve: async () => true, localProbe: async () => true,
+    });
+    expect(result).toMatchObject({ success: false, status: 'cancelled', text: 'stopped', interruption: { reason: 'cancelled', edits: [], shellRan: false } });
+  });
+
+  it.each(['write', 'bash'])('retains partial-work facts when stopped after %s', async tool => {
+    const controller = new AbortController();
+    const f = await setup((_body, req, res) => {
+      if (req.url === '/jev') jev(res, 'coder.normal');
+      else if (req.url?.endsWith('/models')) res.end('{}');
+      else completion(res, { tool: tool === 'write'
+        ? { name: 'write', arguments: { path: 'partial.txt', content: 'keep me\n' } }
+        : { name: 'bash', arguments: { command: 'echo partial work' } } });
+    });
+    const result = await runHost(f.config, { cwd: f.cwd, prompt: 'make a change', signal: controller.signal }, {
+      approve: async () => true, localProbe: async () => true,
+      onEvent: event => { if (event.type === 'tool_execution_end' && event.tool === tool) controller.abort(); },
+    });
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.status).toBe('cancelled');
+    expect(result.text).not.toMatch(/Incomplete:|Next:|rollback|retry/);
+    if (tool === 'write') {
+      expect(result.text).toContain('stopped — edits to `partial.txt` are still there.');
+      expect(result.text).toContain('those edits haven’t been checked.');
+      expect(result.interruption?.edits).toEqual([{ path: 'partial.txt', size: 8 }]);
+      expect(await readFile(join(f.cwd, 'partial.txt'), 'utf8')).toBe('keep me\n');
+    } else {
+      expect(result.text).toContain('stopped — commands ran, so there may be changes.');
+      expect(result.interruption).toMatchObject({ shellRan: true, edits: [] });
+    }
+  });
+
   it('routes follow-ups using recent history while dropping oversized older turns', async () => {
     let routedHistory: unknown;
     const recent = { user: 'Suggest two changes to this repository.', assistant: 'First: rename a variable. Second: add validation.' };
@@ -413,7 +448,8 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     });
     expect(result.capability).toBe('ask.normal');
     expect(result.status).toBe('tool_limit');
-    expect(result.text).toContain(`Observed file edits: granted.txt (${Buffer.byteLength('approved\n')} B).`);
+    expect(result.text).toContain('edits to `granted.txt` are still there.');
+    expect(result.interruption?.edits).toEqual([{ path: 'granted.txt', size: Buffer.byteLength('approved\n') }]);
     expect(result.text).not.toContain('none recorded');
     expect(await readFile(join(f.cwd, 'granted.txt'), 'utf8')).toBe('approved\n');
   });
@@ -450,7 +486,8 @@ describe('real JevRouter SDK + pi loop with mock HTTP providers', () => {
     f.config.models.capable.contextTokens = 16384;
     const result = await runHost(f.config, { cwd: f.cwd, prompt: 'x!'.repeat(6000) }, { approve: async () => false });
     expect(result.status).toBe('context_limit');
-    expect(result.text).toContain('Next: Type /convo clear to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.');
+    expect(result.text).toContain('ran out of context');
+    expect(result.text).toContain('/convo clear clears the conversation history');
   });
 
   it('asks the first routing call which teachat identity fits and returns the answer', async () => {

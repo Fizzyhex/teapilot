@@ -44,10 +44,30 @@ it('folds a turn into one redacted status card with its latest steps', () => {
   card.push({ type: 'tool_execution_end', tool: 'write', path: 'b_c.ts', size: 10, isError: true });
   card.reason('a'.repeat(300) + ' the <think>last</think> **thought**');
   expect(card.render()).toBe(`🫖 thinking.. · 1m 05s\n-# … 1 earlier\n-# shell: echo \\[REDACTED\\]\n-# write b\\_c.ts (10 B) — failed\n-# 💭 …${'a'.repeat(139)} the last \\*\\*thought\\*\\*`);
-  expect(card.summary({ status: 'completed', spentUsd: 0.25, requestId: 'r1' })).toBe('-# Result: completed · 3 steps · 1m 05s · accounted $0.250000 · request r1');
+  expect(card.summary({ status: 'completed', spentUsd: 0.25, requestId: 'r1' })).toBe('-# Result: completed · 3 steps · 1m 05s');
   // The turn's clock stops with it.
   now = 200_000;
   expect(card.details('completed').text).toMatch(/^\*\*Turn details\*\* · completed · 3 steps · 1m 05s\n/);
+  expect(card.details('completed').text).toContain('accounted $0.250000\nrequest r1');
+});
+
+it('shows a quiet stop and keeps forensic details, including no-step requests', () => {
+  const card = new StatusCard(text => text, { now: () => 0 });
+  expect(card.summary({ status: 'cancelled', spentUsd: 0.000181, requestId: 'full-request-id', interruption: {
+    reason: 'cancelled', edits: [{ path: 'file.md', size: 2048 }], shellRan: false,
+  } })).toBe('-# stopped · 0 steps · 0s');
+  expect(card.details('cancelled').text).toContain('accounted $0.000181\nrequest full-request-id\nedited `file.md` (2 KB)\nchecks: not run after latest recorded edit');
+});
+
+it('keeps cost, full request id and edit details when the log becomes an attachment', () => {
+  const card = new StatusCard(text => text.replaceAll('secret', '[REDACTED]'), { now: () => 0 });
+  card.reason('x'.repeat(3000));
+  card.summary({ status: 'cancelled', spentUsd: 0.000181, requestId: 'full-request-id', interruption: {
+    reason: 'cancelled', edits: [{ path: 'secret.md', size: 2048 }], shellRan: false,
+  } });
+  const details = card.details('cancelled');
+  expect(details.file?.content).toContain('accounted $0.000181\nrequest full-request-id\nedited `[REDACTED].md` (2 KB)');
+  expect(details.file?.content).not.toContain('secret');
 });
 
 it('escapes a preview that would start a list, and clears it when the message ends', () => {

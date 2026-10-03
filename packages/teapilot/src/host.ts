@@ -10,7 +10,8 @@ import type { ConversationWorkspace } from './agents/workspace.js';
 import { runAttempt, type AttemptResult } from './agents/run.js';
 import { tiers, type Config, type Tier, type TierPreference, type Workload } from './config.js';
 import { ExecutionPolicy, type Approve, type BeforeMutation } from './execution/policy.js';
-import { formatSize, prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
+import { prepareConversation, type ConversationTurn, type TextContext, type EventSink } from './integration/events.js';
+import { formatInterruption, type Interruption } from './interruption.js';
 import { lockState, SpendGovernor } from './inference/budget.js';
 import { budgetedJev, localAvailable, type CancellableJevProvider } from './inference/providers.js';
 import { capabilities } from './routing/capabilities.js';
@@ -54,6 +55,8 @@ export interface HostResult {
   failedCalls?: Array<{ call: string; error: string }>;
   /** On a stopped request: what the model itself last said, as `text` is then the host's diagnostic. */
   reply?: string;
+  /** Partial-work facts for surface-specific interruption messages and Details. */
+  interruption?: Interruption;
   teachatIdentity?: TeachatIdentityAnswer;
   /** Answered in conversational mode: the text is short lines, each meant to be sent as its own message. */
   casual?: boolean;
@@ -128,6 +131,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
   const fileSizes = new Map<string, number>();
   const failedCalls = new Map<string, { call: string; error: string }>();
   let shellRan = false;
+  let interruption: Interruption | undefined;
   const activePermissions: Permission[] = ['inference'];
   let searchDisabled = false;
   let searchUnverified = false;
@@ -177,7 +181,7 @@ export async function runHost(config: Config, request: HostRequest, dependencies
     const usedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
     const termination = attempt.ending?.termination;
     const actions: Record<string, string> = {
-      approval_denied: 'Review the denied action; rerun only if it is appropriate to approve it.',
+      approval_denied: 'review the denied action before deciding whether to approve it.',
       provider_error: termination?.eosReason === 'loop_detected'
         ? 'the provider stopped a token loop; affected calls did not run. retry a targeted step rather than the same generation, or check the model with teapilot doctor --live.'
         : termination?.eosReason === 'max_new_tokens' || termination?.finishReason === 'length'
@@ -185,32 +189,37 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         : termination?.malformedTools
         ? 'the provider sent malformed tool arguments; affected calls did not run. check its tool protocol with teapilot doctor --live.'
         : 'the provider failed or returned no usable tool call. check the models with teapilot doctor --live; call size is not a confirmed cause.',
-      unsupported: 'Check model context and tool support with teapilot doctor --live.',
-      context_limit: 'Type /convo clear to clear conversation history, /tier reasoning or /tier deep for a larger context window (if configured), or split the request into smaller steps.',
-      payload_limit: 'Reduce request size; the serialized payload exceeds the transport safety limit.',
-      budget: 'Review spending and remaining request/day limits before retrying.',
-      ineffective_calls: usedRepository ? 'Inspect the current files, then retry with a narrower concrete change.' : 'Retry with a narrower question, or check the search service with teapilot doctor --live.',
-      test_failures: 'Inspect the failing check output and retry with that failure as the task.',
-      tool_failures: 'Inspect the tool error and correct its path or command before retrying.',
-      cancelled: 'Review any existing edits before starting another request.',
-      search_unavailable: `Check the search service connection and JSON output. ${searchRepair(config)}`,
+      unsupported: 'check the model’s context and tool support with teapilot doctor --live.',
+      context_limit: 'try a smaller request, or /tier reasoning or /tier deep if a larger context window is configured; /convo clear clears the conversation history.',
+      payload_limit: 'try sending a smaller request or attachment.',
+      budget: 'check the request and daily spending limits before retrying.',
+      ineffective_calls: usedRepository ? 'check the current files, then ask for a smaller concrete change.' : 'try a narrower question, or check search with teapilot doctor --live.',
+      test_failures: 'use the failing check output as the next task.',
+      tool_failures: 'check the tool’s path or command before retrying.',
+      search_unavailable: `check the search connection and JSON output. ${searchRepair(config)}`,
     };
-    // A workload label such as ask.normal does not mean repository tools stayed
-    // unused: mid-run capability requests can grant write/shell under any workload.
-    const touchedRepository = selected?.startsWith('coder.') || changedFiles.size > 0 || shellRan;
-    const largest = stop === 'context_limit' && attempt.largestToolResult ? ` Largest tool call: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars, arguments and result).` : '';
-    return [`Incomplete: ${stop.replaceAll('_', ' ')}.`, fallback,
-      touchedRepository ? `Observed file edits: ${changedFiles.size ? [...changedFiles].map(path => fileSizes.has(path) ? `${path} (${formatSize(fileSizes.get(path)!)})` : path).join(', ') : 'none recorded'}.${shellRan ? ' Shell commands ran; additional changes may exist.' : ''}` : undefined,
-      touchedRepository ? `Checks after latest observed edit: ${attempt.check ?? 'not run'}.` : undefined,
-      changedFiles.size || shellRan ? 'Existing edits remain; no automatic rollback was performed.' : undefined,
-      `Next: ${actions[stop] ?? 'Review the partial work, then retry with a smaller task.'}${largest}`,
-      attempt.text ? `Model response (task incomplete):\n${attempt.text}` : undefined].filter(Boolean).join('\n');
+    const largest = stop === 'context_limit' && attempt.largestToolResult ? `largest tool call: ${attempt.largestToolResult.tool} (~${attempt.largestToolResult.chars} chars, arguments and result).` : undefined;
+    interruption = {
+      reason: stop, edits: [...changedFiles].map(path => ({ path, size: fileSizes.get(path) })), shellRan, check: attempt.check,
+      advice: stop === 'cancelled' ? undefined : actions[stop] ?? 'review the partial work, then try a smaller task.',
+      detail: [fallback, largest].filter(Boolean).join('\n') || undefined,
+      reply: attempt.text ? `${searchUnverified ? 'search was unavailable; this partial reply wasn’t checked against current sources.\n\n' : ''}${attempt.text}` : undefined,
+    };
+    return formatInterruption(interruption);
   };
   let previous: AttemptResult | undefined;
   let previousTier: Tier | undefined;
   const finish = async (success: boolean, status: string, text: string): Promise<HostResult> => {
+    if (!success && request.signal?.aborted) status = 'cancelled';
+    // All abort exits use the same acknowledgement, including stops between attempts.
+    if (status === 'cancelled') text = incomplete({ ...previous, success: false, text: previous?.text ?? '', turns: 0, toolCalls: 0, stopped: 'cancelled', check });
     dependencies.onActivity?.({ kind: 'waiting', label: 'Finalising request...' });
-    const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }), ...(casual && { casual }),
+    const result = { requestId, success, status, ...(previous?.steps?.length ? { steps: redactSteps(previous.steps, telemetry.redact.bind(telemetry)) } : {}), text: telemetry.redact((searchUnverified && success ? 'Web search was unavailable. This answer is unverified against current sources.\n\n' : '') + text), capability: selected, tier: selected?.split('.')[1] as Tier | undefined, spentUsd: budget.spent().request, receipts, attempts, check, models, ...(teachatIdentity && { teachatIdentity }), ...(casual && { casual }),
+      ...(!success && interruption ? { interruption: { ...interruption,
+        edits: interruption.edits.map(edit => ({ ...edit, path: telemetry.redact(edit.path) })),
+        advice: interruption.advice && telemetry.redact(interruption.advice), detail: interruption.detail && telemetry.redact(interruption.detail),
+        reply: interruption.reply && telemetry.redact(interruption.reply),
+      } } : {}),
       ...(!success && previous?.text.trim() ? { reply: telemetry.redact(previous.text.trim().slice(0, 20_000)) } : {}),
       ...(!success && failedCalls.size ? { failedCalls: [...failedCalls.values()].slice(-8).map(({ call, error }) => ({ call: telemetry.redact(call), error: telemetry.redact(error) })) } : {}) };
     const body = success && plans ? planText(result.text) : undefined;
