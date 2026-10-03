@@ -84,7 +84,7 @@ System prompts or tool descriptioons that aims to fix specific problems (such as
 
 For situations where general advice is preferrable, keep it short and concise, ideally no more than a sentence. In system prompts, short organisational comments are useful to help organise out multi-line guidelines.
 
-## Avoid 'Context Rot'
+## Avoid Context Rot
 
 teapilot strives to preserve the context window - encouraging agents to only receive data necessary for the job. Data that may be lost through compaction, or is too big/distracting to bring into full context of the agent is preferrably saved in files or processed into only needed data; see `artifacts` or `takeNotes` for examples.
 
