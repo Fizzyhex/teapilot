@@ -4,7 +4,7 @@ import { Type } from '@earendil-works/pi-ai';
 import { planningTools } from '../src/agents/planning.js';
 import { Evidence } from '../src/routing/escalation.js';
 import { RequestRecovery } from '../src/agents/recovery.js';
-import { juniorTools, juniorProfiles } from '../src/agents/delegate.js';
+import { juniorTools } from '../src/agents/delegate.js';
 
 const tool = (name: string): AgentTool => ({ name, label: name, description: name, parameters: Type.Object({}), execute: vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }], details: {} })) });
 it('keeps exploration and host bookkeeping but excludes project, app and access mutations', () => {
@@ -41,20 +41,17 @@ it('treats saved-artifact retrieval as inspection rather than a failed execution
   expect(evidence.answerNow).toBe(true); expect(evidence.reason).toBeUndefined();
 });
 
-it('enforces junior profiles independently of inherited editing and publication access', async () => {
-  const available = ['read', 'write', 'edit', 'bash', 'web_read', 'file_send', 'play_start', 'play_update', 'play_stop', 'play_test', 'play_inspect', 'report'].map(tool);
-  for (const type of ['research', 'plan', 'review'] as const) {
-    const filtered = juniorTools(available, type);
-    expect(filtered.map(tool => tool.name)).not.toEqual(expect.arrayContaining(['write', 'edit']));
-    expect(filtered.some(tool => ['file_send', 'play_start', 'play_update', 'play_stop'].includes(tool.name))).toBe(false);
-    const shell = filtered.find(tool => tool.name === 'bash')!;
-    await expect(shell.execute('c', { command: 'npm test' })).rejects.toThrow('planning shell refuses');
-    expect(filtered.some(tool => tool.name === 'play_test')).toBe(type === 'review');
-  }
-  const implement = juniorTools(available, 'implement').map(tool => tool.name);
-  expect(implement).toContain('write'); expect(implement).toContain('play_test');
-  expect(implement).not.toContain('play_update');
-  expect(Object.values(juniorProfiles).map(profile => profile.calls)).toEqual([8, 6, 20, 8]);
+it('keeps publication and access administration outside planning tools regardless of agent type', () => {
+  const available = ['read', 'write', 'edit', 'bash', 'web_read', 'file_send', 'play_start', 'play_update', 'play_stop', 'play_test', 'play_inspect', 'report', 'access_grant', 'request_access'].map(tool);
+  const filtered = planningTools(available).map(tool => tool.name);
+  expect(filtered).toContain('read');
+  for (const forbidden of ['file_send', 'play_start', 'play_update', 'play_stop', 'access_grant', 'request_access']) expect(filtered).not.toContain(forbidden);
+});
+
+it('uses one junior tool set rather than assigning access by semantic category', () => {
+  const names = ['read', 'write', 'edit', 'bash', 'web_read', 'file_send', 'play_start', 'play_update', 'play_stop', 'play_test', 'play_inspect', 'report', 'request_capabilities', 'request_escalation', 'delegate_task'] as const;
+  const available = names.map(tool);
+  expect(juniorTools(available).map(item => item.name)).toEqual(['read', 'write', 'edit', 'bash', 'web_read', 'play_test', 'play_inspect', 'report', 'request_capabilities']);
 });
 
 it('warns about sequential paging and synthesizes only when continued paging also pressures context', () => {

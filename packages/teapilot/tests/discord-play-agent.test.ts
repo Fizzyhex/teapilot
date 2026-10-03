@@ -438,15 +438,15 @@ it('gives a junior the play tools to build and dry-run apps, but leaves posting 
   const instructor: any[] = [], junior: any[] = [];
   const juniorSteps = [written(), { tool: { name: 'play_test', arguments: { file: 'apps/counter.js', actions: [{ kind: 'button', id: 'add' }] } } }, { tool: { name: 'report', arguments: { status: 'done', summary: 'apps/counter.js is ready.' } } }];
   const f = await setup((body, _req, res) => {
-    if (JSON.stringify(body.messages?.[0] ?? '').includes('Junior: your name is')) { junior.push(body); return completion(res, juniorSteps[junior.length - 1]!); }
+    if (JSON.stringify(body.messages?.[0] ?? '').includes('You are junior ')) { junior.push(body); return completion(res, juniorSteps[junior.length - 1]!); }
     instructor.push(body);
-    completion(res, instructor.length === 1 ? { tool: { name: 'delegate_task', arguments: { type: 'implement', message: 'Build a counter app in apps/counter.js.' } } } : { text: 'Done.' });
+    completion(res, instructor.length === 1 ? { tool: { name: 'delegate_task', arguments: { description: 'Build a counter application', prompt: 'Build a counter app in apps/counter.js.', agent_type: 'write', artifacts: [] } } } : { text: 'Done.' });
   });
   await runAttempt({ ...f, ...f.base, prompt: 'make me a counter', activePermissions: ['inference', 'discord.play'], scratch: join(f.cwd, '.scratch'), ...f.turn() });
   expect(names(junior[0])).toEqual(expect.arrayContaining(['play_test', 'play_inspect', 'report']));
   expect(names(junior[0])).not.toContain('play_update');
   expect(names(junior[0])).not.toContain('play_start');
-  expect(JSON.stringify(junior[0].messages)).toContain('As a junior you do not post apps');
+  expect(JSON.stringify(junior[0].messages)).toContain('Build a counter app in apps/counter.js.');
   expect(last(junior[2])).toContain('state: 1');
   expect(f.posts).toEqual([]);
   expect(names(instructor[0])).toContain('play_start');

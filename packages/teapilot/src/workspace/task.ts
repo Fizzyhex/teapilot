@@ -18,7 +18,7 @@ export const claimSchema = z.object({ id, text: z.string().min(1).max(400), basi
 const artifactSchema = z.object({ id, sha256: z.string().regex(/^[a-f0-9]{64}$/), path: z.string().max(2048), bytes: z.number().int().nonnegative().max(8 * 1024 * 1024), lines: z.number().int().nonnegative(), complete: z.boolean(), kind: z.enum(['logs', 'pages', 'outputs']), actor: id, producer: id, at: z.number() }).strict();
 const receiptSchema = z.object({ id, request: z.string().max(100), actor: id, tool: z.string().max(80), call: z.string().max(2000).optional(), argsSha256: z.string(), summary: z.string().max(240), excerpt: z.string().max(400), origin: z.enum(['file', 'inventory', 'saved-output', 'transcript']).optional(), status: z.enum(['pending', 'succeeded', 'failed', 'uncertain']), artifacts: z.array(id).max(8), at: z.number() }).strict();
 const requestSchema = z.object({ id: z.string().max(100), calls: z.number().int().nonnegative(), modelCalls: z.number().int().nonnegative(), maxCalls: z.number().int().nonnegative(), maxModelCalls: z.number().int().nonnegative(), deadline: z.number(), status: z.string().max(80), delegations: z.number().int().nonnegative(), maxDelegations: z.number().int().nonnegative(), readOnly: z.boolean().optional(), juniorCalls: z.record(id, z.number().int().nonnegative()).default({}) }).strict();
-const juniorSchema = z.object({ name: id, type: z.enum(['research', 'plan', 'implement', 'review']).optional(), assignment: z.string().max(2000).optional(), scratch: z.string().max(2048), turn: z.number().int().nonnegative(), turns: z.array(z.object({ user: z.string().max(2000), assistant: z.string().max(4000) })).max(6) }).strict();
+const juniorSchema = z.object({ name: id, type: z.enum(['research', 'plan', 'implement', 'review']).optional(), agent_type: z.enum(['research', 'write', 'test']).optional(), description: z.string().max(500).optional(), assignment: z.string().max(24_000).optional(), artifacts: z.array(z.string().min(1).max(2048)).max(16).optional(), scratch: z.string().max(2048), turn: z.number().int().nonnegative(), turns: z.array(z.object({ user: z.string().max(24_000), assistant: z.string().max(4000) })).max(6) }).strict();
 const stateSchema = z.object({
   version: z.literal(1), id, scope: z.string().max(4096), scratch: z.string().max(2048), revision: z.number().int().nonnegative(), objective: z.string().max(24_000),
   constraints: z.array(z.string().min(1).max(400)).max(8).refine(values => JSON.stringify(values).length <= 2400, 'constraints exceed the pinned context allowance'),
@@ -144,7 +144,7 @@ export class TaskStore {
   }
   saveJunior(junior: z.infer<typeof juniorSchema>, dismiss = false): void {
     this.change(next => {
-      const value = juniorSchema.parse({ ...junior, ...(junior.assignment ? { assignment: this.redact(junior.assignment).slice(0, 2000) } : {}), turns: junior.turns.slice(-6).map(turn => ({ user: this.redact(turn.user).slice(0, 2000), assistant: this.redact(turn.assistant).slice(0, 4000) })) });
+      const value = juniorSchema.parse({ ...junior, ...(junior.description ? { description: this.redact(junior.description) } : {}), ...(junior.assignment ? { assignment: this.redact(junior.assignment) } : {}), turns: junior.turns.slice(-6).map(turn => ({ user: this.redact(turn.user), assistant: this.redact(turn.assistant).slice(0, 4000) })) });
       next.juniors = next.juniors.filter(item => item.name !== value.name);
       if (!dismiss) {
         next.juniors.push(value);
@@ -153,7 +153,7 @@ export class TaskStore {
     });
   }
   authorizeArtifacts(actor: TaskActor, references: string[]): void {
-    if (references.length > 4 || references.some(ref => !this.state.artifacts.some(artifact => artifact.id === ref && this.accessible(actor, artifact)))) throw new Error('unknown or inaccessible delegation evidence');
+    if (references.length > 16 || references.some(ref => !this.state.artifacts.some(artifact => artifact.id === ref && this.accessible(actor, artifact)))) throw new Error('unknown or inaccessible delegation evidence');
   }
   authorizeEvidence(actor: TaskActor, references: string[]): void {
     if (references.length > 4 || references.some(ref => !this.state.artifacts.some(artifact => artifact.id === ref && this.accessible(actor, artifact))
@@ -251,7 +251,7 @@ export class TaskStore {
       budget: this.remaining(),
       steps: this.state.steps.filter(item => item.actor === actor.name && item.status !== 'done').map(item => ({ ...item, historical: item.request !== this.state.request?.id, goal: brief(item.goal, 160), acceptance: brief(item.acceptance, 160) })),
       claims: this.state.claims.filter(item => item.actor === actor.name).slice(-4).map(item => ({ ...item, historical: item.request !== this.state.request?.id, text: brief(item.text, 240) })),
-      juniors: actor.name === instructor.name ? this.state.juniors.slice(-4).map(({ name, type, turn, assignment }) => ({ name, type, turn, assignment: assignment && brief(assignment, 240) })) : undefined,
+      juniors: actor.name === instructor.name ? this.state.juniors.slice(-4).map(({ name, description, agent_type, type, turn, assignment }) => ({ name, description, agent_type, legacyType: type, turn, assignment: assignment && brief(assignment, 240) })) : undefined,
       recent: this.state.receipts.filter(item => actor.name === instructor.name || item.actor === actor.name).slice(-4).map(({ id, actor, tool, summary, status, artifacts }) => ({ id, actor, tool, summary, status, artifacts })),
       observations: this.observations(actor),
       artifacts: artifacts.slice(-4).map(({ id, kind, bytes, complete, producer }) => ({ id, kind, bytes, complete, producer })),

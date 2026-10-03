@@ -151,7 +151,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   }
   const pinnedRequest = pinnedPrefix + JSON.stringify({
     ...(objective && objective !== requestWords ? { objective: pinnedObjective } : {}),
-    ...(input.junior ? { type: input.junior.type, assignment: input.junior.assignment } : {}),
+    ...(input.junior ? { junior: { description: input.junior.description, agent_type: input.junior.agent_type, assignment: input.junior.assignment, artifacts: input.junior.artifacts } } : {}),
     current: requestWords.length > 2400 ? `${requestWords.slice(0, 2400)}\n[continued ${requestSource ? `in ${requestSource}` : 'in the verbatim current user message, retained outside compaction'}]` : requestWords,
     readOnly: Boolean(input.readOnly),
   });
@@ -255,7 +255,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     if (config.test?.fixture && model.toolCalling) setup.tools.push(fixtureTool(config.test.fixture, () => telemetry.event('fixture_invocation', { tool: config.test!.fixture!.name, attempt: input.attempt ?? 0 })));
     if (task && model.toolCalling && !input.side && !input.casual) setup.tools.push(...taskTools(task, actor));
     if (input.conversational) setup.systemPrompt += '\nKeep context for follow-up turns; do not treat each message as an unrelated task.';
-    if (input.junior) setup.systemPrompt += juniorPrompt(input.junior.name, input.junior.type);
+    if (input.junior) setup.systemPrompt += juniorPrompt(input.junior);
     else if (delegation) setup.systemPrompt += delegationPrompt();
     if (input.side) setup.systemPrompt += '\nSide question (/btw): the user is asking an aside about this conversation. Neither the question nor your answer will be kept in it, so answer briefly and completely. You can read, search and send files here, but not change files, run commands, start apps or change access; when asked for any of that, say what to send in the main conversation (without /btw) instead.';
     else if (input.access) setup.systemPrompt += input.access.role === 'operator'
@@ -265,8 +265,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     setup.tools.push(...controlTools);
     // An allow-list, so tools added later stay out of side questions until they are known to only read.
     if (input.side) setup.tools = setup.tools.filter(tool => sideTools.has(tool.name));
-    if (input.readOnly) setup.tools = planningTools(setup.tools).concat(input.junior?.type === 'review' ? setup.tools.filter(tool => tool.name === 'play_test') : []);
-    if (input.junior) setup.tools = juniorTools(setup.tools, input.junior.type);
+    if (input.readOnly) setup.tools = planningTools(setup.tools);
+    if (input.junior) setup.tools = juniorTools(setup.tools);
     return setup;
   };
   // A junior that cannot go on says so in its report; its instructor decides what happens next.
