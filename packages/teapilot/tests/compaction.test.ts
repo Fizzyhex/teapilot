@@ -140,6 +140,8 @@ it('finds the turns a compaction covers, and keeps every turn when the surface h
 /** Model calls, told apart: pi's summary requests, and ordinary ones. */
 const summaryRequest = (body: any) => JSON.stringify(body.messages?.[0] ?? '').includes('context summarization assistant');
 const summaryText = '## Goal\n- Find why r-0042 failed\n\n## Critical Context\n- the diagnostic prints r-0042 lines';
+// Keep compaction fixtures pressured by conversation text that the evidence-only result window cannot shed.
+const retainedChatter = (index: number) => `Retained model analysis note ${index}: this is conversational context, not a tool result. `.repeat(90);
 
 async function attempt(handler: Parameters<typeof mockServer>[0]) {
   const f = await setup();
@@ -161,7 +163,7 @@ it('compacts an attempt nearing the context limit with pi’s prompts, and carri
     bodies.push(body);
     if (summaryRequest(body)) { readBeforeSummary = reads; return completion(res, { text: summaryText }); }
     const compacted = JSON.stringify(body.messages).includes('compacted into the following summary');
-    completion(res, compacted ? { text: 'r-0042 is fine.' } : { tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } });
+    completion(res, compacted ? { text: 'r-0042 is fine.' } : { text: retainedChatter(reads + 1), tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } });
   });
   // Retrieval windows are bounded now, so enough real files must exist to reach the compaction boundary.
   for (let part = 1; part <= 32; part++) {
@@ -204,7 +206,7 @@ it('summarises briefly and without thinking, saying so while it happens', async 
     bodies.push(body);
     if (summaryRequest(body)) return completion(res, { text: summaryText });
     const compacted = JSON.stringify(body.messages).includes('compacted into the following summary');
-    completion(res, compacted ? { text: 'r-0042 is fine.' } : { reasoning: `thinking about part ${reads + 1} `.repeat(40), tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } });
+    completion(res, compacted ? { text: 'r-0042 is fine.' } : { text: retainedChatter(reads + 1), reasoning: `thinking about part ${reads + 1} `.repeat(40), tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } });
   });
   for (let part = 1; part <= 32; part++) {
     await writeFile(join(f.scratch, `part-${part}.txt`), Array.from({ length: 300 }, (_, index) => `part ${part} line ${index} record r-${index % 97} state ok`).join('\n'));
@@ -256,7 +258,7 @@ it('keeps the current reference outside a stale summary and stops exploration on
     bodies.push(body);
     if (summaryRequest(body)) return completion(res, { text: '## Goal\nold objective\n## Blocked\nreference missing; ask user to supply it' });
     completion(res, body.tools?.some((tool: any) => tool.function.name === 'read')
-      ? { tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } }
+      ? { text: retainedChatter(reads + 1), tool: { name: 'read', arguments: { path: `part-${++reads}.txt` } } }
       : { text: '<plan># door port\nuse the supplied wolf3d reference; unverified details remain gaps</plan>' });
   });
   for (let part = 1; part <= 24; part++) await writeFile(join(f.scratch, `part-${part}.txt`), Array.from({ length: 300 }, (_, index) => `part ${part} record ${index} unique code and door state fields`).join('\n'));

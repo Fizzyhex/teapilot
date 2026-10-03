@@ -25,8 +25,10 @@ const diagnostic: Handler = (body, request, response) => {
     if (last.role === 'tool') completion(response, { text: String(last.content) });
     else completion(response, { tool: { name: 'teapilot_probe', arguments: {} } });
   } else if (prompt.includes('Read fixture.js')) {
+    const wrote = body.messages.some((message: any) => message.role === 'assistant' && message.tool_calls?.some((call: any) => call.function?.name === 'write'));
     const read = body.messages.find((m: any) => m.role === 'tool' && String(m.content).includes('export const add'));
-    if (!read) completion(response, { tool: { name: 'read', arguments: { path: 'fixture.js' } } });
+    if (wrote) completion(response, { text: 'DONE' });
+    else if (!read) completion(response, { tool: { name: 'read', arguments: { path: 'fixture.js' } } });
     else if (body.messages.filter((m: any) => m.role === 'tool').length === 1) {
       const nonce = String(read.content).match(/\/\/ ([\da-f-]+)/)?.[1];
       completion(response, { tool: { name: 'write', arguments: { path: 'fixture.js', content: `// ${nonce}\nexport const add = (a, b) => a + b;\n` } } });

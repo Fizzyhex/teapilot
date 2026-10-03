@@ -11,7 +11,7 @@ import { ExecutionPolicy, within, type Approve, type BeforeMutation } from '../e
 import { StreamRedactor, type EventSink, type ConversationTurn } from '../integration/events.js';
 import type { SpendGovernor } from '../inference/budget.js';
 import { guardedStream, piModel, type InferenceState } from '../inference/providers.js';
-import { Evidence, type EscalationReason } from '../routing/escalation.js';
+import { Evidence, isCheckCommand, type EscalationReason } from '../routing/escalation.js';
 import type { Telemetry } from '../telemetry/outcome.js';
 import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
@@ -21,7 +21,7 @@ import { RequestAllowance, planningCallLimit } from './allowance.js';
 import { planText, looksLikePlan } from '../workspace/plan.js';
 import { coder } from './coder.js';
 import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, shouldCompact, summarise, summaryLength, summaryMessage, turnMark, type Compaction } from './compaction.js';
-import { carryOver, fitHistory, supersedePlayCalls, supersedeReads, turnForms, turnSteps, withoutOldPictures, withoutOldThinking, type HistoryFit } from './history.js';
+import { carryOver, fitHistory, fitRecentResults, supersedePlayCalls, supersedeReads, turnForms, turnSteps, withoutOldPictures, withoutOldThinking, type HistoryFit } from './history.js';
 import { pastedEmoji, play, type PlayContext } from './play.js';
 import { workspace, type ConversationWorkspace } from './workspace.js';
 import { captureResult, fixtureTool, scratchPrompt, scratchTouched } from './scratchpad.js';
@@ -121,13 +121,19 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const receipts = new Map<string, string>();
   let producing: string | undefined;
   let sourceSaved: Saved | undefined;
+  let taskStorageWarning: string | undefined;
+  const taskStorageFailed = (phase: string, error: unknown) => {
+    taskStorageWarning = `task state was not saved (${phase}); continue from the tool result and available files.`;
+    void telemetry.event('task_storage_failed', { phase, error: (error instanceof Error ? error.message : String(error)).slice(0, 300) }).catch(() => undefined);
+  };
   // The person's words, for the IDs and emoji they name: an attempt carrying on from another is prompted with a host notice.
   const asked = input.resume && input.requestText !== undefined ? input.requestText : input.prompt;
   // A conversational reply has no tools, so it has no use for a scratchpad either.
   let scratch = config.scratchpad?.enabled !== false && !input.casual && input.scratch ? new Scratch(input.scratch, secretsOf(config), (saved, kind) => {
     sourceSaved = saved;
     if (!task || !producing) return false;
-    task.register(actor, producing, saved, kind);
+    try { task.register(actor, producing, saved, kind); }
+    catch (error) { taskStorageFailed('artifact-index', error); return false; }
   }) : undefined;
   try { await scratch?.ready(); }
   catch (error) { scratch = undefined; await telemetry.event('scratch_unavailable', { error: error instanceof Error ? error.message : String(error) }); }
@@ -161,7 +167,15 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     const text = typeof item.content === 'string' ? item.content : item.content?.map(part => part.type === 'text' ? part.text ?? '' : '').join('\n') ?? '';
     return text.includes(requestWords);
   };
-  const evidence = new Evidence(config.policy.escalation, input.unresolvedChecks, scratchFolder ? path => within(scratchFolder, resolve(input.cwd, path), true) : undefined, recovery, input.readOnly);
+  let ownPolicy: ExecutionPolicy | undefined, ownFiles = false;
+  const activePathPolicy = () => ownFiles ? ownPolicy! : policy;
+  const durableExecution = task?.execution(actor);
+  const durableChecks = durableExecution?.unresolvedChecks ?? [];
+  const callerChecks = (input.unresolvedChecks ?? []).filter(check => !durableChecks.includes(check));
+  const evidence = new Evidence(config.policy.escalation, callerChecks, scratchFolder ? path => within(scratchFolder, activePathPolicy().resolve(path), true) : undefined, recovery, input.readOnly);
+  const localUnresolvedChecks = new Map<string, string>();
+  if (durableExecution) evidence.syncUnresolvedChecks(durableChecks);
+  const syncTaskChecks = () => { if (task) evidence.syncUnresolvedChecks([...task.execution(actor).unresolvedChecks, ...localUnresolvedChecks.values()]); };
   const active: Permission[] = input.activePermissions ?? (input.authorization ? ['inference'] :
     config.policy.permissions.filter(permission => permission === 'inference' || (permission.startsWith('repository.') && input.workload === 'coder') || (permission === 'web.search' && input.web)));
   const effectiveConfig: Config = { ...config, policy: { ...config.policy,
@@ -174,7 +188,6 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   // Without it the same tools work in the conversation's own folder, where relative paths are its own: its workspace
   // when it has one, or else the scratchpad. One root per session, so a name means the same file to every tool.
   const ownRoot = workspaceFolder ?? input.junior?.root ?? scratchFolder;
-  let ownPolicy: ExecutionPolicy | undefined, ownFiles = false;
   let ownInventory: string | undefined;
   /** A path as displays show it: from the workspace when the file tools work there, else from the working root. */
   const shownPath = (path: string) => {
@@ -199,7 +212,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let claimed: Message | undefined;
   // A page is at most about a third of this model's context, and pages together at most about a quarter
   // of it in tokens, so the attempt keeps room to reason and answer.
-  const reader = input.webController && { controller: input.webController, maxChars: Math.min(12_000, Math.floor(profile.contextTokens * 0.35)), budget: { remaining: profile.contextTokens }, scratch };
+  const previewChars = Math.max(2000, Math.min(40_000, Math.floor((profile.contextTokens - replyRoom(profile)) * 0.12 * 4)));
+  const reader = input.webController && { controller: input.webController, maxChars: Math.min(12_000, Math.floor(profile.contextTokens * 0.35)), budget: { remaining: profile.contextTokens }, scratch, previewChars };
   const compose = async () => {
     if (input.casual) return { systemPrompt: casualPrompt(), tools: [] as AgentTool[] };
     const repository = effectiveConfig.policy.permissions.includes('repository.read');
@@ -393,7 +407,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     calibratedTokens(2048 + context.messages.length * 32 + estimateValueTokens([context.systemPrompt ?? '', context.messages.map(sent)])
       + estimateValueTokens((context.tools ?? []).map(({ name, description, parameters }) => ({ name, description, parameters }))), inference.calibration);
   /** Near the context limit, everything but the newest messages becomes pi's summary of them. */
-  const compactContext = async <T extends { systemPrompt?: string; messages: unknown[]; tools?: Array<{ name: string; description?: string; parameters?: unknown }> }>(context: T): Promise<T | undefined> => {
+  const compactContext = async <T extends { systemPrompt?: string; messages: unknown[]; tools?: Array<{ name: string; description?: string; parameters?: unknown }> }>(context: T, completeContext: T = context): Promise<T | undefined> => {
     if (!settings.enabled || compactionFailed) return undefined;
     const before = estimate(context);
     if (!shouldCompact(before, profile.contextTokens, settings)) return undefined;
@@ -403,7 +417,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       return undefined;
     }
     // System messages are prompt state (such as tool declarations), not conversation: they stay, as in pi.
-    const all = context.messages as Array<Message | { role: 'system' }>;
+    const all = completeContext.messages as Array<Message | { role: 'system' }>;
     const system = all.filter(message => message.role === 'system');
     // Without storage a long current request stays verbatim, rather than being duplicated in the projection or summarized away.
     const anchors = requestWords.length > 2400 && !requestSource ? all.filter((message): message is Message => carriesRequest(message)) : [];
@@ -435,10 +449,24 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     const given = projected as Message[];
     // A model rewriting an app several times otherwise fills the window with versions already replaced.
     let messages = playing ? supersedePlayCalls(given, estimateValueTokens(given) > (profile.contextTokens - replyRoom(profile)) / 2) : given;
-    messages = withoutOldPictures(withoutOldThinking(supersedeReads(messages, path => (ownFiles ? ownPolicy! : policy).resolve(path))));
+    messages = withoutOldPictures(withoutOldThinking(supersedeReads(messages, path => activePathPolicy().resolve(path))));
     messages.forEach((message, index) => { if (message !== given[index]) originals.set(message, original(given[index]!)); });
     const trimmed = messages === context.messages ? context : { ...context, messages };
-    return await compactContext(trimmed) ?? trimmed;
+    // Compact from the complete evidence before applying the independent recent-results display window.
+    const resultBudget = Math.max(256, Math.min(12_000, Math.floor((profile.contextTokens - replyRoom(profile) - fixed) * 0.65)));
+    // Pressure is measured on what would actually be sent, but compaction folds the complete source evidence.
+    const completeMessages = trimmed.messages as Message[];
+    const windowed = fitRecentResults(completeMessages, resultBudget);
+    windowed.forEach((message, index) => { if (message !== completeMessages[index]) originals.set(message, original(completeMessages[index]!)); });
+    const windowContext = windowed === completeMessages ? trimmed : { ...trimmed, messages: windowed };
+    const compactedContext = await compactContext(windowContext, trimmed);
+    const ready = compactedContext ?? windowContext;
+    // A compaction retains its newest messages verbatim; apply the presentation budget to those again.
+    const readyMessages = ready.messages as Message[];
+    const finalMessages = fitRecentResults(readyMessages, resultBudget);
+    if (finalMessages === readyMessages) return ready;
+    finalMessages.forEach((message, index) => { if (message !== readyMessages[index]) originals.set(message, original(readyMessages[index]!)); });
+    return { ...ready, messages: finalMessages };
   };
   // What each model call is sent, for checking afterwards what the model could and could not see (TEAPILOT_TRACE_DIR).
   let traced = 0;
@@ -544,18 +572,49 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       if (toolCall.name === 'web_search' && isError) searchFailed = true;
       const shown = result.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
       // Long output goes to the scratchpad whole; the model sees what fits and where the rest is.
-      const kept = await captureResult(scratch, policy, toolCall.name, args, shown, result.details);
+      const kept = await captureResult(scratch, activePathPolicy(), toolCall.name, args, shown, result.details, previewChars);
       const receipt = receipts.get(toolCall.id);
-      const touched = scratch && scratchTouched(scratch, policy, toolCall.name, args);
+      const touched = scratch && scratchTouched(scratch, activePathPolicy(), toolCall.name, args);
       const origin = ['read', 'ls', 'find', 'grep'].includes(toolCall.name) ? touched && /(^|\/)sessions(\/|$)/.test(touched) ? 'transcript'
         : touched && /(^|\/)(outputs|logs|pages)(\/|$)/.test(touched) ? 'saved-output' : ['ls', 'find'].includes(toolCall.name) ? 'inventory' : 'file' : undefined;
-      if (task && receipt) { task.settle(receipt, isError, shown, origin); receipts.delete(toolCall.id); producing = undefined; }
-      task?.saveRecovery(recovery);
+      if (task && receipt) {
+        const source = args as { path?: unknown; url?: unknown; query?: unknown; pattern?: unknown; offset?: unknown; limit?: unknown };
+        const path = typeof source.path === 'string' ? activePathPolicy().resolve(source.path) : undefined;
+        try {
+          task.settle(receipt, isError, shown, origin, {
+            ...(path ? { path } : {}), ...(typeof source.url === 'string' ? { url: source.url } : {}),
+            ...(typeof source.query === 'string' ? { query: source.query } : typeof source.pattern === 'string' ? { query: source.pattern } : {}),
+            ...(typeof source.offset === 'number' ? { offset: source.offset } : {}), ...(typeof source.limit === 'number' ? { limit: source.limit } : {}),
+          });
+        } catch (error) { taskStorageFailed('receipt', error); }
+        receipts.delete(toolCall.id); producing = undefined;
+      } else if (task) taskStorageFailed('receipt', new Error('executed call has no pending receipt'));
+      let executionPersisted = false;
+      if (task && receipt) {
+        const data = args as { path?: string; command?: string };
+        try {
+          task.recordExecution(actor, {
+            receipt,
+            ...(!isError && outcome?.changed !== false && ['edit', 'write'].includes(toolCall.name) && data.path && !activePathPolicy().inScratch(data.path) ? { changedPath: activePathPolicy().resolve(data.path) } : {}),
+            ...(toolCall.name === 'bash' ? { shellUncertain: true } : {}),
+            ...(toolCall.name === 'bash' && isCheckCommand(String(data.command ?? '')) ? { check: { command: String(data.command), status: isError ? 'failed' as const : 'passed' as const } } : {}),
+          });
+          executionPersisted = true;
+        } catch (error) { taskStorageFailed('execution', error); }
+        syncTaskChecks();
+        try { task.saveRecovery(recovery); } catch (error) { taskStorageFailed('recovery', error); }
+      }
       const content = kept ? [{ type: 'text' as const, text: kept.text }, ...result.content.filter(part => part.type !== 'text')] : result.content;
       if (kept && kept.saved) await telemetry.event('scratch_saved', { tool: toolCall.name, toolCallId: toolCall.id, attempt: input.attempt ?? 0, file: relative(scratch!.folder, kept.saved.path), bytes: kept.saved.bytes, lines: kept.saved.lines, complete: kept.saved.complete, artifact: kept.saved.id, sha256: kept.saved.sha256, receipt });
       if (touched) await telemetry.event('scratch_access', { tool: toolCall.name, toolCallId: toolCall.id, attempt: input.attempt ?? 0, file: touched, succeeded: !isError, chars: shown.length });
       evidence.observe(toolCall.name, args, isError, kept ? kept.text : shown, kept?.saved?.path, outcome?.changed,
         sourceSaved?.complete ? sourceSaved.sha256 : fingerprint(result.content.map(part => part.type === 'text' ? { ...part, text: part.text.replace(savedLine, '').trim() } : part)));
+      if (task && toolCall.name === 'bash' && isCheckCommand(String((args as { command?: string }).command ?? ''))) {
+        const command = String((args as { command?: string }).command ?? '');
+        if (executionPersisted) localUnresolvedChecks.delete(command);
+        else if (isError) localUnresolvedChecks.set(command, command);
+      }
+      syncTaskChecks();
       await telemetry.event('tool', { name: toolCall.name, succeeded: !isError, check: evidence.lastCheck, ...(receipt ? { receipt, toolCallId: toolCall.id, actor: actor.name, attempt: input.attempt ?? 0 } : {}) });
       let continueNote: string | undefined;
       if (evidence.awaitingContinue) {
@@ -576,9 +635,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       // Tools normalize args.path to an absolute path before executing; keep that
       // for evidence (unambiguous for the model's continuation) but show relative
       // paths in the per-call trail, matching how a person names files here.
-      if (!isError && outcome?.changed !== false && ['write', 'edit'].includes(toolCall.name) && data.path && !policy.inScratch(data.path)) {
+      if (!isError && outcome?.changed !== false && ['write', 'edit'].includes(toolCall.name) && data.path && !activePathPolicy().inScratch(data.path)) {
         let size: number | undefined;
-        try { size = (await stat(policy.resolve(data.path))).size; } catch { /* stat is a display nicety, never blocks the call */ }
+        try { size = (await stat(activePathPolicy().resolve(data.path))).size; } catch { /* stat is a display nicety, never blocks the call */ }
         if (size !== undefined) evidence.fileSizes.set(data.path, size);
         toolDetails.set(toolCall.id, { path: shownPath(data.path), size });
       } else if (toolCall.name === 'read' && data.path) toolDetails.set(toolCall.id, { path: shownPath(data.path) });
@@ -588,7 +647,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       const note = paging ?? evidence.warning ?? continueNote;
       const written = args as { content?: unknown; edits?: Array<{ newText?: unknown }> };
       const tip = tipping ? pickTip({
-        tool: toolCall.name, path: data.path, succeeded: !isError, scratch: Boolean(data.path && policy.inScratch(data.path)), pressure: nearCompaction,
+        tool: toolCall.name, path: data.path, succeeded: !isError, scratch: Boolean(data.path && activePathPolicy().inScratch(data.path)), pressure: nearCompaction,
         content: typeof written.content === 'string' ? written.content : Array.isArray(written.edits) ? written.edits.map(edit => String(edit?.newText ?? '')).join('\n') : undefined,
         tools: new Set((sent.tools ?? []).map(tool => tool.name)),
         repository: ownFiles && workspaceFolder !== undefined && hasRepository(workspaceFolder),
@@ -603,7 +662,8 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       }
       const sourceNote = origin === 'saved-output' ? '[source] saved execution output; this inspection does not establish the current workspace file or revision.'
         : origin === 'transcript' ? '[source] execution history, not current workspace source. task_state can list bounded receipts without replaying this transcript.' : undefined;
-      const extra = [note, sourceNote, tip && tipText(tip), lastCalls].filter((text): text is string => Boolean(text));
+      const extra = [note, sourceNote, tip && tipText(tip), lastCalls, taskStorageWarning].filter((text): text is string => Boolean(text));
+      taskStorageWarning = undefined;
       if (extra.length) return { content: [...content, ...extra.map(text => ({ type: 'text' as const, text }))], isError };
       return kept || outcome?.failed ? { content, isError } : undefined;
     },

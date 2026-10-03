@@ -63,7 +63,7 @@ it('opens the turn after a stopped request with a host notice of what failed', a
     .mockResolvedValueOnce(result).mockResolvedValueOnce(result);
   await runChat({ request: { prompt: 'Run the tests', cwd: '.' }, maxPromptChars: 2000, input, run });
   const notice = run.mock.calls[1]![0].notice;
-  expect(notice).toMatch(/^\[notice\] The previous request stopped before finishing \(tool failures\)\./);
+  expect(notice).toMatch(/^\[note\] the previous request stopped before finishing \(tool failures\)\./);
   expect(notice).toContain('- bash: npm tset → npm: unknown command "tset"');
   expect(run.mock.calls[1]![0].prompt).toBe('continue');
   expect(run.mock.calls[2]![0].notice).toBeUndefined();
@@ -152,7 +152,7 @@ it('runs extension hooks around commands and turns', async () => {
   expect(run.mock.calls.map(call => call[0].teachatIdentities)).toEqual([{ pip: 'Quick questions.' }, { pip: 'Quick questions.' }]);
   expect(extension.turnEnd.mock.calls[0]).toEqual([{ user: 'First', assistant: result.text }, expect.objectContaining({ teachatIdentity: answer })]);
   expect(extension.turnEnd.mock.calls[1]![0]).toEqual({ user: 'Next', assistant: result.text });
-  expect(log.mock.calls.map(call => call[0])).toEqual([expect.stringMatching(/^Commands: .*\/new.*, \/teachat \[who\]$/), expect.stringContaining('Started a new task')]);
+  expect(log.mock.calls.map(call => call[0])).toEqual([expect.stringMatching(/^Commands: .*\/new.*, \/teachat \[who\]$/), expect.stringContaining('started a new task')]);
 });
 
 it('/btw asks from the conversation without joining it', async () => {
@@ -226,7 +226,7 @@ it('/convo clear keeps the workspace and says so, /workspace clears it, and /new
     'cleared the conversation. \n-# note: the workspace still contains 1 file.',
     'Workspace: tea',
     'tea\nnotes.txt',
-    expect.stringContaining('Started a new task with an empty workspace'),
+    expect.stringContaining('started a new task with an empty workspace'),
     'No files yet.',
   ]);
   expect(onHistory.mock.calls.filter(call => call[0].length === 0).length).toBeGreaterThanOrEqual(2);

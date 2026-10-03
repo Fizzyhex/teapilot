@@ -11,7 +11,7 @@ import { clip } from '../workspace/sandbox.js';
  * Page reading for one attempt: the request's controller, a per-page limit, and what this attempt may still add to
  * context. With a scratchpad, the whole of any page longer than later turns replay is kept there.
  */
-export interface Reader { controller: WebController; maxChars: number; budget: { remaining: number }; scratch?: Scratch }
+export interface Reader { controller: WebController; maxChars: number; budget: { remaining: number }; scratch?: Scratch; previewChars?: number }
 
 export function ask(config: Config, web: boolean, repository = false, searchUnavailable = false, reader?: Reader): { systemPrompt: string; tools: AgentTool[] } {
   const tools: AgentTool[] = [];
@@ -51,7 +51,7 @@ export function ask(config: Config, web: boolean, repository = false, searchUnav
         const { url, title } = page.full;
         const host = (() => { try { return new URL(url).hostname; } catch { return 'page'; } })();
         const kept = `Source: ${url}\n${title ? `Title: ${title}\n` : ''}\n${page.full.text}\n`;
-        try { text = `${clip(text, scratchLimits.previewChars)}\n${savedNote(await reader!.scratch.save('pages', host, kept, '.txt', page.full.truncated), 'page text')}`; }
+        try { text = `${clip(text, reader!.previewChars ?? scratchLimits.previewChars)}\n${savedNote(await reader!.scratch.save('pages', host, kept, '.txt'), 'page text')}`; }
         catch (error) { text += `\n${notKept(error)}`; }
       }
       return { content: [{ type: 'text', text }], details: {} };

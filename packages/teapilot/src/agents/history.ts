@@ -62,6 +62,72 @@ export function turnSteps(messages: Message[]): Message[] {
 
 /** Cut to `limit`, never through the middle of an emoji. */
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, /[\uD800-\uDBFF]/.test(text[limit - 1] ?? '') ? limit - 1 : limit)}…[clipped]` : text;
+
+/** Bound the aggregate raw tool evidence by actual estimated tokens, newest first, without losing tool pairings. */
+export function fitRecentResults(messages: Message[], budget: number): Message[] {
+  let changed = false;
+  const result = [...messages];
+  const controls = new Set(['task_state', 'report', 'artifact_read', 'request_escalation', 'request_capabilities', 'file_send']);
+  const eligible: Array<{ index: number; cost: (content: string | Array<{ type: string; text?: string }>) => number; raw: string | Array<{ type: string; text?: string }>; candidate: (limit: number) => string | Array<{ type: string; text?: string }>; totalChars: number; minimumCost: number }> = [];
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]!;
+    if (message.role !== 'toolResult' && (message as { role?: string }).role !== 'tool') continue;
+    const meta = message as unknown as { toolName?: string; name?: string; isError?: boolean; content: string | Array<{ type: string; text?: string }> };
+    const tool = meta.toolName ?? meta.name ?? '';
+    if (controls.has(tool) || tool.startsWith('access_') || tool.startsWith('play_') || tool.startsWith('teachat_')) continue;
+    const raw = meta.content;
+    const texts = typeof raw === 'string' ? [raw] : Array.isArray(raw) ? raw.map(part => part.type === 'text' ? part.text ?? '' : '') : [];
+    const cost = (content: typeof raw) => estimateValueTokens({ role: message.role, toolName: tool, content, isError: meta.isError }) + 16;
+    const notes = texts.flatMap(text => [...text.matchAll(savedLine)].map(match => match[0]));
+    const notices = texts.flatMap(text => text.split('\n').filter(line => /task state was not saved/i.test(line)));
+    const error = meta.isError ? texts.flatMap(text => text.replace(savedLine, '').split('\n').filter(Boolean))[0]?.slice(0, 240) : undefined;
+    const bodies = texts.map(text => text.replace(savedLine, '').split('\n').filter(line => !/task state was not saved/i.test(line)).join('\n').trim());
+    const totalChars = bodies.reduce((total, text) => total + text.length, 0);
+    const suffix = [...notes, ...notices, ...(error ? [`Tool error: ${error}`] : totalChars ? ['[older result excerpt shortened; reread the source or saved output for details]'] : [])].join('\n');
+    const candidate = (limit: number) => {
+      let left = limit;
+      const body = bodies.map(text => {
+        const take = Math.min(text.length, left);
+        left -= take;
+        return take ? clip(text, take) : '';
+      });
+      const combined = [...body, suffix].filter(Boolean).join('\n');
+      if (typeof raw === 'string') return combined;
+      let used = false;
+      return raw.map(part => {
+        if (part.type !== 'text') return part;
+        if (used) return { ...part, text: '' };
+        used = true;
+        return { ...part, text: combined };
+      });
+    };
+    eligible.push({ index, cost, raw, candidate, totalChars, minimumCost: cost(candidate(0)) });
+  }
+  // Reserve all mandatory handles/errors/notice and message-wrapper costs before allocating any raw excerpts.
+  // If that floor alone exceeds the budget, preserve it; the enclosing context compactor is responsible for pressure.
+  const floor = eligible.reduce((sum, item) => sum + item.minimumCost, 0);
+  let excerptBudget = Math.max(0, budget - floor);
+  for (let itemIndex = eligible.length - 1; itemIndex >= 0; itemIndex--) {
+    const item = eligible[itemIndex]!;
+    const message = messages[item.index]!;
+    const fullCost = item.cost(item.raw);
+    if (fullCost <= item.minimumCost + excerptBudget) {
+      excerptBudget -= Math.max(0, fullCost - item.minimumCost);
+      continue;
+    }
+    let low = 0, high = item.totalChars;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (item.cost(item.candidate(mid)) <= item.minimumCost + excerptBudget) low = mid; else high = mid - 1;
+    }
+    const content = item.candidate(low);
+    excerptBudget = Math.max(0, excerptBudget - Math.max(0, item.cost(content) - item.minimumCost));
+    result[item.index] = { ...message, content } as Message;
+    changed = true;
+  }
+  return changed ? result : messages;
+}
+
 const clipValue = (value: unknown): unknown => typeof value === 'string' ? clip(value, 300)
   : Array.isArray(value) ? value.map(clipValue)
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clipValue(item)])) : value;

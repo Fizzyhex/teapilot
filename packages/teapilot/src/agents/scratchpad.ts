@@ -48,17 +48,17 @@ async function head(path: string, lines = 20, bytes = 2000): Promise<string> {
  * Keeps the whole of a long tool result in the scratchpad and returns what the model sees instead, or nothing when
  * the result stands as it is. The tool's outcome never changes, and a failure to keep only adds a note saying so.
  */
-export async function captureResult(scratch: Scratch | undefined, policy: ExecutionPolicy, tool: string, args: unknown, text: string, details: unknown): Promise<{ text: string; saved?: Saved } | undefined> {
+export async function captureResult(scratch: Scratch | undefined, policy: ExecutionPolicy, tool: string, args: unknown, text: string, details: unknown, previewChars = scratchLimits.previewChars): Promise<{ text: string; saved?: Saved } | undefined> {
   if (ownBounds.has(tool) || tool.startsWith('play_') || tool.startsWith('access_') || tool.startsWith('teachat_')) return undefined;
   // Retrieval does not recursively generate artifacts. pi bounds read by bytes/lines, not model context.
   if (tool === 'read' && policy.inScratch(String((args as { path?: unknown }).path ?? ''))) return text.length <= scratchLimits.retrievalChars ? undefined : { text: clip(text, scratchLimits.retrievalChars) };
   // Without a scratchpad a long result is still bounded; what it leaves out is gone. pi's shells keep up to 50 KB,
   // too much for a small context, so theirs is cut to the same size.
-  if (!scratch) return text.length <= scratchLimits.previewChars ? undefined : { text: clip(text, scratchLimits.previewChars) };
+  if (!scratch) return text.length <= previewChars ? undefined : { text: clip(text, previewChars) };
   if (shells.has(tool)) {
     const command = String((args as { command?: unknown }).command ?? '');
     // Reading the scratchpad's own files again is not new output to keep.
-    if (command.includes(scratch.folder) || /(^|[\s"'/\\])\.scratch\b/.test(command)) return text.length <= scratchLimits.previewChars ? undefined : { text: clip(text, scratchLimits.previewChars) };
+    if (command.includes(scratch.folder) || /(^|[\s"'/\\])\.scratch\b/.test(command)) return text.length <= previewChars ? undefined : { text: clip(text, previewChars) };
     const temporary = piOutputFile(text, details);
     if (temporary) {
       const trailer = `. Full output: ${temporary}]`;
@@ -66,14 +66,14 @@ export async function captureResult(scratch: Scratch | undefined, policy: Execut
         const saved = await scratch.save('logs', tool, Scratch.stream(temporary));
         await rm(temporary, { force: true }).catch(() => undefined);
         const start = await head(saved.path).catch(() => '');
-        const shown = clip(text.replace(trailer, '.]'), Math.max(200, scratchLimits.previewChars - start.length));
+        const shown = clip(text.replace(trailer, '.]'), Math.max(200, previewChars - start.length));
         return { text: `${start ? `First lines:\n${start}\n[…]\n` : ''}${shown}\n${savedNote(saved)}`, saved };
       } catch (error) {
-        return { text: `${clip(text, scratchLimits.previewChars)}\n${notKept(error)}` };
+        return { text: `${clip(text, previewChars)}\n${notKept(error)}` };
       }
     }
-  } else if (policy.inScratch(String((args as { path?: unknown }).path ?? ''))) return undefined;
-  return keepResult(scratch, tool, text);
+  } else if (typeof (args as { path?: unknown }).path === 'string' && (args as { path: string }).path && policy.inScratch((args as { path: string }).path)) return undefined;
+  return keepResult(scratch, tool, text, previewChars);
 }
 
 /** A scratchpad file a call touched, relative to the scratchpad, for evaluating how it is used. */

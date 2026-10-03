@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { completion, events, fixture, mockServer } from './helpers.js';
 import { TaskStore, instructor, taskLimits } from '../src/workspace/task.js';
@@ -12,6 +12,8 @@ import { runHost } from '../src/host.js';
 import { SpendGovernor } from '../src/inference/budget.js';
 import { Telemetry } from '../src/telemetry/outcome.js';
 import { WorkspaceStore } from '../src/workspace/store.js';
+import { replyRoom } from '../src/inference/context.js';
+import { effectiveProfile } from '../src/routing/execution.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -23,12 +25,12 @@ async function setup() {
   task.startRequest('request-1', { calls: 100, modelCalls: 100, timeoutMs: 60_000 });
   return { ...f, scratch, task };
 }
-async function save(f: Awaited<ReturnType<typeof setup>>, text: string, actor = instructor) {
+async function save(f: Awaited<ReturnType<typeof setup>>, text: string, actor = instructor, origin?: 'file' | 'inventory' | 'saved-output' | 'transcript', source?: { path?: string; url?: string; query?: string; offset?: number; limit?: number }) {
   const producer = f.task.begin(actor, 'diagnostic', {})!;
   const scratch = actor.name === instructor.name ? f.scratch : join(f.scratch, 'juniors', actor.name);
   const pad = new Scratch(scratch, ['private-token'], (saved, kind) => f.task.register(actor, producer, saved, kind));
   const artifact = await pad.save('outputs', 'diagnostic', text, '.txt');
-  f.task.settle(producer, false);
+  f.task.settle(producer, false, '', origin, source);
   return artifact;
 }
 
@@ -54,6 +56,301 @@ it('recovers interrupted calls as uncertain rather than replaying them', async (
   expect(restored.snapshot().receipts[0]?.status).toBe('uncertain');
   expect(restored.snapshot().status).toBe('blocked');
   expect(restored.remaining().calls).toBe(99);
+});
+
+it('archives evicted receipts before they leave hot state and restores their evidence handle', async () => {
+  const f = await setup();
+  let first = '';
+  for (let index = 0; index < taskLimits.receipts + 1; index++) {
+    const receipt = f.task.begin(instructor, 'read', { query: `needle-${index}` })!;
+    if (!index) first = receipt;
+    f.task.settle(receipt, false, `excerpt-${index}`);
+  }
+  expect(f.task.snapshot().receipts.some(item => item.id === first)).toBe(false);
+  expect(f.task.record(instructor, first)).toContain('excerpt-0');
+  expect(JSON.parse(f.task.catalog(instructor, 'receipts', 0, { tool: 'read', query: 'needle-0' })).records[0].id).toBe(first);
+  const coldScan = vi.spyOn(f.task as any, 'coldRecords');
+  JSON.parse(f.task.project(instructor));
+  expect(coldScan).not.toHaveBeenCalled();
+  coldScan.mockRestore();
+  expect(() => f.task.authorizeEvidence({ name: 'junior-new' }, [first])).toThrow('inaccessible');
+  const restored = TaskStore.open(f.config.stateDir, 'explicit-scope', 'objective', f.scratch);
+  restored.authorizeEvidence(instructor, [first]);
+  expect(restored.record(instructor, first)).toContain('excerpt-0');
+});
+
+it('refuses to evict a receipt when its cold archive cannot be written', async () => {
+  const f = await setup();
+  let first = '';
+  for (let index = 0; index < taskLimits.receipts; index++) {
+    const receipt = f.task.begin(instructor, 'read', {})!;
+    if (!index) first = receipt;
+    f.task.settle(receipt, false, `excerpt-${index}`);
+  }
+  const archive = join(f.config.stateDir, 'task-records', f.task.snapshot().id);
+  await mkdir(join(archive, `receipts-${first}.json`), { recursive: true });
+  expect(() => f.task.begin(instructor, 'read', {})).toThrow('archive');
+  expect(f.task.snapshot().receipts).toHaveLength(taskLimits.receipts);
+  expect(f.task.snapshot().receipts[0]?.id).toBe(first);
+  expect(f.task.record(instructor, first)).toContain(first);
+  await rm(join(archive, `receipts-${first}.json`), { recursive: true });
+  const authoritative = JSON.parse(f.task.record(instructor, first));
+  await writeFile(join(archive, `receipts-${first}.json`), JSON.stringify({ ...authoritative, excerpt: 'stale archive copy' }));
+  expect(f.task.begin(instructor, 'read', {})).toBeTruthy();
+  expect(f.task.record(instructor, first)).toContain('excerpt-0');
+  expect(f.task.record(instructor, first)).not.toContain('stale archive copy');
+});
+
+it('rejects swapped task IDs and preserves foreign archives during cleanup', async () => {
+  const f = await setup();
+  for (let index = 0; index <= taskLimits.receipts; index++) {
+    const receipt = f.task.begin(instructor, 'read', {})!;
+    f.task.settle(receipt, false);
+  }
+  const tasks = join(f.config.stateDir, 'tasks'), stateFile = join(tasks, (await readdir(tasks))[0]!);
+  const state = JSON.parse(await readFile(stateFile, 'utf8'));
+  state.id = 't-foreign';
+  await writeFile(stateFile, JSON.stringify(state));
+  expect(() => TaskStore.open(f.config.stateDir, 'explicit-scope', 'objective', f.scratch)).toThrow('task ID');
+  const foreign = join(f.config.stateDir, 'task-records', 't-foreign');
+  await mkdir(foreign, { recursive: true });
+  await writeFile(join(foreign, 'sentinel'), 'keep');
+  TaskStore.clearScratch(f.config.stateDir, f.scratch);
+  expect(await readFile(join(foreign, 'sentinel'), 'utf8')).toBe('keep');
+  expect(await readdir(tasks)).toContain(stateFile.split(/[\\/]/).at(-1));
+});
+
+it('rejects cold records whose stored ID disagrees with the filename or whose JSON is corrupt', async () => {
+  const f = await setup(), issued: string[] = [];
+  for (let index = 0; index <= taskLimits.receipts + 1; index++) {
+    const receipt = f.task.begin(instructor, 'read', {})!;
+    issued.push(receipt);
+    f.task.settle(receipt, false);
+  }
+  const archive = join(f.config.stateDir, 'task-records', f.task.snapshot().id);
+  const wrongFile = join(archive, `receipts-${issued[0]}.json`), corruptFile = join(archive, `receipts-${issued[1]}.json`);
+  const wrong = JSON.parse(await readFile(wrongFile, 'utf8'));
+  wrong.id = 'e-wrong-id';
+  await writeFile(wrongFile, JSON.stringify(wrong));
+  expect(() => f.task.authorizeEvidence(instructor, [issued[0]!])).toThrow('ID mismatch');
+  await writeFile(corruptFile, '{');
+  expect(() => f.task.authorizeEvidence(instructor, [issued[1]!])).toThrow();
+});
+
+it('only registers artifacts against the actor\'s own pending producer receipt', async () => {
+  const f = await setup(), receipt = f.task.begin(instructor, 'read', {})!;
+  const saved = { id: 'a-test-handle', sha256: 'a'.repeat(64), bytes: 1, lines: 1, complete: true, path: join(f.scratch, 'not-created.txt') };
+  expect(() => f.task.register({ name: 'junior-a' }, receipt, saved, 'outputs')).toThrow('producer');
+  f.task.settle(receipt, false);
+  expect(() => f.task.register(instructor, receipt, saved, 'outputs')).toThrow('settled');
+  expect(f.task.snapshot().artifacts).toHaveLength(0);
+});
+
+it('does not recursively clean through a linked task-records parent', async () => {
+  const f = await setup();
+  for (let index = 0; index <= taskLimits.receipts; index++) {
+    const receipt = f.task.begin(instructor, 'read', {})!;
+    f.task.settle(receipt, false);
+  }
+  const root = join(f.config.stateDir, 'task-records'), backup = join(f.config.stateDir, 'task-records-backup'), external = join(f.cwd, 'external-records');
+  await mkdir(external, { recursive: true });
+  await writeFile(join(external, 'sentinel'), 'keep');
+  await rename(root, backup);
+  await symlink(external, root, 'dir');
+  try {
+    TaskStore.clearScratch(f.config.stateDir, f.scratch);
+    expect(await readFile(join(external, 'sentinel'), 'utf8')).toBe('keep');
+    expect(await readdir(join(f.config.stateDir, 'tasks'))).toHaveLength(1);
+  } finally {
+    await rm(root, { force: true });
+    await rename(backup, root);
+  }
+});
+
+it('keeps artifact handles and producer metadata addressable after hot eviction and restart', async () => {
+  const f = await setup();
+  f.task.startRequest('archive-artifacts', { calls: 300, modelCalls: 300, timeoutMs: 60_000 });
+  let first: Awaited<ReturnType<typeof save>> | undefined;
+  let firstProducer = '';
+  const owner = { name: 'junior-a' };
+  for (let index = 0; index < taskLimits.artifacts + 1; index++) {
+    const artifact = await save(f, `artifact-${index}`, index ? instructor : owner, index ? undefined : 'file', index ? undefined : { path: join(f.cwd, 'src', 'producer.ts'), query: 'producer-query' });
+    if (!index) { first = artifact; firstProducer = f.task.snapshot().artifacts[0]!.producer; }
+  }
+  expect(f.task.snapshot().artifacts).toHaveLength(taskLimits.artifacts);
+  expect(f.task.snapshot().artifacts.some(item => item.id === first!.id)).toBe(false);
+  const restored = TaskStore.open(f.config.stateDir, 'explicit-scope', 'objective', f.scratch);
+  restored.authorizeArtifacts(instructor, [first!.id]);
+  restored.authorizeArtifacts(owner, [first!.id]);
+  expect(() => restored.authorizeArtifacts({ name: 'junior-b' }, [first!.id])).toThrow('inaccessible');
+  restored.authorizeArtifacts({ name: 'junior-b', artifacts: [first!.id] }, [first!.id]);
+  expect(await restored.artifact(instructor, first!.id)).toContain('artifact-0');
+  const listed = JSON.parse(restored.catalog(instructor, 'artifacts', 0, { tool: 'diagnostic', request: 'archive-artifacts', query: first!.id }));
+  expect(listed.total).toBe(1);
+  expect(listed.records[0]).toMatchObject({ producer: firstProducer, origin: 'file', source: { path: expect.stringContaining('characters left out'), query: 'producer-query' } });
+  await writeFile(first!.path, 'tampered');
+  await expect(restored.artifact(instructor, first!.id)).rejects.toThrow('changed');
+  const external = join(f.cwd, 'outside.txt'), archivePath = join(f.config.stateDir, 'task-records', restored.snapshot().id);
+  await writeFile(external, 'outside survives');
+  await symlink(external, join(archivePath, 'external-link'), 'file');
+  TaskStore.clearScratch(f.config.stateDir, f.scratch);
+  expect(await readdir(join(f.config.stateDir, 'task-records'))).not.toContain(restored.snapshot().id);
+  expect(await readFile(external, 'utf8')).toBe('outside survives');
+});
+
+it('persists execution deltas independently of revision and isolates junior progress', async () => {
+  const f = await setup();
+  expect(f.task.execution(instructor).currentCheck).toBe('not-run-after-edit');
+  const receipt = f.task.begin(instructor, 'test', {})!;
+  f.task.settle(receipt, false);
+  f.task.recordExecution(instructor, { receipt, check: { command: 'npm test', status: 'failed' } });
+  const edit = f.task.begin(instructor, 'edit', {})!;
+  f.task.settle(edit, false);
+  const changed = join(f.cwd, 'src', 'a.ts');
+  f.task.recordExecution(instructor, { receipt: edit, changedPath: changed });
+  expect(f.task.execution(instructor)).toMatchObject({ currentCheck: 'failed', unresolvedChecks: ['npm test'] });
+  const restored = TaskStore.open(f.config.stateDir, 'explicit-scope', 'objective', f.scratch);
+  expect(restored.execution(instructor)).toMatchObject({ currentCheck: 'failed', changedFiles: [changed] });
+  const shell = restored.begin(instructor, 'shell', { command: 'bash -c false' })!;
+  restored.settle(shell, true);
+  restored.recordExecution(instructor, { receipt: shell, shellUncertain: true, check: { command: 'bash -c false', status: 'failed' } });
+  const restarted = TaskStore.open(f.config.stateDir, 'explicit-scope', 'objective', f.scratch);
+  expect(restarted.execution(instructor).unresolvedChecks).toEqual(['npm test', 'bash -c false']);
+  restarted.recordExecution(instructor, { receipt: shell, check: { command: 'npm run lint', status: 'passed' } });
+  expect(restarted.execution(instructor).currentCheck).toBe('failed');
+  restarted.recordExecution(instructor, { receipt: shell, check: { command: 'npm test', status: 'passed' } });
+  expect(restarted.execution(instructor).unresolvedChecks).toEqual(['bash -c false']);
+  restarted.recordExecution(instructor, { receipt: shell, check: { command: 'bash -c false', status: 'passed' } });
+  expect(restarted.execution(instructor)).toMatchObject({ currentCheck: 'passed', unresolvedChecks: [] });
+  const junior = { name: 'junior-a' };
+  const juniorReceipt = restarted.begin(junior, 'test', {})!;
+  restarted.settle(juniorReceipt, false);
+  restarted.recordExecution(junior, { receipt: juniorReceipt, check: { command: 'tsc', status: 'failed' } });
+  restarted.recordExecution(junior, { receipt: juniorReceipt, check: { command: 'npm test', status: 'failed' } });
+  restarted.recordExecution(instructor, { receipt, check: { command: 'tsc', status: 'passed' } });
+  expect(restarted.execution(instructor).unresolvedChecks).toEqual(['npm test']);
+  expect(restarted.execution(junior).unresolvedChecks).toEqual(['npm test']);
+  expect(restarted.execution({ name: 'junior-b' }).shellUncertain).toBe(false);
+  expect(TaskStore.open(f.config.stateDir, 'explicit-scope', 'objective', f.scratch).execution(junior).unresolvedChecks).toEqual(['npm test']);
+});
+
+it('invalidates fresh repository observations after canonical project edits while keeping the receipt retrievable', async () => {
+  const f = await setup(), sourcePath = join(f.cwd, 'src', 'observed.ts');
+  const observed = f.task.begin(instructor, 'read', { path: sourcePath })!;
+  f.task.settle(observed, false, 'known contents', 'file', { path: sourcePath });
+  expect(JSON.parse(f.task.project(instructor)).observations.map((item: any) => item.id)).toContain(observed);
+  const edit = f.task.begin(instructor, 'edit', { path: sourcePath })!;
+  f.task.settle(edit, false);
+  f.task.recordExecution(instructor, { receipt: edit, changedPath: sourcePath });
+  expect(JSON.parse(f.task.project(instructor)).observations.map((item: any) => item.id)).not.toContain(observed);
+  expect(f.task.record(instructor, observed)).toContain('known contents');
+});
+
+it('keeps saved-output and transcript observations immutable across shell uncertainty', async () => {
+  const f = await setup();
+  const ids: string[] = [];
+  for (const [origin, path] of [['file', '/repo/file'], ['saved-output', '/repo/output'], ['transcript', '/repo/transcript']] as const) {
+    const receipt = f.task.begin(instructor, 'read', { path })!;
+    ids.push(receipt);
+    f.task.settle(receipt, false, path, origin, { path });
+  }
+  f.task.recordExecution(instructor, { receipt: ids[0]!, check: { command: 'npm test', status: 'passed' } });
+  expect(f.task.execution(instructor).currentCheck).toBe('passed');
+  const shell = f.task.begin(instructor, 'shell', { command: 'false' })!;
+  f.task.settle(shell, true);
+  f.task.recordExecution(instructor, { receipt: shell, shellUncertain: true });
+  expect(f.task.execution(instructor).currentCheck).toBe('not-run-after-edit');
+  const observations = JSON.parse(f.task.project(instructor)).observations.map((item: any) => item.id);
+  expect(observations).not.toContain(ids[0]);
+  expect(observations).toContain(ids[1]);
+  expect(observations).toContain(ids[2]);
+});
+
+it('uses full command hashes so clipped command displays cannot clear another check', async () => {
+  const f = await setup(), receipt = f.task.begin(instructor, 'test', {})!;
+  f.task.settle(receipt, false);
+  const prefix = 'x'.repeat(600), failed = `${prefix}-one`, unrelated = `${prefix}-two`;
+  f.task.recordExecution(instructor, { receipt, check: { command: failed, status: 'failed' } });
+  f.task.recordExecution(instructor, { receipt, check: { command: unrelated, status: 'passed' } });
+  expect(f.task.execution(instructor).unresolvedChecks).toHaveLength(1);
+  f.task.recordExecution(instructor, { receipt, check: { command: failed, status: 'passed' } });
+  expect(f.task.execution(instructor).unresolvedChecks).toEqual([]);
+});
+
+it('bounds catalog metadata and keeps record serialization valid JSON despite escaped source text', async () => {
+  const f = await setup();
+  const escaped = '"\\'.repeat(1000), escapedTool = '"\\'.repeat(40), escapedRequest = '"\\'.repeat(50), ids: string[] = [];
+  f.task.startRequest(escapedRequest, { calls: 100, modelCalls: 100, timeoutMs: 60_000 });
+  for (let index = 0; index < 8; index++) {
+    const receipt = f.task.begin(instructor, escapedTool, {})!;
+    ids.push(receipt);
+    f.task.settle(receipt, false, escaped, 'file', { path: escaped, url: escaped, query: '"\\'.repeat(100) });
+  }
+  const catalog = f.task.catalog(instructor, 'receipts');
+  expect(catalog.length).toBeLessThanOrEqual(taskLimits.projectionChars);
+  expect(JSON.parse(catalog).records).toHaveLength(8);
+  const record = f.task.record(instructor, ids[0]!);
+  expect(record.length).toBeLessThanOrEqual(taskLimits.projectionChars);
+  expect(JSON.parse(record).id).toBe(ids[0]);
+});
+
+it('paginates cold catalogs in stable bounded pages and accepts offsets beyond 10000', async () => {
+  const f = await setup();
+  const hotReceipt = f.task.begin(instructor, 'read', {})!;
+  f.task.settle(hotReceipt, false);
+  let coldCount = 19, coldKind = 'receipts', duplicateHot = true;
+  const escaped = '"\\'.repeat(1000), escapedTool = '"\\'.repeat(40), escapedRequest = '"\\'.repeat(50);
+  vi.spyOn(f.task as any, 'coldRecords').mockImplementation(function* (kind: any) {
+    if (kind !== coldKind) return;
+    for (let index = 0; index < coldCount; index++) {
+      if (kind === 'receipts') {
+        if (index === 0 && duplicateHot) yield { id: hotReceipt, actor: instructor.name, request: 'request-1', tool: 'read', summary: 'stale duplicate', excerpt: '', status: 'failed', artifacts: [], at: -1 };
+        yield { id: `cold-${index}`, actor: instructor.name, request: 'request-1', tool: 'read', summary: `record-${index}`, excerpt: '', status: 'succeeded', artifacts: [], at: index };
+      }
+      else yield { id: `artifact-${index}`, kind: 'outputs', actor: 'a'.repeat(80), producer: 'p'.repeat(80), producerTool: escapedTool, request: escapedRequest, complete: true, bytes: 1, origin: 'file', source: { path: escaped, url: escaped, query: '"\\'.repeat(100) }, sourceEpoch: 0, at: index };
+    }
+  });
+  const ids: string[] = [];
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const pageOffset = offset;
+    const page = JSON.parse(f.task.catalog(instructor, 'receipts', pageOffset));
+    expect(f.task.catalog(instructor, 'receipts', pageOffset).length).toBeLessThanOrEqual(taskLimits.projectionChars);
+    ids.push(...page.records.map((record: any) => record.id));
+    expect(page.next === null || page.next === pageOffset + page.records.length).toBe(true);
+    offset = page.next;
+  }
+  expect(ids).toEqual([...Array.from({ length: 19 }, (_, index) => `cold-${index}`), hotReceipt]);
+  duplicateHot = false;
+  coldCount = 10_002;
+  const tail = JSON.parse(f.task.catalog(instructor, 'receipts', 10_000));
+  expect(tail.total).toBe(10_003);
+  expect(tail.records.map((record: any) => record.id)).toEqual(['cold-10000', 'cold-10001', hotReceipt]);
+  expect(tail.next).toBeNull();
+  coldKind = 'artifacts'; coldCount = 8;
+  const escapedPage = f.task.catalog(instructor, 'artifacts');
+  expect(escapedPage.length).toBeLessThanOrEqual(taskLimits.projectionChars);
+  expect(JSON.parse(escapedPage).records.map((record: any) => record.id)).toEqual(Array.from({ length: 8 }, (_, index) => `artifact-${index}`));
+});
+
+it('filters catalog queries against full source metadata before compacting the returned summary', async () => {
+  const f = await setup(), tail = 'source-tail-needle', sourcePath = `${'/'.repeat(10)}${'x'.repeat(1800)}${tail}`;
+  const receipt = f.task.begin(instructor, 'read', {})!;
+  f.task.settle(receipt, false, '', 'file', { path: sourcePath });
+  const page = JSON.parse(f.task.catalog(instructor, 'receipts', 0, { query: tail }));
+  expect(page.total).toBe(1);
+  expect(page.records[0].id).toBe(receipt);
+  expect(f.task.catalog(instructor, 'receipts').length).toBeLessThan(taskLimits.projectionChars);
+});
+
+it('enriches artifacts with producer source metadata after save-before-settle and filters artifacts by tool and request', async () => {
+  const f = await setup();
+  const source = { path: join(f.cwd, 'src', 'source.ts'), query: 'needle' };
+  const artifact = await save(f, 'producer output', instructor, 'file', source);
+  const catalog = JSON.parse(f.task.catalog(instructor, 'artifacts', 0, { tool: 'diagnostic', request: 'request-1', query: artifact.id }));
+  expect(catalog.total).toBe(1);
+  expect(catalog.records[0]).toMatchObject({ tool: 'diagnostic', request: 'request-1', origin: 'file', source: { path: expect.stringContaining('characters left out'), query: source.query } });
+  expect(JSON.parse(f.task.catalog(instructor, 'artifacts', 0, { tool: 'other' })).total).toBe(0);
 });
 
 it('checks working revisions but receipt accounting does not invalidate a just-issued update', async () => {
@@ -261,6 +558,25 @@ it('bounds escaped model text without committing an update that makes its projec
   expect(JSON.parse(projection).steps[0].id).toBe('p1');
 });
 
+it('prioritizes late working and blocked steps and reports every projection omission under escaped evidence pressure', async () => {
+  const f = await setup(), evidence = await save(f, 'proof');
+  for (let index = 0; index < taskLimits.steps; index++) {
+    const status = index === taskLimits.steps - 2 ? 'blocked' : index === taskLimits.steps - 1 ? 'working' : 'ready';
+    f.task.update(instructor, { revision: f.task.snapshot().revision, step: { id: `step-${index}`, goal: `goal-${index}`, status, acceptance: '"\\'.repeat(100), evidence: [evidence.id] } });
+  }
+  for (let index = 0; index < taskLimits.claims; index++) f.task.update(instructor, { revision: f.task.snapshot().revision, claim: { id: `claim-${index}`, text: '"\\'.repeat(190), basis: 'reported', evidence: [evidence.id] } });
+  for (let index = 0; index < taskLimits.receipts; index++) {
+    const receipt = f.task.begin(instructor, 'read', { path: `/repo/${index}` })!;
+    f.task.settle(receipt, false, '"\\'.repeat(180), 'file', { path: `/repo/${index}` });
+  }
+  const view = JSON.parse(f.task.project(instructor));
+  expect(f.task.project(instructor).length).toBeLessThanOrEqual(taskLimits.projectionChars);
+  expect(view.steps.slice(0, 2).map((step: any) => step.status)).toEqual(['working', 'blocked']);
+  expect(view.omissions.claims).toBe(taskLimits.claims - view.claims.length);
+  expect(view.omissions.recent).toBe(taskLimits.receipts - view.recent.length);
+  expect(view.omissions.observations).toBe(taskLimits.receipts - view.observations.length);
+});
+
 it('persists narrowly scoped unchanged-edit failures, not arbitrary command bans', async () => {
   const f = await setup(), recovery = new RequestRecovery();
   recovery.fileFailures.set(fingerprint(['edit', 'unchanged']), 'target was not found');
@@ -329,7 +645,9 @@ it('uses handles for long output without repeating its producer, with bounded pr
   expect(JSON.stringify(bodies[1])).not.toContain('hidden-marker');
   expect(JSON.stringify(bodies[2])).toContain('5001: hidden-marker');
   expect(f.task.snapshot().artifacts).toHaveLength(1);
-  expect(bodies[1].messages.find((message: any) => message.role === 'tool')?.content.length).toBeLessThan(2600);
+  const profile = effectiveProfile(f.config, 'normal');
+  const adaptivePreviewLimit = Math.max(2000, Math.min(40_000, Math.floor((profile.contextTokens - replyRoom(profile)) * 0.12 * 4)));
+  expect(bodies[1].messages.find((message: any) => message.role === 'tool')?.content.length).toBeLessThanOrEqual(adaptivePreviewLimit);
 });
 
 it('shares a request-wide ceiling with juniors and retains child evidence without exposing parent context', async () => {

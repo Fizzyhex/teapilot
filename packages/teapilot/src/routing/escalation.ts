@@ -13,6 +13,10 @@ export const READS_SPENT = 'Not read: the page-reading budget for this request i
 // the user to explicitly approve continuing, rather than escalating or stopping on its own.
 const CONSECUTIVE_FAILURE_LIMIT = 15;
 const CONSECUTIVE_FAILURE_WARNING_LEAD = 5;
+/** Keep the check classifier shared by live escalation and durable task execution state. */
+export function isCheckCommand(command: string): boolean {
+  return /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(command);
+}
 export class Evidence {
   reason?: EscalationReason;
   toolCalls = 0;
@@ -27,6 +31,7 @@ export class Evidence {
   largestResult?: { tool: string; chars: number };
   unresolvedChecks: Set<string>;
   checks: Array<{ command: string; status: 'passed' | 'failed' }> = [];
+  private readonly explicitUnresolvedChecks: Set<string>;
   /** The latest calls for a retry to continue from: what each was asked, how it ended, and where its full output went. */
   observations: Array<{ tool: string; args?: string; failed: boolean; detail: string; saved?: string }> = [];
   /** Distinct failed calls and the first line of each error, for a later turn to avoid repeating them. */
@@ -45,7 +50,12 @@ export class Evidence {
   /** `scratch` tells the agent's own scratchpad files apart: writing them changes nothing in the project. */
   constructor(private readonly thresholds: Policy['escalation'], unresolvedChecks: string[] = [], private readonly scratch?: (path: string) => boolean,
     private readonly recovery = new RequestRecovery(), private readonly readOnly = false) {
-    this.unresolvedChecks = new Set(unresolvedChecks);
+    this.explicitUnresolvedChecks = new Set(unresolvedChecks);
+    this.unresolvedChecks = new Set(this.explicitUnresolvedChecks);
+  }
+  /** Reconcile durable failures without dropping unresolved checks supplied only by the caller. */
+  syncUnresolvedChecks(hostChecks: string[]): void {
+    this.unresolvedChecks = new Set([...this.explicitUnresolvedChecks, ...hostChecks]);
   }
   refuse(): void {
     if (++this.refused < this.thresholds.repeatedToolCalls) return;
@@ -98,10 +108,13 @@ export class Evidence {
       this.recovery.repeated.set(key, same);
       if (same >= this.thresholds.repeatedToolCalls) this.reason = 'tool_failures';
     }
-    if (name === 'bash' && /\b(test|build|check|typecheck|pytest|cargo|dotnet)\b/i.test(String((args as { command?: string }).command))) {
+    if (name === 'bash' && isCheckCommand(String((args as { command?: string }).command))) {
       this.lastCheck = failed ? 'failed' : 'passed';
       if (failed) this.unresolvedChecks.add(String(data.command));
-      else this.unresolvedChecks.delete(String(data.command));
+      else {
+        this.unresolvedChecks.delete(String(data.command));
+        this.explicitUnresolvedChecks.delete(String(data.command));
+      }
       this.checks.push({ command: String(data.command).slice(0, 1000), status: this.lastCheck });
       this.checks = this.checks.slice(-8);
       this.testFailures = failed ? this.testFailures + 1 : 0;

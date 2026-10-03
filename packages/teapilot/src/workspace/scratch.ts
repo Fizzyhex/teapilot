@@ -169,13 +169,13 @@ export function notKept(error: unknown): string {
  * Keeps a long tool result and returns what the model sees: the result itself when it fits, or its start and end
  * when it does not, each followed by where the whole of it is. A failure to keep never changes the tool's outcome.
  */
-export async function keepResult(scratch: Scratch, tool: string, text: string): Promise<{ text: string; saved?: Saved } | undefined> {
+export async function keepResult(scratch: Scratch, tool: string, text: string, previewChars = scratchLimits.previewChars): Promise<{ text: string; saved?: Saved } | undefined> {
   if (text.length <= scratchLimits.keepChars) return undefined;
-  const long = text.length > scratchLimits.previewChars;
+  const long = text.length > previewChars;
   try {
     const saved = await scratch.save('outputs', tool, text, '.txt');
-    return { text: `${long ? clip(text, scratchLimits.previewChars) : text}\n${savedNote(saved)}`, saved };
+    return { text: `${long ? clip(text, previewChars) : text}\n${savedNote(saved)}`, saved };
   } catch (error) {
-    return long ? { text: `${clip(text, scratchLimits.previewChars)}\n${notKept(error)}` } : undefined;
+    return long ? { text: `${clip(text, previewChars)}\n${notKept(error)}` } : undefined;
   }
 }
