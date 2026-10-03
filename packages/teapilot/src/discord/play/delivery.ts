@@ -2,7 +2,8 @@ import type { Clock } from './runtime.js';
 
 /** One edit in flight, one latest view waiting; transport waits never hold the app's action queue. */
 export class PlayDelivery {
-  private pending?: () => Promise<void>;
+  private pending?: (current: () => boolean) => Promise<void | false>;
+  private revision = 0;
   private busy = false;
   private closed = false;
   private nextAt = 0;
@@ -10,8 +11,9 @@ export class PlayDelivery {
 
   constructor(private readonly clock: Clock, private readonly interval: number, private readonly failed: (error: unknown) => void) {}
 
-  enqueue(edit: () => Promise<void>): void {
+  enqueue(edit: (current: () => boolean) => Promise<void | false>): void {
     if (this.closed) return;
+    this.revision++;
     this.pending = edit;
     this.flush();
   }
@@ -24,11 +26,19 @@ export class PlayDelivery {
       return;
     }
     const edit = this.pending;
+    const revision = this.revision;
     this.pending = undefined;
     this.busy = true;
-    void Promise.resolve().then(() => { if (!this.closed) return edit(); }).catch(this.failed).finally(() => {
-      this.busy = false;
+    const startedAt = this.clock.now();
+    const current = () => !this.closed && revision === this.revision;
+    void Promise.resolve().then(() => current() ? edit(current) : false).then(sent => {
+      // Preparation can discard an obsolete/unchanged view without spending an edit slot.
+      if (sent !== false) this.nextAt = startedAt + this.interval;
+    }).catch(error => {
       this.nextAt = this.clock.now() + this.interval;
+      this.failed(error);
+    }).finally(() => {
+      this.busy = false;
       this.flush();
     });
   }

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { MessagePayload } from '../src/discord/play/render.js';
-import { hashFile, PlayRuntime, systemClock, type Clock, type Consultant, type PlayInteraction, type PlaySurface } from '../src/discord/play/runtime.js';
+import { hashFile, PlayRuntime, systemClock, type Clock, type Consultant, type Pictures, type PlayInteraction, type PlaySurface } from '../src/discord/play/runtime.js';
 import { PlayStore } from '../src/discord/play/store.js';
 
 const cleanups: Array<() => unknown> = [];
@@ -84,7 +84,7 @@ export default app({
   view: state => ({ content: 'n' + state.n, rows: [row(button('go', 'Go'), button('poke', 'Poke'))] }),
 });`;
 
-async function setup(options: { consult?: Consultant; clock?: Clock; directory?: string; probe?: boolean } = {}) {
+async function setup(options: { consult?: Consultant; clock?: Clock; directory?: string; probe?: boolean; pictures?: Pictures } = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'teapilot-play-'));
   if (!options.directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const posts: MessagePayload[] = [];
@@ -96,7 +96,7 @@ async function setup(options: { consult?: Consultant; clock?: Clock; directory?:
   };
   const log = vi.fn();
   const store = new PlayStore(directory);
-  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, clock: options.clock, probe: options.probe ?? false, discordEditMs: 0 });
+  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, clock: options.clock, probe: options.probe ?? false, pictures: options.pictures, discordEditMs: 0 });
   cleanups.push(() => runtime.close());
   return { directory, store, runtime, surface, posts, edits, log };
 }
@@ -187,6 +187,69 @@ it('coalesces pending views into the final disabled view even when Discord is bl
   const final = vi.mocked(surface.edit).mock.calls[1]![2];
   expect(final.content).toBe('2 \n-# done');
   expect(final.components.flatMap(row => row.components).every(control => control.disabled)).toBe(true);
+});
+
+it('keeps private replies but skips unchanged Discord views', async () => {
+  const { runtime, surface } = await setup();
+  const { record } = await start(runtime);
+  const hint = act(record.id, 'hint');
+  await runtime.interact(hint.interaction);
+  expect(hint.seen.followUps).toEqual(['psst']);
+  expect(hint.seen.updates).toEqual([]);
+  await runtime.browserPress(record.id, 'add', owner);
+  await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledOnce());
+  await runtime.browserPress(record.id, 'hint', owner);
+  await runtime.browserPress(record.id, 'hint', owner);
+  expect(surface.edit).toHaveBeenCalledOnce();
+});
+
+it('retries an unchanged view after a failed delivery', async () => {
+  const { runtime, surface, log } = await setup();
+  const { record } = await start(runtime);
+  vi.mocked(surface.edit).mockRejectedValueOnce(new Error('offline'));
+  await runtime.browserPress(record.id, 'add', owner);
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(expect.stringContaining('offline')));
+  await runtime.browserPress(record.id, 'hint', owner);
+  await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(surface.edit).mock.calls.map(call => call[2].content)).toEqual(['1 ', '1 ']);
+});
+
+it('drops a stale prepared image and sends only the latest state', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const render = vi.fn(async (_conversation: string, spec: { name: string }) => ({ name: spec.name, data: Buffer.from('image') }));
+  const { runtime, surface } = await setup({ pictures: { check() {}, render } });
+  const { record } = await start(runtime, { code: `
+    import { app, button, row, embed, picture } from '@teapilot/discord-play';
+    export default app({ init: () => 0, update: s => s + 1,
+      view: s => ({ content: String(s), embeds: [embed({ image: picture('board.png') })], rows: [row(button('add', 'add'))] }) });` });
+  render.mockImplementationOnce(async (_conversation, spec) => { await blocked; return { name: spec.name, data: Buffer.from('old') }; });
+  try {
+    await runtime.browserPress(record.id, 'add', owner);
+    await vi.waitFor(() => expect(render).toHaveBeenCalledTimes(2));
+    await runtime.browserPress(record.id, 'add', owner);
+    await runtime.browserPress(record.id, 'add', owner);
+    expect(runtime.state(record.id, 'dm:1')).toBe(3);
+    expect(surface.edit).not.toHaveBeenCalled();
+  } finally { release(); }
+  await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledOnce());
+  expect(vi.mocked(surface.edit).mock.calls[0]![2]).toMatchObject({ content: '3', files: [{ data: Buffer.from('image') }] });
+  expect(render).toHaveBeenCalledTimes(3); // Initial post, discarded frame, latest frame.
+});
+
+it('does not deduplicate a return to the old view while a different edit is in flight', async () => {
+  const { runtime, surface } = await setup();
+  const { record } = await start(runtime);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(surface.edit).mockImplementationOnce(async () => { await blocked; });
+  try {
+    await runtime.browserPress(record.id, 'add', owner);
+    await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledOnce());
+    await runtime.update(record.id, 'dm:1', undefined, true);
+  } finally { release(); }
+  await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(surface.edit).mock.calls.map(call => call[2].content)).toEqual(['1 ', '0 ']);
 });
 
 it('retires the old message after its in-flight edit without sending its pending view to the new message', async () => {
@@ -392,7 +455,7 @@ it('runs an app posted through an interaction, and holds its timers while it hib
 
   // Nobody plays for ten minutes, so it hibernates; the interaction that could edit it expires soon after.
   advance(15 * 60_000);
-  expect(first.seen.updates).toHaveLength(2);
+  expect(first.seen.updates).toHaveLength(1); // Scheduling the timer did not change the view.
   expect((await runtime.update(record.id, 'reply:1', undefined, false)).preview).toContain('shows this change at the next click');
 
   // The next click brings a new interaction: its action shows, and the app runs again from there.

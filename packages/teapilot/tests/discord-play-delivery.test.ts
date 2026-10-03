@@ -39,8 +39,7 @@ it('keeps only the latest pending edit during transport backpressure', async () 
   await settle();
   for (let i = 2; i <= 100; i++) delivery.enqueue(async () => { seen.push(i); });
   time.advance(5000); await settle(); expect(seen).toEqual([1]);
-  release(); await settle(); expect(seen).toEqual([1]);
-  time.advance(2000); await settle(); expect(seen).toEqual([1, 100]);
+  release(); await settle(); expect(seen).toEqual([1, 100]);
   delivery.close();
 });
 
@@ -48,6 +47,7 @@ it('reports failures without preventing delivery of the next view', async () => 
   const time = clock(), failed = vi.fn(), next = vi.fn(async () => {});
   const delivery = new PlayDelivery(time.clock, 2000, failed);
   delivery.enqueue(async () => { throw new Error('discord unavailable'); });
+  await settle();
   delivery.enqueue(next);
   await settle(); expect(failed).toHaveBeenCalledOnce(); expect(next).not.toHaveBeenCalled();
   time.advance(2000); await settle(); expect(next).toHaveBeenCalledOnce();
@@ -69,4 +69,45 @@ it('does not start a scheduled edit after shutdown', async () => {
   const delivery = new PlayDelivery(time.clock, 2000, vi.fn());
   delivery.enqueue(edit); delivery.close(); await settle();
   expect(edit).not.toHaveBeenCalled();
+});
+
+it('counts transport time toward the edit interval', async () => {
+  const time = clock(), next = vi.fn(async () => {});
+  let release!: () => void;
+  const delivery = new PlayDelivery(time.clock, 2000, vi.fn());
+  delivery.enqueue(() => new Promise<void>(resolve => { release = resolve; }));
+  await settle();
+  delivery.enqueue(next);
+  time.advance(1500); release(); await settle();
+  time.advance(499); await settle(); expect(next).not.toHaveBeenCalled();
+  time.advance(1); await settle(); expect(next).toHaveBeenCalledOnce();
+  delivery.close();
+});
+
+it('skips superseded preparation without delaying the latest view', async () => {
+  const time = clock(), seen: number[] = [];
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const delivery = new PlayDelivery(time.clock, 2000, vi.fn());
+  delivery.enqueue(async current => {
+    await held;
+    if (!current()) return false;
+    seen.push(1);
+  });
+  await settle();
+  delivery.enqueue(async () => { seen.push(2); });
+  release(); await settle();
+  expect(seen).toEqual([2]);
+  expect(time.timers.size).toBe(0);
+  delivery.close();
+});
+
+it('takes the latest view even before preparation starts', async () => {
+  const time = clock(), seen: number[] = [];
+  const delivery = new PlayDelivery(time.clock, 2000, vi.fn());
+  delivery.enqueue(async () => { seen.push(1); });
+  delivery.enqueue(async () => { seen.push(2); });
+  await settle();
+  expect(seen).toEqual([2]);
+  delivery.close();
 });

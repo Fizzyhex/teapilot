@@ -73,6 +73,17 @@ async function setup() {
 
 afterEach(() => { vi.useRealTimers(); });
 
+it('edits play messages by id without fetching them first', async () => {
+  const { gateway, channel } = await setup();
+  channel.messages.fetch = vi.fn();
+  channel.messages.edit = vi.fn(async () => undefined);
+  try {
+    await gateway.play.edit('channel', 'uncached-message', { content: 'latest', embeds: [], components: [], allowedMentions: { parse: [] } });
+    expect(channel.messages.fetch).not.toHaveBeenCalled();
+    expect(channel.messages.edit).toHaveBeenCalledWith('uncached-message', expect.objectContaining({ content: 'latest', attachments: [] }));
+  } finally { await gateway.close(); }
+});
+
 const buttonId = (message: any, label: string) => message.payload.components[0].components.find((button: any) => button.data.label === label).data.custom_id;
 const press = async (client: any, id: string, message: any) => {
   const click = interaction(id, message);

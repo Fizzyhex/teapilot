@@ -3,6 +3,8 @@
   import teacup from '../art/teacup.png';
   import { skin } from './skin';
   import Text from './Text.svelte';
+  import { collectPadInputs, DualSenseHid } from './gamepad';
+  import type { HidApi } from './gamepad';
   type Control = { custom_id?: string; label?: string; style: number; disabled?: boolean; url?: string; emoji?: { id?: string; name: string; animated?: boolean } };
   type Embed = { title?: string; description?: string; color?: number; url?: string; image?: { url: string }; thumbnail?: { url: string }; footer?: { text: string }; fields?: { name: string; value: string; inline?: boolean }[] };
   type Binding = { key?: string; pad?: string };
@@ -12,6 +14,13 @@
   let bindings = $state<Record<string, Binding>>({});
   let privateNotes = $state<{ content: string; embeds?: Embed[] }[]>([]);
   let fatal = $state(false);
+  let hidController: DualSenseHid | undefined;
+  let hidAvailable = $state(false), hidPending = $state(false), controllerNote = $state('');
+  async function connectController() {
+    if (!hidController || hidPending) return;
+    hidPending = true;
+    try { await hidController.request(); } finally { hidPending = false; }
+  }
   let dialog = $state<HTMLDialogElement>();
   $effect(() => {
     if (!binding || !dialog) return;
@@ -42,6 +51,12 @@
     let stopped = false, retry: ReturnType<typeof setTimeout>, animation = 0, heardAt = 0;
     let previous = new Set<string>();
     const keys = new Set<string>();
+    const hid = (navigator as Navigator & { hid?: HidApi }).hid;
+    hidAvailable = Boolean(hid);
+    if (hid) {
+      hidController = new DualSenseHid(hid, text => { controllerNote = text; });
+      void hidController.restore();
+    }
     try { dark = (localStorage.getItem('play-theme') ?? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark'; } catch {}
     const connect = async () => {
       if (stopped) return;
@@ -103,9 +118,9 @@
       const now = new Set<string>();
       for (const pad of navigator.getGamepads?.() ?? []) {
         if (!pad) continue;
-        pad.buttons.forEach((button, i) => { if (button.pressed) now.add(`button ${i}`); });
-        pad.axes.forEach((axis, i) => { for (const direction of [-1, 1]) { const name = `axis ${i} ${direction < 0 ? '-' : '+'}`; if (axis * direction > (previous.has(name) ? 0.35 : 0.65)) now.add(name); } });
+        collectPadInputs({ buttons: pad.buttons.map(button => button.pressed), axes: pad.axes }, now, previous);
       }
+      hidController?.collect(now, previous);
       for (const value of ignored) if (!now.has(value)) ignored.delete(value);
       if (document.hasFocus() && !document.hidden && !document.activeElement?.closest('input,textarea,select,[contenteditable="true"]')) {
         const capturing = Boolean(binding);
@@ -117,7 +132,7 @@
       held = previous = now; animation = requestAnimationFrame(poll);
     };
     window.addEventListener('keydown', keydown); window.addEventListener('keyup', keyup); window.addEventListener('blur', blur); document.addEventListener('visibilitychange', blur); poll();
-    return () => { stopped = true; clearTimeout(retry); clearInterval(ping); cancelAnimationFrame(animation); ws?.close(); window.removeEventListener('keydown', keydown); window.removeEventListener('keyup', keyup); window.removeEventListener('blur', blur); document.removeEventListener('visibilitychange', blur); };
+    return () => { stopped = true; hidController?.stop(); clearTimeout(retry); clearInterval(ping); cancelAnimationFrame(animation); ws?.close(); window.removeEventListener('keydown', keydown); window.removeEventListener('keyup', keyup); window.removeEventListener('blur', blur); document.removeEventListener('visibilitychange', blur); };
   });
 </script>
 
@@ -159,7 +174,9 @@
         </discord-message>
       </discord-messages>
     <footer><button onclick={() => controls = !controls}>controls</button><span>right-click a button to rebind</span><span>{connected ? `connected${latency === undefined ? '' : ` · ${latency}ms`}` : fatal ? 'disconnected' : 'connecting…'}</span></footer>
-    {#if controls}<div class="control-list">{#each all().filter(usable) as control}<button onclick={() => rebind(control)}>bind {control.label ?? control.emoji?.name ?? id(control)}</button>{/each}</div>{/if}
+    {#if controllerNote}<p role="status" class="notice">{controllerNote}</p>{/if}
+    {#if controls && !hidAvailable}<p class="notice">WebHID needs chrome or edge over https or localhost.</p>{/if}
+    {#if controls}<div class="control-list">{#if hidAvailable}<button class="controller-connect" onclick={connectController} disabled={hidPending} title="WebHID currently supports dualsense controllers">controller not working? click here</button>{/if}{#each all().filter(usable) as control}<button onclick={() => rebind(control)}>bind {control.label ?? control.emoji?.name ?? id(control)}</button>{/each}</div>{/if}
     {#if view?.unsupported.length}<p class="notice">some controls open in discord.</p>{/if}
     {#if view?.discordStale}<p class="notice">playing here · discord updates resume at the next click there.</p>{/if}
     {#if view && view.status !== 'running'}<p class="notice">this app has {view.status === 'paused' ? 'paused' : 'ended'}.</p>{/if}

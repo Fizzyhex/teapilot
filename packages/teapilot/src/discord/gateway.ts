@@ -940,7 +940,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     username: id => client.users.fetch(id).then(user => user.username, () => undefined),
     play: {
       async post(channelId, payload) { return (await (await messages(channelId)).send(raw(payload))).id; },
-      async edit(channelId, messageId, payload) { await (await (await messages(channelId)).messages.fetch(messageId)).edit(raw(payload, true)); },
+      async edit(channelId, messageId, payload) { await (await messages(channelId)).messages.edit(messageId, raw(payload, true)); },
       request: (method, route, body) => client.rest.request({ method: method as RequestMethod, fullRoute: route as RouteLike, body }),
     },
     // A custom status carries its text in `state`; the name is required but never shown for this type.

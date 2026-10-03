@@ -93,6 +93,8 @@ interface Live {
   /** Cancels the hibernation that `awakeUntil` is waiting for. */
   sleeper?: () => void;
   delivery?: PlayDelivery;
+  /** Last successfully delivered view, before attachment rendering. */
+  delivered?: MessagePayload;
 }
 interface Advance { state: unknown; seed: number; view: View; payload: MessagePayload; effects: Effect[]; timers: PlayRecord['timers']; finished?: { summary?: string } }
 
@@ -398,13 +400,18 @@ export class PlayRuntime {
     const record = { ...live.record };
     const originalReach = live.reach;
     if (!record.messageId) return;
-    this.delivery(live).enqueue(async () => {
+    this.delivery(live).enqueue(async current => {
+      // A picture's source file can change without its spec changing.
+      if (!payload.pictures?.length && isDeepStrictEqual(payload, live.delivered)) return false;
       const reach = record.messageId === live.record.messageId ? live.reach : originalReach;
-      if (record.viaInteraction && (!reach || reach.until <= this.now())) return;
+      if (record.viaInteraction && (!reach || reach.until <= this.now())) return false;
       const ready = await this.attach(record, payload);
+      if (!current()) return false;
       if (!record.viaInteraction && edit) await edit(ready);
       else if (!record.viaInteraction) await this.options.surface.edit(record.channelId, record.messageId!, ready);
       else if (reach!.until > this.now()) await reach!.edit(ready);
+      else return false;
+      if (record.messageId === live.record.messageId) live.delivered = payload;
     });
   }
 
@@ -552,6 +559,7 @@ export class PlayRuntime {
         record.messageId = posted.id;
         live.reach = { edit: posted.edit, until: this.now() + interactionLifetimeMs };
       } else record.messageId = await this.options.surface.post(record.channelId, ready);
+      live.delivered = step.payload;
       this.live.set(record.id, live);
       // Posting is activity, so a game with its own clock runs from here until ten minutes with nobody playing.
       this.wake(live);
@@ -735,6 +743,7 @@ export class PlayRuntime {
       // Old edits drain before the moved stub. The new message gets an independent generation.
       const retired = live.delivery;
       live.delivery = undefined;
+      live.delivered = undefined;
       this.remember(record, 'resend');
       this.options.store.save(record);
       // Timers a hibernating app was holding run again now that it has been brought back.
