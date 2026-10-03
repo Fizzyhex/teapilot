@@ -10,6 +10,7 @@ import { sandbox } from './sandbox.js';
 import type { PlayRecord, PlayStore } from './store.js';
 import { trusted, type DiscordRequest } from './trusted.js';
 import type { AssetFiles } from './assets.js';
+import { PlayDelivery } from './delivery.js';
 
 /** Where an app's message lives; the gateway implements it. */
 export interface PlaySurface {
@@ -91,6 +92,7 @@ interface Live {
   awakeUntil?: number;
   /** Cancels the hibernation that `awakeUntil` is waiting for. */
   sleeper?: () => void;
+  delivery?: PlayDelivery;
 }
 interface Advance { state: unknown; seed: number; view: View; payload: MessagePayload; effects: Effect[]; timers: PlayRecord['timers']; finished?: { summary?: string } }
 
@@ -146,7 +148,36 @@ function checkState(state: unknown): void {
  * and answers every Discord interaction within Discord's three-second window.
  */
 export class PlayRuntime {
+  private readonly listeners = new Set<(id: string) => void>();
+  subscribe(listener: (id: string) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  private changed(id: string): void { for (const listener of this.listeners) { try { listener(id); } catch (error) { this.options.log(`play ${id}: ${errorText(error)}`); } } }
+  browserTarget(channelId: string, messageId: string, user: User): string | undefined {
+    return [...this.live.values()].find(({ record }) => record.channelId === channelId && record.messageId === messageId && this.allowed(record, user.id))?.record.id;
+  }
+  async browserView(id: string, user: User) {
+    const live = this.live.get(id);
+    if (!live || !this.allowed(live.record, user.id)) throw new PlayError('this app is unavailable.');
+    const record = live.record;
+    const payload = await this.attach(record, withNote(renderView(id, record.view, record.status !== 'running'), record.note));
+    const unsupported = (record.view.rows ?? []).flatMap(row => row.controls.filter(control => control.type === 'select' || control.opens).map(control => control.id));
+    return { title: record.title, status: record.status, payload, unsupported, discordStale: !this.reachable(live) };
+  }
+  async browserPress(id: string, controlId: string, user: User) {
+    const live = this.live.get(id);
+    if (!live) throw new PlayError('this app is unavailable.');
+    return this.serial(live, async () => {
+      const record = live.record;
+      if (record.status !== 'running' || !this.allowed(record, user.id)) throw new PlayError('you cannot use this app right now.');
+      const control = findControl(record.view, controlId);
+      if (!control || control.type !== 'button' || control.disabled || control.opens || control.url) throw new PlayError('use this control in discord.');
+      this.wake(live, true);
+      const { payload, notes } = await this.dispatch(live, { kind: 'button', id: controlId, user }, `button ${controlId} by ${user.id}`);
+      if (this.reachable(live)) this.show(live, payload);
+      return notes.map(note => ({ content: note.content, embeds: note.embeds && renderEmbeds(note.embeds) }));
+    });
+  }
   private readonly live = new Map<string, Live>();
+  private readonly deliveries = new Set<PlayDelivery>();
   private sweeper?: () => void;
 
   constructor(private readonly options: {
@@ -156,6 +187,8 @@ export class PlayRuntime {
     probe?: boolean;
     /** How many apps are running, whenever that changes; for the bot's Discord status. */
     onRunning?: (count: number) => void;
+    /** Minimum spacing between app-message edits; Discord's transport still handles actual rate limits. */
+    discordEditMs?: number;
   }) {}
 
   /** The last count `onRunning` was told, so it only hears about real changes. */
@@ -312,6 +345,7 @@ export class PlayRuntime {
     if (step.finished) this.release(live);
     else for (const effect of step.effects) if (effect.type === 'consult') this.consult(live, effect);
     this.report();
+    this.changed(record.id);
     return step.effects.filter((effect): effect is Extract<Effect, { type: 'ephemeral' }> => effect.type === 'ephemeral');
   }
 
@@ -340,7 +374,7 @@ export class PlayRuntime {
       try {
         const { payload, notes } = await this.dispatch(live, action, label);
         if (notes.length) this.options.log(`play ${live.record.id}: ${notes.length} private note(s) from ${label} had no one to go to.`);
-        await this.show(live, payload);
+        if (this.reachable(live)) this.show(live, payload);
       } catch (error) { this.options.log(`play ${live.record.id}: ${label} failed: ${errorText(error)}`); }
     });
   }
@@ -350,14 +384,28 @@ export class PlayRuntime {
     return !live.record.viaInteraction || (live.reach !== undefined && live.reach.until > this.now());
   }
 
-  /** Edits the app's message: in the channel, or through the newest interaction that still can. */
-  private async show(live: Live, payload: MessagePayload): Promise<void> {
-    const { record } = live;
+  private delivery(live: Live): PlayDelivery {
+    if (!live.delivery) {
+      live.delivery = new PlayDelivery(this.clock, this.options.discordEditMs ?? 2000,
+        error => this.options.log(`play ${live.record.id}: could not update its message: ${errorText(error)}`));
+      this.deliveries.add(live.delivery);
+    }
+    return live.delivery;
+  }
+
+  /** Snapshot the target and view; coalesce edits outside the state queue. */
+  private show(live: Live, payload: MessagePayload, edit?: (payload: MessagePayload) => Promise<void>): void {
+    const record = { ...live.record };
+    const originalReach = live.reach;
     if (!record.messageId) return;
-    if (record.viaInteraction && !this.reachable(live)) throw new Error('not shown yet: no one has used the app for 15 minutes, so its message changes only at the next click.');
-    const ready = await this.attach(record, payload);
-    if (!record.viaInteraction) return this.options.surface.edit(record.channelId, record.messageId, ready);
-    await live.reach!.edit(ready);
+    this.delivery(live).enqueue(async () => {
+      const reach = record.messageId === live.record.messageId ? live.reach : originalReach;
+      if (record.viaInteraction && (!reach || reach.until <= this.now())) return;
+      const ready = await this.attach(record, payload);
+      if (!record.viaInteraction && edit) await edit(ready);
+      else if (!record.viaInteraction) await this.options.surface.edit(record.channelId, record.messageId!, ready);
+      else if (reach!.until > this.now()) await reach!.edit(ready);
+    });
   }
 
   /** Whether the app is playing now: posted, used or resent within the last ten minutes. */
@@ -369,11 +417,11 @@ export class PlayRuntime {
    * Someone is playing, so the app runs for the next ten minutes: its clocks start from here, and the
    * ones it was holding pick up with exactly the wait they had left.
    */
-  private wake(live: Live): void {
+  private wake(live: Live, browser = false): void {
     live.sleeper?.();
     const until = this.now() + playLimits.hibernateMs;
     // An app posted through an interaction can only be edited for as long as that interaction lasts.
-    const reach = live.record.viaInteraction ? live.reach?.until : undefined;
+    const reach = live.record.viaInteraction && !browser ? live.reach?.until : undefined;
     live.awakeUntil = reach !== undefined && reach < until ? reach : until;
     live.sleeper = this.clock.after(Math.max(0, live.awakeUntil - this.now()), () => this.hibernate(live));
     this.arm(live);
@@ -454,10 +502,10 @@ export class PlayRuntime {
     this.options.store.save(record);
     this.report();
     if (!record.messageId) return;
+    this.changed(record.id);
     let payload: MessagePayload;
     try { payload = renderView(record.id, record.view, true); } catch { payload = { content: '', embeds: [], components: [], allowedMentions: { parse: [] } }; }
-    await this.show(live, withNote(payload, note))
-      .catch(error => this.options.log(`play ${record.id}: could not update its message: ${errorText(error)}`));
+    this.show(live, withNote(payload, note));
   }
 
   private allowed(record: PlayRecord, user: string): boolean {
@@ -553,7 +601,7 @@ export class PlayRuntime {
         // Starting a timer by hand is deliberate, so it runs without waiting for anyone to play.
         if (start.length) this.wake(live);
         // The change lands even where the message cannot show it yet; the next click does.
-        if (this.reachable(live)) await this.show(live, step.payload);
+        if (this.reachable(live)) this.show(live, step.payload);
         else notes.push('No one has used the app for 15 minutes, so Discord shows this change at the next click.');
         if (added.length) notes.unshift(`The kept state gained ${added.slice(0, 8).join(', ')} from the new init(); fields new inside nested data still need a default where they are read.`);
         return { record, preview: [describe(step.view), ...notes.map(note => `Note: ${note}`)].join('\n') };
@@ -684,14 +732,22 @@ export class PlayRuntime {
         live.reach = undefined;
       }
       record.channelId = target.channelId; record.updatedAt = this.now();
+      // Old edits drain before the moved stub. The new message gets an independent generation.
+      const retired = live.delivery;
+      live.delivery = undefined;
       this.remember(record, 'resend');
       this.options.store.save(record);
       // Timers a hibernating app was holding run again now that it has been brought back.
       this.wake(live);
       if (old.messageId) {
         const stub: MessagePayload = { content: `-# ${moved}`, embeds: [], components: [], allowedMentions: { parse: [] } };
-        await (old.viaInteraction ? old.reach?.edit(stub) : this.options.surface.edit(old.channelId, old.messageId, stub))
-          ?.catch(error => this.options.log(`play ${record.id}: could not retire its old message: ${errorText(error)}`));
+        const delivery = retired ?? new PlayDelivery(this.clock, this.options.discordEditMs ?? 2000,
+          error => this.options.log(`play ${record.id}: could not retire its old message: ${errorText(error)}`));
+        this.deliveries.add(delivery);
+        delivery.enqueue(async () => {
+          try { await (old.viaInteraction ? old.reach?.edit(stub) : this.options.surface.edit(old.channelId, old.messageId!, stub)); }
+          finally { delivery.close(); this.deliveries.delete(delivery); }
+        });
       }
       return { record, preview: describe(record.view) };
     });
@@ -732,19 +788,26 @@ export class PlayRuntime {
     if (record.viaInteraction) live.reach = { edit: payload => interaction.update(payload), until: this.now() + interactionLifetimeMs };
     // Someone is playing now, so the app runs again, and any clock it was holding starts from here.
     this.wake(live);
+    const replies: Promise<void>[] = [];
+    const reply = (content: string, embeds?: Array<Record<string, unknown>>) => {
+      replies.push(Promise.resolve().then(() => interaction.followUp(content, embeds))
+        .catch(error => this.options.log(`play ${record.id}: private reply failed: ${errorText(error)}`)));
+    };
     await this.serial(live, async () => {
-      if (live.record.status !== 'running') { await interaction.followUp('This app has ended.'); return; }
-      if (!current()) { await interaction.followUp('That control changed before your action arrived.'); return; }
+      if (interaction.messageId && interaction.messageId !== live.record.messageId) { reply(moved); return; }
+      if (live.record.status !== 'running') { reply('This app has ended.'); return; }
+      if (!current()) { reply('That control changed before your action arrived.'); return; }
       const action = toAction({ kind: interaction.kind, id: interaction.controlId, values: interaction.values, fields: interaction.fields }, interaction.user);
       try {
         const { payload, notes } = await this.dispatch(live, action, `${interaction.kind} ${interaction.controlId} by ${interaction.user.id}`);
-        await interaction.update(await this.attach(live.record, payload));
-        for (const note of notes) await interaction.followUp(note.content, note.embeds && renderEmbeds(note.embeds));
+        this.show(live, payload, payload => interaction.update(payload));
+        for (const note of notes) reply(note.content, note.embeds && renderEmbeds(note.embeds));
       } catch (error) {
         this.options.log(`play ${record.id}: ${errorText(error)}`);
-        await interaction.followUp(`The app hit an error, so nothing changed. ${clip(errorText(error), 300)}`).catch(() => undefined);
+        reply(`The app hit an error, so nothing changed. ${clip(errorText(error), 300)}`);
       }
     });
+    await Promise.all(replies);
   }
 
   /**
@@ -787,6 +850,8 @@ export class PlayRuntime {
         await this.serial(live, () => this.halt(live, 'finished', 'Ended after a day without activity.'));
       }
       if (live.record.status !== 'running' && live.record.updatedAt < this.now() - playLimits.keepFinishedMs) {
+        live.delivery?.close();
+        if (live.delivery) this.deliveries.delete(live.delivery);
         this.live.delete(live.record.id);
         this.options.store.remove(live.record.id);
       }
@@ -795,6 +860,8 @@ export class PlayRuntime {
   }
 
   close(): void {
+    for (const delivery of this.deliveries) delivery.close();
+    this.deliveries.clear();
     this.sweeper?.();
     this.sweeper = undefined;
     // Whatever each clock had left is put away first, so the next start picks it up where it stood.

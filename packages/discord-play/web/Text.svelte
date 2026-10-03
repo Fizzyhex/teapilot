@@ -1,0 +1,5 @@
+<script lang="ts">
+  let { text = '' }: { text?: string } = $props();
+  const pattern = /(```[\s\S]*?```|`[^`\n]+`|\*\*[^*]+\*\*|\|\|[\s\S]*?\|\||<a?:\w+:\d+>|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g;
+</script>
+<span class="rich-text">{#each text.split(pattern) as part}{#if /^```[\s\S]*```$/.test(part)}<pre>{part.slice(3, -3).replace(/^\w*\n/, '')}</pre>{:else if /^`[^`\n]+`$/.test(part)}<code>{part.slice(1, -1)}</code>{:else if /^\*\*[^*]+\*\*$/.test(part)}<strong>{part.slice(2, -2)}</strong>{:else if /^\|\|[\s\S]*\|\|$/.test(part)}<details class="spoiler"><summary>spoiler</summary>{part.slice(2, -2)}</details>{:else if /^<a?:\w+:\d+>$/.test(part)}<img class="emoji" src={`https://cdn.discordapp.com/emojis/${part.split(':').at(-1)!.slice(0, -1)}.${part.startsWith('<a:') ? 'gif' : 'png'}`} alt={part.split(':')[1]}>{:else if /^\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)$/.test(part)}<a href={part.slice(part.indexOf('](') + 2, -1)} target="_blank" rel="noopener noreferrer">{part.slice(1, part.indexOf(']('))}</a>{:else}{part}{/if}{/each}</span>

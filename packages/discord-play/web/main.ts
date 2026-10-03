@@ -1,0 +1,12 @@
+import { mount } from 'svelte';
+import '@skyra/discord-components-core/discord-messages.js';
+import '@skyra/discord-components-core/discord-message.js';
+import '@skyra/discord-components-core/discord-embed.js';
+import '@skyra/discord-components-core/discord-embed-fields.js';
+import '@skyra/discord-components-core/discord-embed-field.js';
+import '@skyra/discord-components-core/discord-button.js';
+import '@skyra/discord-components-core/discord-action-row.js';
+import '@skyra/discord-components-core/discord-attachments.js';
+import App from './App.svelte';
+import './style.css';
+mount(App, { target: document.getElementById('app')! });

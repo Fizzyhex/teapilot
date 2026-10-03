@@ -216,7 +216,7 @@ export default app({
 async function playSetup(files: WorkspaceStore) {
   const posts: MessagePayload[] = [];
   const surface: PlaySurface = { post: vi.fn(async (_channel, payload) => { posts.push(payload); return 'm1'; }), edit: vi.fn(), request: vi.fn() };
-  const runtime = new PlayRuntime({ store: new PlayStore(await directory('teapilot-play-')), surface, log: vi.fn(), pictures: pictures(files) });
+  const runtime = new PlayRuntime({ store: new PlayStore(await directory('teapilot-play-')), surface, log: vi.fn(), pictures: pictures(files), discordEditMs: 0 });
   cleanups.push(() => runtime.close());
   return { runtime, posts };
 }
@@ -237,7 +237,9 @@ it('shows picture() as an attachment the embed refers to, rendered again as the 
   const click = (id: string): PlayInteraction => ({ playId: record.id, controlId: id, kind: 'button', user: owner, messageId: 'm1',
     openModal: vi.fn(), reply: vi.fn(), defer: vi.fn(async () => undefined), update: vi.fn(async payload => { updates.push(payload); }), followUp: vi.fn() });
   await runtime.interact(click('turn'));
+  await vi.waitFor(() => expect(updates).toHaveLength(1));
   await runtime.interact(click('grey'));
+  await vi.waitFor(() => expect(updates).toHaveLength(2));
   const turned = updates[0]!.files![0]!, grey = updates[1]!.files![0]!;
   expect(turned.name).not.toBe(first.files![0]!.name);
   const { loadImage } = await canvasLibrary();

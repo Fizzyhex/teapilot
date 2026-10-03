@@ -13,9 +13,10 @@ import { InteractionFeed, type FeedLink } from './feed.js';
 import { planButtons, planModal, type PlanAction, type PlanControls } from './plan.js';
 import { viewSource, type Message as AnswerMessage } from 'pretty-send';
 import { chunk, MESSAGE_LIMIT, quoteMessage, viewSourcePrefix, type QuotedMessage, type ReplyChain } from './render.js';
-import { parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
+import { browserLink, parseCustomId, playPrefix, type MessagePayload } from './play/render.js';
 import type { PlayInteraction, PlaySurface } from './play/runtime.js';
 import type { DiscordSettings } from './settings.js';
+import { browserMenu } from './commands.js';
 
 /** How far the Reply menu follows a message's replies back, and how long it may spend fetching them. */
 const replyChainDepth = 10;
@@ -97,6 +98,7 @@ export interface GatewayChoice {
   transport(): DiscordTransport;
 }
 export interface GatewayHandlers {
+  openBrowser?(channelId: string, messageId: string, user: { id: string; name: string }): string | undefined;
   message(message: GatewayMessage): void;
   command(command: GatewayCommand): void;
   complete?(completion: GatewayCompletion): void;
@@ -609,6 +611,12 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   });
 
   client.on(Events.InteractionCreate, async interaction => {
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === browserMenu) {
+      const url = interaction.targetMessage.author.id === client.user?.id
+        ? handlers.openBrowser?.(interaction.channelId, interaction.targetMessage.id, { id: interaction.user.id, name: interaction.user.username }) : undefined;
+      await interaction.reply({ content: browserLink(url), flags: MessageFlags.Ephemeral, ...quiet }).catch(noop);
+      return;
+    }
     // Only the Reply menu reads this; drop it for every other interaction so the map stays empty.
     if (!(interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu)) interactionReplies.delete(interaction.id);
     if (interaction.isMessageContextMenuCommand() && interaction.commandName === replyMenu || interaction.isChatInputCommand() && [replyCommand, promptCommand].includes(interaction.commandName)) {

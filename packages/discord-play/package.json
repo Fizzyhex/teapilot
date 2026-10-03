@@ -21,14 +21,19 @@
     "dist"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && svelte-check --tsconfig web/tsconfig.json",
+    "build": "tsc -p tsconfig.build.json && vite build --config web/vite.config.ts",
     "test": "vitest run",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
+    "@skyra/discord-components-core": "^4.0.2",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@types/node": "^22.19.0",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.7.6",
     "typescript": "^5.9.3",
+    "vite": "^8.3.2",
     "vitest": "^4.1.11"
   }
 }

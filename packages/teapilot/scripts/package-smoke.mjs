@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const scratch = await mkdtemp(join(tmpdir(), 'teapilot-package-'));
@@ -64,12 +64,26 @@ try {
   assert(packed.files.some(file => file.path === 'node_modules/pretty-send/dist/index.js') && !packed.files.some(file => file.path.startsWith('node_modules/pretty-send/src/')));
   assert(packed.bundled.includes('@teapilot/discord-play'));
   assert(packed.files.some(file => file.path === 'node_modules/@teapilot/discord-play/dist/index.js') && !packed.files.some(file => file.path.startsWith('node_modules/@teapilot/discord-play/src/')));
+  for (const file of ['index.html', 'licenses.md', 'font-notice.txt']) assert(packed.files.some(entry => entry.path === `node_modules/@teapilot/discord-play/dist/web/${file}`));
+  assert(packed.files.some(file => /node_modules\/@teapilot\/discord-play\/dist\/web\/assets\/.*\.ttf$/.test(file.path)));
   assert(packed.files.some(file => file.path === 'node_modules/jevrouter/LICENSE'));
   assert(!packed.files.some(file => /(^|\/)\.env($|\.)/.test(file.path) || /^config\/(models|policy)\.json$/.test(file.path)));
   console.log('Installing packed artifact with Git disabled...');
   await run([npm, 'install', '--prefix', join(scratch, 'installed'), '--omit=dev', '--no-audit', '--no-fund', join(scratch, packed.filename)]);
   const cli = join(scratch, 'installed/node_modules/teapilot/dist/cli.js');
   assert.match(await run([cli, '--help']), /teapilot setup/);
+  await run(['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { openPlayWeb } from ${JSON.stringify(pathToFileURL(join(dirname(cli), 'discord/play/web.js')).href)};
+    const host = await openPlayWeb({}, { funnel: false, port: 0, log() {} });
+    try {
+      const response = await fetch(host.origin + '/play/test');
+      assert.equal(response.status, 200);
+      const html = await response.text();
+      const asset = /src="([^"]+\\.js)"/.exec(html)[1];
+      assert.equal((await fetch(host.origin + asset)).status, 200);
+    } finally { await host.close(); }
+  `]);
   if (process.platform !== 'win32') {
     // npm must create an executable bin link, not merely install a runnable file.
     const { access, constants } = await import('node:fs/promises');

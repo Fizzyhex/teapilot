@@ -96,7 +96,7 @@ async function setup(options: { consult?: Consultant; clock?: Clock; directory?:
   };
   const log = vi.fn();
   const store = new PlayStore(directory);
-  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, clock: options.clock, probe: options.probe ?? false });
+  const runtime = new PlayRuntime({ store, surface, log, consult: options.consult, clock: options.clock, probe: options.probe ?? false, discordEditMs: 0 });
   cleanups.push(() => runtime.close());
   return { directory, store, runtime, surface, posts, edits, log };
 }
@@ -149,6 +149,63 @@ it('runs simultaneous clicks one at a time', async () => {
   await Promise.all(clicks.map(click => runtime.interact(click.interaction)));
   expect(clicks.map(click => click.seen.updates[0]!.content).sort()).toEqual(['1 ', '2 ', '3 ', '4 ', '5 ']);
   expect(store.all()[0]!.state).toEqual({ count: 5, said: '' });
+});
+
+it('keeps browser state processing independent of a blocked Discord interaction edit', async () => {
+  const { runtime, surface } = await setup();
+  const { record } = await start(runtime);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const update = vi.fn(async () => { await blocked; });
+  const click = act(record.id, 'add', owner.id, { update });
+  try {
+    await runtime.interact(click.interaction);
+    await vi.waitFor(() => expect(update).toHaveBeenCalledOnce());
+    await runtime.browserPress(record.id, 'add', owner);
+    await runtime.browserPress(record.id, 'add', owner);
+    expect(runtime.state(record.id, 'dm:1')).toMatchObject({ count: 3 });
+    expect(surface.edit).not.toHaveBeenCalled();
+  } finally { release(); }
+  await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledOnce());
+  expect(vi.mocked(surface.edit).mock.calls[0]![2].content).toBe('3 ');
+});
+
+it('coalesces pending views into the final disabled view even when Discord is blocked', async () => {
+  const { runtime, surface } = await setup();
+  const { record } = await start(runtime);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(surface.edit).mockImplementationOnce(async () => { await blocked; });
+  try {
+    await runtime.browserPress(record.id, 'add', owner);
+    await runtime.browserPress(record.id, 'add', owner);
+    await runtime.stop(record.id, 'dm:1', 'done');
+    expect(surface.edit).toHaveBeenCalledTimes(1);
+    expect((await runtime.browserView(record.id, owner)).status).toBe('finished');
+  } finally { release(); }
+  await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledTimes(2));
+  const final = vi.mocked(surface.edit).mock.calls[1]![2];
+  expect(final.content).toBe('2 \n-# done');
+  expect(final.components.flatMap(row => row.components).every(control => control.disabled)).toBe(true);
+});
+
+it('retires the old message after its in-flight edit without sending its pending view to the new message', async () => {
+  const { runtime, surface } = await setup();
+  const { record } = await start(runtime);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  vi.mocked(surface.edit).mockImplementationOnce(async () => { await blocked; });
+  vi.mocked(surface.post).mockResolvedValueOnce('message-2');
+  try {
+    await runtime.browserPress(record.id, 'add', owner);
+    await runtime.browserPress(record.id, 'add', owner);
+    await runtime.resend(record.id, 'dm:1', { channelId: 'channel-1' });
+    await runtime.browserPress(record.id, 'add', owner);
+    await vi.waitFor(() => expect(vi.mocked(surface.edit).mock.calls.some(call => call[1] === 'message-2' && call[2].content === '3 ')).toBe(true));
+  } finally { release(); }
+  await vi.waitFor(() => expect(surface.edit).toHaveBeenCalledTimes(3));
+  const old = vi.mocked(surface.edit).mock.calls.filter(call => call[1] === 'message-1');
+  expect(old.map(call => call[2].content)).toEqual(['1 ', '-# This app moved to a newer message below.']);
 });
 
 it('changes nothing when the app throws, and tells only the person who clicked', async () => {
@@ -348,6 +405,25 @@ it('runs an app posted through an interaction, and holds its timers while it hib
   await vi.waitFor(() => expect(again.seen.updates.at(-1)?.content).toBe('201 '));
   expect(surface.post).not.toHaveBeenCalled();
   expect(surface.edit).not.toHaveBeenCalled();
+});
+
+it('browser play wakes timers after Discord webhook expiry without renewing the webhook', async () => {
+  let now = 1_000_000;
+  const due: Array<{ at: number; run: () => void }> = [];
+  const clock: Clock = { now: () => now, after(ms, run) { const entry = { at: now + ms, run }; due.push(entry); return () => { if (due.includes(entry)) due.splice(due.indexOf(entry), 1); }; } };
+  const advance = (ms: number) => { now += ms; for (const entry of due.filter(item => item.at <= now)) { due.splice(due.indexOf(entry), 1); entry.run(); } };
+  const { runtime, store } = await setup({ clock });
+  const edit = vi.fn(async () => {});
+  const { record } = await runtime.start({ title: 'counter', channelId: 'channel', conversation: 'reply:1', owner, source: { kind: 'sandbox', code: counter }, post: async () => ({ id: 'reply', edit }) });
+  advance(15 * 60_000);
+  const changed = vi.fn(); const unsubscribe = runtime.subscribe(changed);
+  await runtime.browserPress(record.id, 'soon', owner);
+  advance(2000);
+  await vi.waitFor(() => expect(store.all()[0]!.state).toMatchObject({ count: 100 }));
+  expect(changed).toHaveBeenCalledWith(record.id);
+  expect(edit).not.toHaveBeenCalled();
+  expect((await runtime.browserView(record.id, owner)).discordStale).toBe(true);
+  unsubscribe();
 });
 
 it('resends a buried app with its state, points the old copy at it, and turns away clicks there', async () => {

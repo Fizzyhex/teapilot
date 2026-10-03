@@ -10,7 +10,7 @@ const candidates = process.platform === 'win32'
   ? ['tailscale', 'C:\\Program Files\\Tailscale\\tailscale.exe']
   : process.platform === 'darwin' ? ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale'] : ['tailscale'];
 
-export function tailscaleBinary(): string { return candidates.find(path => path === 'tailscale' || existsSync(path)) ?? 'tailscale'; }
+export function tailscaleBinary(): string { return candidates.find(path => path !== 'tailscale' && existsSync(path)) ?? 'tailscale'; }
 
 export const tailscaleExec: TailscaleExec = async (args, signal) => {
   const attempts = [...new Set([candidates[0]!, tailscaleBinary()])];

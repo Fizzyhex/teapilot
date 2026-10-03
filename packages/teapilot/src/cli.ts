@@ -25,7 +25,7 @@ teapilot --prompt "Summarise this idea"   (one-shot, no session)
 teapilot doctor [--live]
 teapilot search status|start|stop|remove
 teapilot runtime status|start|stop   (the model server TeaPilot installed, e.g. after a restart)
-teapilot discord setup|start|status|remove   (optional; chat from Discord)
+teapilot discord setup|start|status|remove   (start: --no-funnel for local-only browser play)
 teapilot teachat   (browse the agents' chatroom)
 teapilot bridge host [port] [--ts] [--token]   (share this computer's teapilot over your tailnet)
 teapilot bridge connect [port|host]
@@ -43,6 +43,7 @@ async function main(): Promise<void> {
     stdio: { type: 'boolean' }, tier: { type: 'string' }, once: { type: 'boolean' },
     'no-motion': { type: 'boolean' },
     verbose: { type: 'boolean' },
+    'no-funnel': { type: 'boolean' },
     ts: { type: 'boolean' }, token: { type: 'boolean' }, 'rotate-token': { type: 'boolean' },
   } });
   if (values.help) { console.log(help); return; }
@@ -64,6 +65,7 @@ async function main(): Promise<void> {
   if (values.stdio) throw new Error('--stdio requires serve');
   if (command !== 'setup' && [values['non-interactive'], values.endpoint, values.model, values['context-tokens']].some(value => value !== undefined)) throw new Error('Endpoint/model and unattended setup options require the setup command.');
   if (values.live && command !== 'doctor') throw new Error('--live requires the doctor command.');
+  if (values['no-funnel'] && (command !== 'discord' || positionals[0] !== 'start')) throw new Error('--no-funnel requires teapilot discord start.');
   if ((values.ts || values.token || values['rotate-token']) && command !== 'bridge') throw new Error('--ts, --token and --rotate-token require teapilot bridge host.');
   const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
   const controller = new AbortController();
@@ -71,6 +73,7 @@ async function main(): Promise<void> {
   const ui = interactive ? terminalUI(controller.signal, presentation) : undefined;
   const onInterrupt = () => { presentation.close(); controller.abort(); ui?.close(); };
   process.once('SIGINT', onInterrupt);
+  process.once('SIGTERM', onInterrupt);
   try {
     if (command === 'setup') {
       if (!interactive && !values['non-interactive']) throw new Error('Setup needs an interactive terminal, or --non-interactive with an existing endpoint.');
@@ -98,7 +101,7 @@ async function main(): Promise<void> {
       if (!ui && ['setup', 'remove'].includes(action)) throw new Error(`teapilot discord ${action} requires an interactive terminal.`);
       const { discord } = await import('./discord/index.js');
       const discordUI = ui ?? { log: (text: string) => console.error(text), confirm: async () => false, input: async () => '', choose: async () => 0 };
-      process.exitCode = await discord(action, { directory, cwd: resolve(values.cwd), ui: discordUI, signal: controller.signal }) ? 0 : 2;
+      process.exitCode = await discord(action, { directory, cwd: resolve(values.cwd), ui: discordUI, signal: controller.signal, funnel: !values['no-funnel'] }) ? 0 : 2;
       return;
     }
     if (command === 'bridge') {
@@ -190,7 +193,7 @@ async function main(): Promise<void> {
       const result = await execute(request);
       process.exitCode = result.success ? 0 : 2;
     }
-  } finally { presentation.close(); ui?.close(); process.removeListener('SIGINT', onInterrupt); }
+  } finally { presentation.close(); ui?.close(); process.removeListener('SIGINT', onInterrupt); process.removeListener('SIGTERM', onInterrupt); }
 }
 
 async function openTeachat(config: Awaited<ReturnType<typeof loadConfig>>, ui: NonNullable<ReturnType<typeof terminalUI>>, presentation: TerminalPresentation) {

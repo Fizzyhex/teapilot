@@ -1,8 +1,16 @@
 import { button, embed, field, modal, row, select } from '@teapilot/discord-play';
 import { expect, it } from 'vitest';
-import { describe as preview, findControl, parseCustomId, renderModal, renderView } from '../src/discord/play/render.js';
+import { browserLink, describe as preview, findControl, parseCustomId, renderModal, renderView } from '../src/discord/play/render.js';
 import { checkMessage, checkModal } from '../scripts/discord-sim/validate.js';
 import { firstJson, plain, unfence } from '../src/discord/play/consult.js';
+
+it('warns below local browser links, but not public Funnel links', () => {
+  const publicUrl = 'https://tea.example.ts.net:10000/play/abc123#ticket';
+  const localUrl = 'http://localhost:2048/play/abc123#ticket';
+  expect(browserLink(publicUrl)).toBe(`[open in browser](${publicUrl})`);
+  expect(browserLink(localUrl)).toBe(`[open in browser](${localUrl})\n-# funnel is unavailable`);
+  expect(browserLink(undefined)).toBe('this app cannot be opened here right now.');
+});
 
 it('renders a view as Discord API JSON with namespaced custom ids', () => {
   const payload = renderView('abc123', {

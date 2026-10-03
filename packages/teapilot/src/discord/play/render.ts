@@ -5,6 +5,11 @@ import type { PictureSpec } from '../images.js';
 /** A mistake in an app's output. The message is written for the model that wrote the app. */
 export class PlayError extends Error {}
 
+export function browserLink(url: string | undefined): string {
+  if (!url) return 'this app cannot be opened here right now.';
+  return `[open in browser](${url})${url.startsWith('https://') ? '' : '\n-# funnel is unavailable'}`;
+}
+
 /** Discord API JSON for one message; discord.js accepts these objects as they are. */
 export interface MessagePayload {
   content: string;

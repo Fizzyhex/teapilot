@@ -1,0 +1,6 @@
+Monogram extended by datagoblin — CC0 1.0 Universal.
+https://datagoblin.itch.io/monogram
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Source: datagoblin/monogram, commit 19fde16e, source/itch/html-tester/monogram-extended.ttf
+https://gitlab.com/datagoblin/monogram

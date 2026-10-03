@@ -73,6 +73,14 @@ Files you attach to a message (up to 5, 10 MB each) stay in the conversation's w
 
 Ask for a game, poll or quiz and teapilot posts one message with buttons, menus and forms that it updates in place. Anyone in the channel can use it unless you say who it is for. Apps survive restarts and end after a day without activity.
 
+### Playing in a browser
+
+Right-click an app's message → **Apps → Open In Browser** for a link to play the same app in a browser. The buttons are real buttons, and you can bind keys and controller buttons to them by right-clicking.
+
+Browser play needs Tailscale: teapilot publishes it with `tailscale funnel --https=10000 2048` while `teapilot discord start` runs, and stops its own funnel when it stops. An existing matching public funnel is reused and left running. If Tailscale is not set up or something else already holds funnel port 10000, the page stays on this computer only. Use `teapilot discord start --no-funnel` to skip publishing altogether.
+
+Menus and forms stay in Discord, since they need text and lists.
+
 ## Outside DMs and configured channels
 
 Operators and users can reach teapilot from any channel:
@@ -83,6 +91,7 @@ Operators and users can reach teapilot from any channel:
 | `/reply` | Ask something |
 | `/collab join` | Send your `/prompt` and `/reply` to a conversation everyone in the channel shares. `/collab leave` goes back to your own, and `/collab fork` leaves with a copy of it |
 | Right-click a message → **Apps → Reply** | Have teapilot respond to that message |
+| Right-click an app → **Apps → Open In Browser** | Play it in a browser instead, with keys and controllers |
 
 With the Reply menu, only the answer and approvals are posted; progress and results go to the terminal.
 

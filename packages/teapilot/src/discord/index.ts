@@ -32,7 +32,7 @@ import { configureDiscord, discordStatus, removeDiscord } from './setup.js';
 import { readDiscordSettings, type DiscordSettings } from './settings.js';
 
 export const discordActions = ['setup', 'start', 'status', 'remove'] as const;
-export interface DiscordCommand { directory: string; cwd: string; ui: SetupUI; signal: AbortSignal }
+export interface DiscordCommand { directory: string; cwd: string; ui: SetupUI; signal: AbortSignal; funnel?: boolean }
 
 /** teapilot discord setup|start|status|remove — opt-in, separate from teapilot setup. */
 export async function discord(action: string, options: DiscordCommand): Promise<boolean> {
@@ -43,18 +43,19 @@ export async function discord(action: string, options: DiscordCommand): Promise<
   throw new Error(`Use teapilot discord ${discordActions.join('|')}.`);
 }
 
-async function startDiscord({ directory, ui, signal }: DiscordCommand): Promise<boolean> {
+async function startDiscord({ directory, ui, signal, funnel = true }: DiscordCommand): Promise<boolean> {
   const env = { ...process.env };
   const config = await loadConfig(directory, env);
   const settings = readDiscordSettings(env);
   // discord.js loads only here, so every other command starts without it.
   const gateway = await import('./gateway.js');
-  await serveDiscord({ config, settings, log: text => ui.log(`${new Date().toLocaleTimeString()} ${text}`), signal, connect: gateway.connect });
+  await serveDiscord({ config, settings, log: text => ui.log(`${new Date().toLocaleTimeString()} ${text}`), signal, connect: gateway.connect, browser: { funnel } });
   return true;
 }
 
 /** Everything `teapilot discord start` runs once settings are read; the Discord simulator supplies its own `connect`. */
 export interface DiscordServer {
+  browser?: { funnel: boolean };
   config: Config;
   settings: DiscordSettings;
   /** The operator log; lines arrive redacted. */
@@ -133,6 +134,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     surface: { post: (...args) => connected().post(...args), edit: (...args) => connected().edit(...args), request: (...args) => connected().request(...args) },
     consult: consultant({ config, root, access, queue, run, signal }),
   });
+  let browser: Awaited<ReturnType<typeof import('./play/web.js').openPlayWeb>> | undefined;
 
   /**
    * Where teapilot cannot post, each /reply, /prompt or /collab is its own one-shot conversation, since it answers
@@ -490,12 +492,17 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
     reply: reply => void handleReply(reply).catch(failed('Reply handling')),
     allowed,
     component: interaction => void (surface ? play.interact(interaction) : interaction.reply('teapilot is still starting; try again in a moment.')).catch(failed('App interaction')),
+    openBrowser: (channelId, messageId, user) => browser?.launch(channelId, messageId, user),
     asides: { keep: answer => asides.keep(answer), find: id => asides.find(id), summarise: summariser({ config, root, access, queue, run, signal }) },
   }, log);
   surface = gateway.play;
   setStatus = gateway.setStatus;
   presence.start();
   const recovered = await play.recover();
+  if (options.browser && !signal.aborted) {
+    try { browser = await (await import('./play/web.js')).openPlayWeb(play, { ...options.browser, log, signal }); }
+    catch (error) { log(`browser play is unavailable: ${error instanceof Error ? error.message : error}`); }
+  }
   if (recovered) log(`Loaded ${recovered} discord.play app(s); each one starts again at the next click.`);
   if (!config.policy.permissions.includes('discord.play')) log('discord.play is off: add "discord.play" to "permissions" in this profile\'s policy.json to let teapilot build interactive Discord apps.');
 
@@ -505,6 +512,7 @@ export async function serveDiscord({ config, settings, signal, connect, clock, s
   if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
   log('Stopping: pending approvals are denied.');
   presence.close();
+  await browser?.close();
   play.close();
   await gateway.close();
   await sandbox.close();

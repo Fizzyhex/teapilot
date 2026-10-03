@@ -117,12 +117,13 @@ it('fires app timers when the clock jumps', async () => {
 });
 
 it('resends a buried app at the bottom and turns away clicks on the old copy', async () => {
-  const { world, runtime, record, message } = await playWorld();
+  const { world, clock, runtime, record, message } = await playWorld();
   await world.click('op', message, 'add');
   const { record: moved } = await runtime.resend(record.id, 'dm:x', { channelId });
   const fresh = moved.messageId!;
   expect(fresh).not.toBe(message);
-  expect(world.render(world.find(message))).toContain('This app moved to a newer message below.');
+  clock.advance(2000);
+  await vi.waitFor(() => expect(world.render(world.find(message))).toContain('This app moved to a newer message below.'));
   expect(world.render(world.find(fresh))).toContain('Count 1');
   expect(world.logs.filter(line => line.startsWith('⚠'))).toEqual([]);
   expect(await world.click('op', fresh, 'add')).toContain('Count 2');
