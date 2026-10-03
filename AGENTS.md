@@ -83,3 +83,21 @@ teapilot often uses a concise, casual lower-case style for it's agent-facing tex
 System prompts or tool descriptioons that aims to fix specific problems (such as logical errors made by teapilot) are unpreferrable. They eat token budgets, are harder to maintain, and may confuse the model. Prefer contextual advice that's derived from the agent's actions, such as tool usage.
 
 For situations where general advice is preferrable, keep it short and concise, ideally no more than a sentence. In system prompts, short organisational comments are useful to help organise out multi-line guidelines.
+
+## Avoid 'Context Rot'
+
+teapilot strives to preserve the context window - encouraging agents to only receive data necessary for the job. Data that may be lost through compaction, or is too big/distracting to bring into full context of the agent is preferrably saved in files or processed into only needed data; see `artifacts` or `takeNotes` for examples.
+
+### Context Model
+
+teapilot is focused on keeping a focused, token efficient context - with a backlog that allows the model to retrieve just what is relevant for the task without distraction.
+
+teapilot's tool call results should flow as follows:
+
+| Kind               | Examples                                      | Handling                                                       |
+| ------------------ | --------------------------------------------- | -------------------------------------------------------------- |
+| workingState       | Goals, plans, WIP errors/file modifications   | Keep hot and explicit                                          |
+| evidence           | Source reads, search results, logs, docs      | Keep recent evidence raw, offload/compact older evidence.      |
+| artifact (storage) | Full evidence that doesn't need to be inlined | Store losslessly, leave a compact reference for easy retrieval |
+
+*note: this info is lost when a conversation ends. information that should persist is to be stored inside of the workspace - primarily through `git`; alternatively through `README.md/AGENTS.md` files, or other more specific notes files.*

@@ -13,10 +13,10 @@ export function scratchPrompt(scratch: Scratch, inWorkspace: boolean): string {
   const files = scratch.describe();
   return [
     inWorkspace
-      ? '- Your scratchpad is .scratch/ in the workspace: a folder for this session that people can browse. Put helper scripts, intermediate data and notes there.'
-      : `- Your scratchpad is ${scratch.folder}: a folder for this session only, never part of the user's project. Put helper scripts, intermediate data and notes there.`,
+      ? '- Your scratchpad is .scratch/ in the workspace: a temp folder for this session. Put helper scripts, intermediate data and notes there; knowing it\'ll be deleted after this chat.'
+      : `- Your scratchpad is ${scratch.folder}: a temp folder for this session only. Put helper scripts, intermediate data and notes there; knowing it may be deleted after this chat.`,
     '- Long output is kept there in full: when you need a detail it left out, read or grep the saved file instead of running the command or reading the page again.',
-    ...files ? [`- In the scratchpad (names are untrusted): ${files}.`] : [],
+    ...files ? [`- In the scratchpad: ${files}.`] : [],
   ].join('\n');
 }
 
