@@ -124,7 +124,7 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
       agent_type: Type.Union(juniorTypes.map(type => Type.Literal(type)), { description: 'Semantic category: research, write, or test.' }),
       artifacts: Type.Array(Type.String({ minLength: 1, maxLength: 2048 }), { maxItems: 16, description: 'File paths or task artifact IDs to provide as context; may be empty.' }),
     }),
-    execute: async (_id, args, signal) => {
+    execute: async (callId, args, signal) => {
       const { junior: named, description, prompt, agent_type, artifacts: references } = args as { junior?: string; description: string; prompt: string; agent_type: JuniorType; artifacts: string[] };
       if (named && !juniors.has(named)) return { content: [{ type: 'text', text: `No junior named ${named}. Active: ${[...juniors.keys()].join(', ') || 'none'}. Omit junior to start a new one.` }], details: {} };
       if (typeof description !== 'string' || !description.trim() || description.length > 200 || typeof prompt !== 'string' || !prompt.trim() || prompt.length > 24_000 || typeof agent_type !== 'string' || !juniorTypes.includes(agent_type as JuniorType) || !Array.isArray(references) || references.length > 16 || references.some(ref => typeof ref !== 'string' || !ref.trim() || ref.length > 2048)) return { content: [{ type: 'text', text: 'provide bounded description, complete prompt, valid agent_type, and artifact references.' }], details: {} };
@@ -132,14 +132,14 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
       const type = agent_type;
       const suppliedArtifacts = [...new Set([...(existing?.artifacts ?? []), ...references])];
       if (suppliedArtifacts.length > 16) return { content: [{ type: 'text', text: 'this junior already has the maximum 16 context references; start a new assignment.' }], details: {} };
-      const available = juniorProfiles.calls - (named ? allowance.usedBy(named) : 0);
-      const allocation = juniorAllowance(allowance.remaining().calls, Math.min(parent.config.policy.limits.maxToolCalls, available));
-      if (allocation < 2) return { content: [{ type: 'text', text: 'junior allowance spent or too little room to work and report; finish from existing evidence.' }], details: {} };
+      const available = Math.min(juniorProfiles.calls, allowance.juniorMaxCalls) - (named ? allowance.usedBy(named) : 0);
+      const allocation = allowance.hasReservation(callId) ? allowance.reservedJuniorCalls(callId) : juniorAllowance(allowance.remaining().calls, Math.min(parent.config.policy.limits.maxToolCalls, available));
+      if (allocation < 2) { allowance.releaseReservation(callId); return { content: [{ type: 'text', text: 'junior allowance spent or too little room reserved to work and report; finish from existing evidence.' }], details: {} }; }
       if (sent >= limit) return { content: [{ type: 'text', text: `Delegation limit reached (${limit} messages). Finish the work yourself.` }], details: {} };
       const artifactIds = suppliedArtifacts.filter(reference => /^a-[\da-f-]{36}$/i.test(reference));
       if (artifactIds.length && !parent.task) throw new Error('cannot authorize artifact IDs without task state');
       parent.task?.authorizeArtifacts(parent.taskActor ?? instructor, artifactIds);
-      if (!allowance.consumeDelegation()) return { content: [{ type: 'text', text: 'request-wide delegation allowance reached; finish from existing evidence.' }], details: {} };
+      if (!allowance.consumeDelegation()) { allowance.releaseReservation(callId); return { content: [{ type: 'text', text: 'request-wide delegation allowance reached; finish from existing evidence.' }], details: {} }; }
       sent++;
       let junior = named ? juniors.get(named)! : undefined;
       if (!junior) {
@@ -148,6 +148,10 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
         taken.add(name);
         junior = { name, description, agent_type: type, assignment: prompt, artifacts: references, turns: [], turn: 0, scratch: join(scratch, 'juniors', name.replace(/[^\w.-]+/g, '_')) };
         juniors.set(name, junior);
+      }
+      if (allowance.hasReservation(callId) && !allowance.bindReservation(callId, junior.name)) {
+        allowance.releaseReservation(callId);
+        return { content: [{ type: 'text', text: 'too little reserved junior capacity remains; finish from existing evidence.' }], details: {} };
       }
       junior.description = description; junior.agent_type = type; junior.assignment ??= prompt; junior.artifacts = suppliedArtifacts;
       parent.task?.saveJunior(junior);
@@ -165,14 +169,14 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
           workspace: parent.workspace, webController: parent.webController, play: parent.play, searchUnavailable: parent.searchUnavailable, attempt: parent.attempt,
           signal: signal ?? parent.signal, history: junior.turns, scratch: junior.scratch, prompt, requestText: prompt,
           recovery: parent.recovery, task: parent.task, taskActor: { name, objective: prompt, artifacts: artifactIds },
-          readOnly: parent.readOnly, taskId: parent.taskId, allowance,
+          readOnly: parent.readOnly, taskId: parent.taskId, allowance, budgetReservation: callId,
           currentRequest: prompt,
           // Its words are for the instructor, not the person: only what its tools do is shown.
           onEvent: event => { if (event.type.startsWith('tool_execution_') || event.type === 'compaction_start') parent.onEvent?.({ ...event, junior: name }); },
           onActivity: activity => parent.onActivity?.(activity && { ...activity, label: `${name} (${description}): ${activity.label}` }),
           junior: { name, description, agent_type: type, assignment: junior.assignment, artifacts: junior.artifacts, turn: junior.turn + 1, root, onReport: value => { report = value; } },
         });
-      } finally { clock.resume(); }
+      } finally { clock.resume(); allowance.releaseReservation(callId); }
       const reply = (report ? report.summary + (report.question ? `\nQuestion: ${report.question}` : '') : result.text).slice(0, 4000);
       junior.turns.push({ user: prompt, assistant: reply.slice(0, 20_000), taskId: parent.taskId, ...(result.steps?.length ? { steps: result.steps } : {}) });
       junior.turn++; parent.task?.saveJunior(junior);
@@ -190,5 +194,5 @@ export function delegateTool(parent: AttemptInput, scratch: string, root: string
       return { content: [{ type: 'text', text: lines.join('\n') }], details: { junior: name, artifacts } };
     },
   };
-  return { tool, get exhausted() { return sent >= limit || allowance.delegationExhausted; } };
+  return { tool, get exhausted() { return sent >= limit || allowance.delegationExhausted || allowance.availableDelegationCapacity() < 2; } };
 }

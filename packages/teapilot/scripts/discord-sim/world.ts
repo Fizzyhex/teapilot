@@ -256,7 +256,7 @@ export class World {
   transport(channel: Channel, replyTo?: Message): DiscordTransport {
     const reply = () => { const to = replyTo; replyTo = undefined; return to; };
     return {
-      send: async text => this.post(channel, bot.name, { content: text }, undefined, reply()).id,
+      send: async (text, options) => this.post(channel, bot.name, { content: text, ...(options?.silent ? { flags: 1 << 12 } : {}) }, undefined, reply()).id,
       sendFiles: async (text, files) => this.post(channel, bot.name, { content: text, files }, undefined, reply()).id,
       answer: async ({ embeds, components, flags, files }) => this.post(channel, bot.name, { embeds: embeds as unknown as Json[], components: components as Row[], flags, files }, undefined, reply()).id,
       edit: async (id, text) => this.update(this.find(id), { content: text }),

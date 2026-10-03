@@ -17,7 +17,7 @@ import { accessTools, type AccessAdmin } from './access.js';
 import { ask } from './ask.js';
 import { casualPrompt } from './casual.js';
 import { delegateTool, delegationMinContext, delegationPrompt, juniorPrompt, juniorTools, juniorPlayWithheld, juniorReportMargin, reportTool, type JuniorRole } from './delegate.js';
-import { RequestAllowance, planningCallLimit } from './allowance.js';
+import { RequestAllowance, planningCallLimit, resolveToolBudget } from './allowance.js';
 import { planText, looksLikePlan } from '../workspace/plan.js';
 import { coder } from './coder.js';
 import { compactionSettings, coveredTurns, cutMessages, markTurn, SessionLog, shouldCompact, summarise, summaryLength, summaryMessage, turnMark, type Compaction } from './compaction.js';
@@ -80,6 +80,8 @@ export interface AttemptInput {
   /** Read-only exploration requested by the surface, inherited by juniors. */
   readOnly?: boolean;
   allowance?: RequestAllowance;
+  /** Reservation allocated to this junior by its instructor's completed tool-call batch. */
+  budgetReservation?: string;
   /** The current user amendment without presentation templates; kept outside lossy summaries. */
   currentRequest?: string;
   expectsPlan?: boolean;
@@ -116,7 +118,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const config = input.readOnly && !input.junior ? { ...input.config, policy: { ...input.config.policy, limits: { ...input.config.policy.limits, maxToolCalls: Math.min(input.config.policy.limits.maxToolCalls, input.config.policy.limits.planningToolCalls ?? planningCallLimit) } } } : input.config;
   const recovery = input.recovery ?? new RequestRecovery();
   const task = input.task, actor = input.taskActor ?? instructor;
-  const allowance = input.allowance ?? (recovery.allowance ??= new RequestAllowance({ calls: config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * (config.policy.escalation.maxEscalations + 1), timeoutMs: config.policy.limits.attemptTimeoutMs * (config.policy.escalation.maxEscalations + 1), delegations: config.policy.limits.maxJuniorTurns ?? 6 }, task));
+  const allowance = input.allowance ?? (recovery.allowance ??= new RequestAllowance({ calls: config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * (config.policy.escalation.maxEscalations + 1), timeoutMs: config.policy.limits.attemptTimeoutMs * (config.policy.escalation.maxEscalations + 1), delegations: config.policy.limits.maxJuniorTurns ?? 6 }, task, resolveToolBudget(config, { readOnly: input.readOnly, casual: input.casual, side: input.side, junior: input.junior !== undefined })));
   task?.restoreRecovery(recovery);
   const receipts = new Map<string, string>();
   let producing: string | undefined;
@@ -200,6 +202,7 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   const profile = playing ? { ...tierProfile, maxOutputTokens: Math.max(tierProfile.maxOutputTokens, Math.min(playOutputTokens, model.maxOutputTokens)) } : tierProfile;
   const inference: InferenceState = { turns: 0 };
   let toolLimit = false, timeout = false, searchFailed = false, capabilityDenied = false, limitWarned = false;
+  let budgetDenialSynthesis = false, budgetDenialSynthesisStarted = false;
   /** A reply that ended to call a tool but carried no call the server could parse. */
   const lost = (message: { stopReason?: string; content: Array<{ type: string }> }) => message.stopReason === 'toolUse' && !message.content.some(part => part.type === 'toolCall');
   let lostNotice = false;
@@ -328,13 +331,20 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   let reported = false;
   if (input.junior && model.toolCalling) controlTools.push(reportTool({ ...input.junior, onReport: report => { if (report.evidence) task?.authorizeEvidence(actor, report.evidence); reported = true; input.junior!.onReport(report); } }));
   // The instructor's clock stops while a junior works, which has an attempt's time of its own.
-  let deadline = Date.now() + config.policy.limits.attemptTimeoutMs, remaining: number | undefined;
+  let deadline = Date.now() + config.policy.limits.attemptTimeoutMs, remaining: number | undefined, pauses = 0, terminated = false;
   let timer: NodeJS.Timeout | undefined;
-  const arm = (ms: number) => { timer = setTimeout(() => { timeout = true; agent.abort(); }, ms); };
+  const approvalAbort = new AbortController();
+  const arm = (ms: number) => { timer = setTimeout(() => { timeout = true; approvalAbort.abort(new Error('attempt timed out')); agent.abort(); }, ms); };
   const clock = {
-    pause: () => { if (remaining === undefined) { clearTimeout(timer); remaining = Math.max(0, deadline - Date.now()); } },
-    resume: () => { if (remaining !== undefined) { deadline = Date.now() + remaining; arm(remaining); remaining = undefined; } },
+    pause: () => { if (pauses++ === 0 && !terminated) { clearTimeout(timer); remaining = Math.max(0, deadline - Date.now()); } },
+     resume: () => { pauses = Math.max(0, pauses - 1); if (!pauses && remaining !== undefined && !terminated && !input.signal?.aborted && !approvalAbort.signal.aborted) { deadline = Date.now() + remaining; arm(remaining); remaining = undefined; } },
   };
+  const continuationApproval: Approve = async approval => {
+    clock.pause();
+    try { return await input.approve(approval); }
+    finally { clock.resume(); }
+  };
+  const gateInstructor = () => allowance.ensureInstructor(approvalAbort.signal, continuationApproval);
   // Juniors keep their transcripts in the scratchpad, and a short context gains little from them.
   const delegation = model.toolCalling && !input.casual && !input.side && !input.junior && scratchFolder && config.delegation?.enabled !== false && profile.contextTokens >= delegationMinContext
     ? delegateTool({ ...input, config, recovery }, scratchFolder, ownRoot, clock, runAttempt, allowance) : undefined;
@@ -501,7 +511,19 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
     toolExecution: 'sequential',
     // Before every request, the first included, so an attempt carrying on from another starts within the limit too.
     prepareRequest: async ({ context: given }) => {
+      if (!input.readOnly && allowance.remaining().calls <= 0) toolLimit = true;
+      const canRenew = !input.junior && !input.readOnly && !input.side && !input.casual && !evidence.answerNow && !toolLimit && !timeout && !evidence.reason && !capabilityDenied && !policy.denied;
+      const budgetState = canRenew ? await gateInstructor() : allowance.denied ? 'denied' : 'ready';
+      if (approvalAbort.signal.aborted || input.signal?.aborted || timeout || terminated || allowance.remaining().ms <= 0) {
+        agent.abort();
+        return { context: { ...given, tools: [] } };
+      }
       let context = await shape(given);
+      if (toolLimit || budgetState !== 'ready') {
+        const tools = input.junior ? context.tools?.filter(tool => tool.name === 'report') : [];
+        const notice = toolLimit ? 'the hard request tool-call limit is reached' : budgetState === 'denied' ? 'additional instructor calls were not approved' : 'the instructor call grant is exhausted';
+        context = { ...context, tools, messages: [...context.messages, { role: 'user', content: `[notice] ${notice}; ${input.junior ? 'report partial findings and gaps now' : 'answer from existing evidence and state any gaps'}.`, timestamp: Date.now() }] };
+      }
       if (evidence.answerNow && context.tools?.some(tool => !input.junior || tool.name !== 'report')) {
         context = { ...context, tools: input.junior ? context.tools.filter(tool => tool.name === 'report') : [], messages: [...context.messages, { role: 'user', content: `[notice] ${evidence.answerWhy}; ${input.junior ? 'report partial findings and gaps now' : 'answer from existing evidence and state gaps'}.`, timestamp: Date.now() }] };
       }
@@ -545,9 +567,9 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       const next = await compose();
       return { context: { ...context, tools: withoutSearch(next.tools) }, messages: [{ role: 'user', content: `[notice] Updated task instructions and access:\n${next.systemPrompt}`, timestamp: Date.now() }] };
     },
-    beforeToolCall: async ({ toolCall }) => {
+      beforeToolCall: async ({ toolCall }) => {
       sourceSaved = undefined;
-      if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || timeout) { settled.set(toolCall.id, 'stopped'); return { block: true, terminate: true, reason: 'Attempt stopped' }; }
+      if (capabilityDenied || policy.denied || evidence.reason || searchFailed || input.signal?.aborted || approvalAbort.signal.aborted || timeout || terminated) { settled.set(toolCall.id, 'stopped'); return { block: true, terminate: true, reason: 'Attempt stopped' }; }
       if (evidence.answerNow && (!input.junior || toolCall.name !== 'report')) return { block: true, reason: 'exploration finished; synthesize from existing evidence' };
       if (evidence.searchExhausted && toolCall.name === 'web_search') return { block: true, reason: 'Search refused: search is unavailable or repeated searches found no new evidence. Continue without it, clearly stating any gaps.' };
       if (evidence.readsExhausted && toolCall.name === 'web_read') return { block: true, reason: 'Reading refused: the page budget is spent or reads kept returning the same page. Continue without it, clearly stating any gaps.' };
@@ -555,13 +577,29 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
         evidence.answerNow = true; evidence.answerWhy = 'the exploration allowance is spent';
         return { block: true, reason: 'exploration allowance spent; synthesize the proposal from available evidence, stating gaps' };
       }
-      if (++evidence.toolCalls > config.policy.limits.maxToolCalls) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
-      if (!allowance.consumeTool(input.junior?.name)) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'request-wide tool allowance reached' }; }
+      if (evidence.toolCalls >= config.policy.limits.maxToolCalls) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'Tool limit reached' }; }
+      if (!input.junior && !input.readOnly && !input.side && !input.casual) {
+        const renewal = await gateInstructor();
+        if (approvalAbort.signal.aborted || input.signal?.aborted || timeout || terminated || allowance.remaining().ms <= 0) { settled.set(toolCall.id, 'stopped'); return { block: true, terminate: true, reason: 'Attempt stopped' }; }
+        if (renewal !== 'ready') {
+          settled.set(toolCall.id, 'stopped');
+          if (renewal === 'denied') {
+            budgetDenialSynthesis = true;
+            return { block: true, reason: 'additional instructor calls were not approved; answer from existing evidence' };
+          }
+          toolLimit = true;
+          return { block: true, terminate: true, reason: 'instructor tool grant exhausted' };
+        }
+      }
+      if (!allowance.canAdmitTool(toolCall.id, input.junior?.name, input.budgetReservation)) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, reason: 'reserved request capacity is unavailable; finish from existing evidence' }; }
       if (task) {
-        const receipt = task.begin(actor, toolCall.name, toolCall.arguments, toolCall.id);
+        const receipt = task.admit(actor, toolCall.name, toolCall.arguments, toolCall.id);
         if (!receipt) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'request-wide tool allowance reached' }; }
         receipts.set(toolCall.id, receipt); producing = receipt;
-      }
+        allowance.recordAdmitted(input.junior?.name);
+      } else if (!allowance.consumeTool(input.junior?.name)) { settled.set(toolCall.id, 'stopped'); toolLimit = true; return { block: true, terminate: true, reason: 'request-wide tool allowance reached' }; }
+      allowance.commitToolAdmission(toolCall.id, input.junior?.name, input.budgetReservation);
+      evidence.toolCalls++;
       return undefined;
     },
     afterToolCall: async ({ toolCall, args, isError, result, context: sent }) => {
@@ -668,7 +706,12 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
       return kept || outcome?.failed ? { content, isError } : undefined;
     },
     finishTurn: ({ message }) => {
+      if (!input.junior) allowance.finishQueuedBatch();
       if (capabilityDenied || policy.denied || evidence.reason || searchFailed || toolLimit || timeout || input.signal?.aborted) return { action: 'end' };
+      if (budgetDenialSynthesis) {
+        if (!budgetDenialSynthesisStarted) { budgetDenialSynthesisStarted = true; return { action: 'continue' }; }
+        return { action: 'end' };
+      }
       // Usually code or long text the model put in the arguments; asking again with that hint tends to work.
       if (lost(message)) {
         const count = recovery.lostCalls.get(modelKey) ?? 0;
@@ -697,6 +740,13 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   log?.mark({ request: telemetry.requestId, attempt: input.attempt ?? 0, tier, model: model.id, task: input.taskId });
   if (input.resume) await telemetry.event('attempt_resume', { attempt: input.attempt ?? 0, messages: input.resume.messages.length, summarised: Boolean(input.resume.summary) });
   agent.subscribe(event => {
+    if (!input.junior && event.type === 'message_end' && event.message.role === 'assistant') {
+      const calls = event.message.content.filter(part => part.type === 'toolCall').map(part => ({
+        id: part.id, name: part.name,
+        ...(part.name === 'delegate_task' && typeof (part.arguments as { junior?: unknown }).junior === 'string' ? { junior: (part.arguments as { junior: string }).junior } : {}),
+      }));
+      allowance.reserveQueuedTools(calls);
+    }
     if (event.type === 'message_end' && ['user', 'assistant', 'toolResult'].includes(event.message.role)) log?.record(event.message as Message);
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'thinking_start') {
       input.onActivity?.({ kind: 'reasoning', label: 'Thinking...' });
@@ -735,13 +785,16 @@ export async function runAttempt(input: AttemptInput): Promise<AttemptResult> {
   });
   deadline = Date.now() + config.policy.limits.attemptTimeoutMs; arm(config.policy.limits.attemptTimeoutMs);
   // Unlike the instructor's attempt clock, the aggregate request deadline never pauses for a junior.
-  const requestTimer = setTimeout(() => { timeout = true; agent.abort(); }, allowance.remaining().ms);
-  const cancel = () => agent.abort();
+  const requestTimer = setTimeout(() => { timeout = true; approvalAbort.abort(new Error('request deadline exceeded')); agent.abort(); }, allowance.remaining().ms);
+  const cancel = () => { approvalAbort.abort(input.signal?.reason); agent.abort(); };
   input.signal?.addEventListener('abort', cancel, { once: true });
   try {
     input.signal?.throwIfAborted();
     await agent.prompt(input.prompt, pictures.length ? pictures : undefined);
   } finally {
+    terminated = true;
+    if (!input.junior) allowance.finishQueuedBatch();
+    approvalAbort.abort(new Error('attempt ended'));
     clearTimeout(timer);
     clearTimeout(requestTimer);
     input.signal?.removeEventListener('abort', cancel);

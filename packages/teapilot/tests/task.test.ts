@@ -5,6 +5,7 @@ import { completion, events, fixture, mockServer } from './helpers.js';
 import { TaskStore, instructor, taskLimits } from '../src/workspace/task.js';
 import { Scratch } from '../src/workspace/scratch.js';
 import { RequestRecovery } from '../src/agents/recovery.js';
+import { RequestAllowance } from '../src/agents/allowance.js';
 import { fingerprint } from '../src/agents/recovery.js';
 import { taskTools } from '../src/agents/task.js';
 import { runAttempt } from '../src/agents/run.js';
@@ -47,6 +48,56 @@ it('restores state without replenishing the same request or replacing its object
   restored.startRequest('request-2', { calls: 2, modelCalls: 3, timeoutMs: 1000 });
   expect(restored.remaining()).toEqual({ calls: 2, modelCalls: 3, ms: 1000 });
   expect(restored.snapshot().steps).toHaveLength(1);
+});
+
+it('persists instructor grants, counters, limits, and denial across reopen, resetting them only for a new request', async () => {
+  const f = await setup();
+  f.task.startRequest('budget-request', { calls: 40, modelCalls: 80, timeoutMs: 60_000, delegations: 6, instructorCalls: 20, juniorCalls: 7, maxContinuationBatches: 2 });
+  const charge = (store: TaskStore, count: number) => {
+    for (let index = 0; index < count; index++) {
+      const receipt = store.admit(instructor, 'read', {}, `first-${index}`)!;
+      expect(receipt).toBeTruthy();
+      store.settle(receipt, false);
+    }
+  };
+  charge(f.task, 20);
+  expect(f.task.grantInstructorBatch(0)).toBe(true);
+  expect(f.task.toolBudget()).toMatchObject({ instructorCalls: 20, instructorGranted: 40, continuationBatches: 1, instructorBatchCalls: 20, juniorMaxCalls: 7, maxContinuationBatches: 2 });
+
+  let restored = TaskStore.open(f.config.stateDir, 'explicit-scope', 'ignored', f.scratch);
+  restored.startRequest('budget-request', { calls: 100, modelCalls: 100, timeoutMs: 120_000, delegations: 30, instructorCalls: 30, juniorCalls: 30, maxContinuationBatches: 10 });
+  expect(restored.toolBudget()).toMatchObject({ instructorCalls: 20, instructorGranted: 40, continuationBatches: 1, instructorBatchCalls: 20, juniorMaxCalls: 7, maxContinuationBatches: 2 });
+  expect(() => charge(restored, 20)).not.toThrow();
+  expect(restored.admit(instructor, 'read', {}, 'over-grant')).toBeUndefined();
+
+  restored.denyContinuation();
+  restored = TaskStore.open(f.config.stateDir, 'explicit-scope', 'ignored', f.scratch);
+  expect(restored.continuationDenied).toBe(true);
+  const prompt = vi.fn(async () => true);
+  const deniedAllowance = new RequestAllowance({ calls: 40, modelCalls: 80, timeoutMs: 60_000, delegations: 6 }, restored,
+    { instructorCalls: 30, juniorCalls: 30, maxContinuationBatches: 10 });
+  expect(await deniedAllowance.ensureInstructor(undefined, prompt)).toBe('denied');
+  expect(prompt).not.toHaveBeenCalled();
+  expect(restored.admit(instructor, 'read', {}, 'denied-call')).toBeUndefined();
+  expect(restored.grantInstructorBatch(1)).toBe(false);
+  restored.startRequest('next-request', { calls: 40, modelCalls: 80, timeoutMs: 60_000, delegations: 6, instructorCalls: 12, juniorCalls: 9, maxContinuationBatches: 1 });
+  expect(restored.continuationDenied).toBe(false);
+  expect(restored.toolBudget()).toMatchObject({ instructorCalls: 0, instructorGranted: 12, continuationBatches: 0, instructorBatchCalls: 12, juniorMaxCalls: 9, maxContinuationBatches: 1 });
+});
+
+it('lets a legacy request use its full hard aggregate allowance without inventing a soft cap', async () => {
+  const f = await setup();
+  f.task.startRequest('legacy-budget', { calls: 40, modelCalls: 80, timeoutMs: 60_000, delegations: 6 });
+  const allowance = new RequestAllowance({ calls: 40, modelCalls: 80, timeoutMs: 60_000, delegations: 6 }, f.task);
+  for (let index = 0; index < 25; index++) {
+    const receipt = f.task.admit(instructor, 'read', {}, `legacy-${index}`);
+    expect(receipt).toBeTruthy();
+    f.task.settle(receipt!, false);
+    allowance.recordAdmitted();
+  }
+  expect(f.task.remaining().calls).toBe(15);
+  expect(await allowance.ensureInstructor(undefined)).toBe('ready');
+  expect(f.task.toolBudget()).toBeUndefined();
 });
 
 it('recovers interrupted calls as uncertain rather than replaying them', async () => {

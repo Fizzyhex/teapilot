@@ -24,7 +24,7 @@ import { markWork } from './teachat/busy.js';
 import { directTier, effectiveProfile, modelFor, profileFor, thinkingFor } from './routing/execution.js';
 import { WebController } from './web/controller.js';
 import { RequestRecovery } from './agents/recovery.js';
-import { RequestAllowance, planningCallLimit } from './agents/allowance.js';
+import { RequestAllowance, planningCallLimit, resolveToolBudget } from './agents/allowance.js';
 import { TaskStore } from './workspace/task.js';
 import { PlanStore, compactPlan, planNotice, planText } from './workspace/plan.js';
 
@@ -384,11 +384,11 @@ export async function runHost(config: Config, request: HostRequest, dependencies
         if (currentPlan) task.setPlan(currentPlan);
         task.configure({ currentRequest: userRequest, ...(request.planAction === 'new' ? { objective: request.taskObjective ?? prompt } : {}), ...(request.constraints ? { constraints: request.constraints } : {}) });
         const multiplier = config.policy.escalation.maxEscalations + 1;
-        task.startRequest(requestId, { calls: request.readOnly ? Math.min(config.policy.limits.maxToolCalls, config.policy.limits.planningToolCalls ?? planningCallLimit) : config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * multiplier, timeoutMs: config.policy.limits.attemptTimeoutMs * multiplier, delegations: config.policy.limits.maxJuniorTurns, readOnly: request.readOnly });
+        task.startRequest(requestId, { calls: request.readOnly ? Math.min(config.policy.limits.maxToolCalls, config.policy.limits.planningToolCalls ?? planningCallLimit) : config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * multiplier, timeoutMs: config.policy.limits.attemptTimeoutMs * multiplier, delegations: config.policy.limits.maxJuniorTurns, readOnly: request.readOnly, ...resolveToolBudget(config, { readOnly: request.readOnly, casual, side: request.side }) });
         await telemetry.event('task_start', { task: task.snapshot().id, resumed: Boolean(request.taskId), revision: task.snapshot().revision });
       }
       previous = await runAttempt({
-        allowance: recovery.allowance ??= new RequestAllowance({ calls: request.readOnly ? Math.min(config.policy.limits.maxToolCalls, config.policy.limits.planningToolCalls ?? planningCallLimit) : config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * (config.policy.escalation.maxEscalations + 1), timeoutMs: config.policy.limits.attemptTimeoutMs * (config.policy.escalation.maxEscalations + 1), delegations: config.policy.limits.maxJuniorTurns ?? 6 }, task),
+        allowance: recovery.allowance ??= new RequestAllowance({ calls: request.readOnly ? Math.min(config.policy.limits.maxToolCalls, config.policy.limits.planningToolCalls ?? planningCallLimit) : config.policy.limits.maxToolCalls, modelCalls: config.policy.limits.maxTurns * (config.policy.escalation.maxEscalations + 1), timeoutMs: config.policy.limits.attemptTimeoutMs * (config.policy.escalation.maxEscalations + 1), delegations: config.policy.limits.maxJuniorTurns ?? 6 }, task, resolveToolBudget(config, { readOnly: request.readOnly, casual, side: request.side })),
         config, workload, tier, cwd, web: request.authorization ? activePermissions.includes('web.search') : Boolean(request.web), budget, telemetry, recovery, task, taskId: task ? taskId : undefined, readOnly: request.readOnly,
         mode: request.mode, conversational: request.conversational, side: request.side, casual, authorization: request.authorization, access: request.access, play: request.play, workspace: request.workspace,
         currentRequest: userRequest,

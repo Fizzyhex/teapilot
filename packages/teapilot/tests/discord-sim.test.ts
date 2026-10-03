@@ -52,6 +52,16 @@ it('holds messages to what discord.js and Discord accept, and names the field th
   expect(() => checkModal({ custom_id: 'm', title: 'x'.repeat(46), components: [{ type: 1, components: [{ type: 4, custom_id: 'f', label: 'F', style: 1 }] }] })).toThrow(/modal\.title/);
 });
 
+it('marks silent assistant commentary with suppress-notifications, not literal @silent text', async () => {
+  const world = new World();
+  const transport = world.transport(world.channel('channel'));
+  await transport.send('checking the files', { silent: true });
+  await transport.send('done');
+  expect(world.messages[0]).toMatchObject({ content: 'checking the files', flags: 1 << 12 });
+  expect(world.messages[1]!.flags).toBeUndefined();
+  expect(world.logs.filter(line => line.startsWith('⚠'))).toEqual([]);
+});
+
 it('jumps timers forward in order and still lets them fire on their own', async () => {
   const clock = new SkippableClock();
   const fired: string[] = [];

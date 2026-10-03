@@ -23,12 +23,14 @@ export interface CardControls { stop: boolean; press(button: CardButton, userId:
 
 /** Everything the bridge needs from Discord for one conversation (a DM or a thread). */
 export interface DiscordTransport {
-  send(text: string): Promise<string>;
+  send(text: string, options?: { silent?: boolean }): Promise<string>;
   edit(messageId: string, text: string): Promise<void>;
   /** Posts a turn's status card, or with `id` replaces it. Each press is answered privately with `press`'s reply. */
   card(text: string, controls: CardControls, id?: string): Promise<string>;
   /** Post approve/deny buttons. Operators may answer; with `users`, so may whitelisted users. Resolves false when `signal` aborts first. */
   askApproval(text: string, signal: AbortSignal, users?: boolean): Promise<boolean>;
+  /** Continuation batches auto-approve after a short response window; absent transports fail closed. */
+  askContinuationBudget?(text: string, signal: AbortSignal, timeoutMs?: number): Promise<'approved' | 'denied' | 'auto-approved'>;
   typing(): void;
   /** Posts files as attachments, with a line of text. */
   sendFiles?(text: string, files: Array<{ name: string; data: Buffer }>): Promise<string>;
@@ -207,7 +209,10 @@ export class Conversation {
       await this.say(`-# Auto-approved (${approval.kind}): ${summary}`);
       return true;
     }
-    const text = this.options.redact(`**Approval needed** (${approval.kind})\n${approval.summary}${approval.details ? `\n\`\`\`\n${approval.details}\n\`\`\`` : ''}`);
+    const continuationBudget = approval.kind === 'continuation_budget';
+    const text = this.options.redact(continuationBudget
+      ? `**continue this run?**\n${approval.summary}${approval.details ? `\n\`\`\`\n${approval.details}\n\`\`\`` : ''}\n\nno answer in 45 seconds? this batch will continue automatically.`
+      : `**Approval needed** (${approval.kind})\n${approval.summary}${approval.details ? `\n\`\`\`\n${approval.details}\n\`\`\`` : ''}`);
     const parts = chunk(text);
     const live = this.live;
     const previous = live?.card.set('approval');
@@ -215,15 +220,17 @@ export class Conversation {
     // Show everything; the buttons go on the last part so the whole request is read first.
     for (const part of parts.slice(0, -1)) await this.options.transport.send(part);
     // A network request only reaches hosts named in the approval, so anyone using the conversation may answer it.
-    const approved = await this.options.transport.askApproval(parts.at(-1) ?? 'Approval needed.', signal, approval.kind === 'network').finally(() => {
+    const outcome = await (continuationBudget
+      ? this.options.transport.askContinuationBudget?.(parts.at(-1) ?? 'continue this run?', signal, 45_000) ?? Promise.resolve('denied' as const)
+      : this.options.transport.askApproval(parts.at(-1) ?? 'Approval needed.', signal, approval.kind === 'network').then(approved => approved ? 'approved' as const : 'denied' as const)).finally(() => {
       if (!live || !previous) return;
       // Put the phase back unless something else, such as Stop, changed it meanwhile.
       const current = live.card.set(previous);
       if (current !== 'approval') live.card.set(current);
       live.refresh();
     });
-    this.options.log(`${this.options.key}: ${approval.kind} ${approved ? 'approved' : 'denied'}: ${this.options.redact(approval.summary).split('\n')[0]}`);
-    return approved;
+    this.options.log(`${this.options.key}: ${approval.kind} ${outcome}: ${this.options.redact(approval.summary).split('\n')[0]}`);
+    return outcome !== 'denied';
   }
 
   /** The session's access for /convo grants; approvals are asked for here, where the conversation is. */
@@ -347,7 +354,27 @@ export class Conversation {
     };
     const pending = answerOnly ? undefined : setTimeout(() => refresh(), this.options.cardDelayMs ?? 4000);
     if (!answerOnly) this.live = { card, refresh: () => refresh() };
+    let assistantText = '';
+    let messageEnded = false;
+    let casual = false;
+    let commentary = Promise.resolve();
+    // Keep the last message for the normal answer; continued work makes earlier text commentary.
+    const postCommentary = () => {
+      const text = assistantText; assistantText = ''; messageEnded = false;
+      if (!text.trim()) return;
+      commentary = commentary.then(async () => {
+        for (const part of chunk(this.options.redact(text))) await transport.send(part, { silent: true }).catch(error => this.options.log(`${this.options.key}: commentary failed: ${error instanceof Error ? error.message : error}`));
+      });
+    };
     this.sink = event => {
+      if (event.type === 'route') casual = event.casual === true;
+      if (!answerOnly && !this.quiet && !casual && !event.junior) {
+        if (event.type === 'text' && typeof event.text === 'string') {
+          if (messageEnded) postCommentary();
+          assistantText += event.text;
+        } else if (event.type === 'message_end') messageEnded = true;
+        else if (event.type === 'tool_execution_start') postCommentary();
+      }
       if (typeof event.result === 'string') this.options.log(`${this.options.key}: ${String(event.tool)} -> ${this.options.redact(event.result)}`);
       if (event.type === 'route' && cardState === 'pending' && !answerOnly) {
         if (event.casual === true) { cardState = 'hidden'; clearTimeout(pending); } else refresh();
@@ -380,6 +407,7 @@ export class Conversation {
       this.live = undefined;
       if (this.turn === turn) this.turn = undefined;
     }
+    await commentary;
     const stopped = !result.success && (result.status === 'cancelled' || result.status === 'stopped');
     const reply = result.interruption ? formatInterruption(result.interruption, true) : result.text;
     const quietStop = stopped && (result.interruption ? !result.interruption.edits.length && !result.interruption.shellRan : reply === 'stopped');

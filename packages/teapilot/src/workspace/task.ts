@@ -18,7 +18,8 @@ export const claimSchema = z.object({ id, text: z.string().min(1).max(400), basi
 const sourceSchema = z.object({ path: z.string().max(2048).optional(), url: z.string().max(2048).optional(), query: z.string().max(200).optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }).strict();
 const artifactSchema = z.object({ id, sha256: z.string().regex(/^[a-f0-9]{64}$/), path: z.string().max(2048), bytes: z.number().int().nonnegative().max(8 * 1024 * 1024), lines: z.number().int().nonnegative(), complete: z.boolean(), kind: z.enum(['logs', 'pages', 'outputs']), actor: id, producer: id, producerTool: z.string().max(80).optional(), request: z.string().max(100).optional(), origin: z.enum(['file', 'inventory', 'saved-output', 'transcript']).optional(), source: sourceSchema.optional(), sourceEpoch: z.number().int().nonnegative().optional(), at: z.number() }).strict();
 const receiptSchema = z.object({ id, request: z.string().max(100), actor: id, tool: z.string().max(80), call: z.string().max(2000).optional(), argsSha256: z.string(), summary: z.string().max(240), excerpt: z.string().max(400), origin: z.enum(['file', 'inventory', 'saved-output', 'transcript']).optional(), source: sourceSchema.optional(), sourceEpoch: z.number().int().nonnegative().optional(), stale: z.boolean().optional(), uncertainSource: z.boolean().optional(), status: z.enum(['pending', 'succeeded', 'failed', 'uncertain']), artifacts: z.array(id).max(8), at: z.number() }).strict();
-const requestSchema = z.object({ id: z.string().max(100), calls: z.number().int().nonnegative(), modelCalls: z.number().int().nonnegative(), maxCalls: z.number().int().nonnegative(), maxModelCalls: z.number().int().nonnegative(), deadline: z.number(), status: z.string().max(80), delegations: z.number().int().nonnegative(), maxDelegations: z.number().int().nonnegative(), readOnly: z.boolean().optional(), juniorCalls: z.record(id, z.number().int().nonnegative()).default({}) }).strict();
+const toolBudgetSchema = z.object({ instructorCalls: z.number().int().nonnegative(), instructorGranted: z.number().int().nonnegative(), continuationBatches: z.number().int().nonnegative(), instructorBatchCalls: z.number().int().nonnegative(), juniorMaxCalls: z.number().int().positive(), maxContinuationBatches: z.number().int().nonnegative() }).strict();
+const requestSchema = z.object({ id: z.string().max(100), calls: z.number().int().nonnegative(), modelCalls: z.number().int().nonnegative(), maxCalls: z.number().int().nonnegative(), maxModelCalls: z.number().int().nonnegative(), deadline: z.number(), status: z.string().max(80), delegations: z.number().int().nonnegative(), maxDelegations: z.number().int().nonnegative(), readOnly: z.boolean().optional(), continuationDenied: z.boolean().default(false), juniorCalls: z.record(id, z.number().int().nonnegative()).default({}), toolBudget: toolBudgetSchema.optional() }).strict();
 const juniorSchema = z.object({ name: id, type: z.enum(['research', 'plan', 'implement', 'review']).optional(), agent_type: z.enum(['research', 'write', 'test']).optional(), description: z.string().max(500).optional(), assignment: z.string().max(24_000).optional(), artifacts: z.array(z.string().min(1).max(2048)).max(16).optional(), scratch: z.string().max(2048), turn: z.number().int().nonnegative(), turns: z.array(z.object({ user: z.string().max(24_000), assistant: z.string().max(4000) })).max(6) }).strict();
 const stateSchema = z.object({
   version: z.literal(1), id, scope: z.string().max(4096), scratch: z.string().max(2048), revision: z.number().int().nonnegative(), objective: z.string().max(24_000),
@@ -224,11 +225,11 @@ export class TaskStore {
       yield record;
     }
   }
-  startRequest(request: string, limits: { calls: number; modelCalls: number; timeoutMs: number; delegations?: number; readOnly?: boolean }): void {
+  startRequest(request: string, limits: { calls: number; modelCalls: number; timeoutMs: number; delegations?: number; readOnly?: boolean; instructorCalls?: number; juniorCalls?: number; maxContinuationBatches?: number }): void {
     if (this.state.request?.id === request) return;
     this.change(next => {
       next.status = 'active';
-      next.request = { id: request, calls: 0, modelCalls: 0, maxCalls: limits.calls, maxModelCalls: limits.modelCalls, deadline: Date.now() + limits.timeoutMs, status: 'active', delegations: 0, maxDelegations: limits.delegations ?? 6, readOnly: limits.readOnly ?? false, juniorCalls: {} };
+      next.request = { id: request, calls: 0, modelCalls: 0, maxCalls: limits.calls, maxModelCalls: limits.modelCalls, deadline: Date.now() + limits.timeoutMs, status: 'active', delegations: 0, maxDelegations: limits.delegations ?? 6, readOnly: limits.readOnly ?? false, continuationDenied: false, juniorCalls: {}, ...(limits.instructorCalls !== undefined && limits.juniorCalls !== undefined && limits.maxContinuationBatches !== undefined ? { toolBudget: { instructorCalls: 0, instructorGranted: Math.min(limits.calls, limits.instructorCalls), continuationBatches: 0, instructorBatchCalls: limits.instructorCalls, juniorMaxCalls: limits.juniorCalls, maxContinuationBatches: limits.maxContinuationBatches } } : {}) };
     });
   }
   remaining(): { calls: number; modelCalls: number; ms: number } {
@@ -242,9 +243,22 @@ export class TaskStore {
     this.change(next => { next.request!.modelCalls++; });
     return true;
   }
-  get delegationExhausted(): boolean { return !this.state.request || this.state.request.delegations >= this.state.request.maxDelegations || this.remaining().calls <= 4; }
+  get delegationExhausted(): boolean { return !this.state.request || this.state.request.delegations >= this.state.request.maxDelegations; }
   juniorCalls(name: string): number { return this.state.request?.juniorCalls[name] ?? 0; }
   consumeJunior(name: string): void { this.change(next => { next.request!.juniorCalls[name] = (next.request!.juniorCalls[name] ?? 0) + 1; }); }
+  toolBudget() { return this.state.request?.toolBudget && structuredClone(this.state.request.toolBudget); }
+  get continuationDenied(): boolean { return Boolean(this.state.request?.continuationDenied); }
+  denyContinuation(): void {
+    if (this.state.request && !this.state.request.continuationDenied) this.change(next => { next.request!.continuationDenied = true; });
+  }
+  grantInstructorBatch(expectedBatch: number): boolean {
+    const budget = this.state.request?.toolBudget;
+    if (!budget || this.state.request!.continuationDenied || budget.continuationBatches !== expectedBatch || budget.continuationBatches >= budget.maxContinuationBatches) return false;
+    const next = Math.min(budget.instructorBatchCalls, this.remaining().calls);
+    if (next <= 0) return false;
+    this.change(state => { const value = state.request!.toolBudget!; value.continuationBatches++; value.instructorGranted += next; });
+    return true;
+  }
   consumeDelegation(): boolean {
     if (this.delegationExhausted) return false;
     this.change(next => { next.request!.delegations++; });
@@ -282,6 +296,27 @@ export class TaskStore {
         next.receipts.splice(removable, 1);
       }
       next.receipts.push({ id: receipt, request: next.request!.id, actor: actor.name, tool, ...(call ? { call } : {}), argsSha256: createHash('sha256').update(JSON.stringify(args ?? {})).digest('hex'), summary: brief(this.redact(summary), 240), excerpt: '', status: 'pending', artifacts: [], at: Date.now() });
+    });
+    return receipt;
+  }
+  admit(actor: TaskActor, tool: string, args: unknown, call?: string): string | undefined {
+    const request = this.state.request, remaining = this.remaining();
+    if (!request || !remaining.calls || !remaining.ms) return undefined;
+    const budget = request.toolBudget;
+    if (request.continuationDenied || (actor.name === instructor.name ? Boolean(budget && budget.instructorCalls >= budget.instructorGranted)
+      : Boolean(budget && (request.juniorCalls[actor.name] ?? 0) >= budget.juniorMaxCalls))) return undefined;
+    const receipt = `e-${randomUUID()}`;
+    const data = (args ?? {}) as { path?: unknown; command?: unknown; url?: unknown; pattern?: unknown; query?: unknown };
+    const search = data.pattern ?? data.query;
+    const summary = String(data.path ?? data.command ?? data.url ?? '') + (search === undefined ? '' : `; ${String(search)}`);
+    this.change(next => {
+      const req = next.request!; req.calls++;
+      if (req.toolBudget) {
+        if (actor.name === instructor.name) req.toolBudget.instructorCalls++;
+        else req.juniorCalls[actor.name] = (req.juniorCalls[actor.name] ?? 0) + 1;
+      } else if (actor.name !== instructor.name) req.juniorCalls[actor.name] = (req.juniorCalls[actor.name] ?? 0) + 1;
+      if (next.receipts.length >= taskLimits.receipts) { const removable = next.receipts.findIndex(item => item.status !== 'pending'); if (removable < 0) throw new Error('too many pending tool calls'); this.archiveRecord('receipts', next.receipts[removable]); next.receipts.splice(removable, 1); }
+      next.receipts.push({ id: receipt, request: req.id, actor: actor.name, tool, ...(call ? { call } : {}), argsSha256: createHash('sha256').update(JSON.stringify(args ?? {})).digest('hex'), summary: brief(this.redact(summary), 240), excerpt: '', status: 'pending', artifacts: [], at: Date.now() });
     });
     return receipt;
   }

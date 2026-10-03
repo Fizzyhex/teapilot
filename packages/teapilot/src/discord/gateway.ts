@@ -201,7 +201,11 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     rest: { agent: restAgent() },
   });
   type CardMessage = BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds };
+  type FeedMessage = BaseMessageOptions & { flags?: typeof MessageFlags.SuppressEmbeds | typeof MessageFlags.SuppressNotifications };
+  // SuppressNotifications is a creation flag, not an editable message flag.
+  const editable = (payload: FeedMessage): CardMessage => ({ ...payload, flags: payload.flags === MessageFlags.SuppressNotifications ? undefined : payload.flags });
   const pending = new Map<string, { text: string; users: boolean; resolve(approved: boolean): void }>();
+  const pendingContinuations = new Map<string, { text: string; claim(): boolean; resolve(outcome: 'approved' | 'denied' | 'auto-approved', actor?: string): void }>();
   const cards = new Map<string, CardControls['press']>();
   const remember = (id: string, controls: CardControls) => {
     cards.delete(id); cards.set(id, controls.press);
@@ -244,6 +248,35 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       signal.addEventListener('abort', expire, { once: true });
     }));
   };
+  const askContinuationBudget = (text: string, signal: AbortSignal, timeoutMs: number, post: (payload: Payload) => Promise<{ id: string }>, revise: (id: string, payload: Payload) => Promise<unknown>): Promise<'approved' | 'denied' | 'auto-approved'> => {
+    if (signal.aborted) return Promise.resolve('denied');
+    const nonce = randomUUID();
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`teapilot:${nonce}:approve`).setLabel('Approve batch').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`teapilot:${nonce}:deny`).setLabel('Stop run').setStyle(ButtonStyle.Danger));
+    return post({ content: text, components: [row], ...quiet }).then(message => new Promise(resolve => {
+      let settled = false;
+      let claimed = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const settle = (outcome: 'approved' | 'denied' | 'auto-approved', verdict: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+        pendingContinuations.delete(nonce);
+        void revise(message.id, { content: settleContinuationText(text, verdict), components: [], ...quiet }).catch(noop);
+        resolve(outcome);
+      };
+      const abort = () => settle('denied', '**run stopped** (cancelled)');
+      pendingContinuations.set(nonce, { text,
+        claim: () => { if (settled || claimed) return false; claimed = true; clearTimeout(timer); pendingContinuations.delete(nonce); return true; },
+        resolve: (outcome, actor) => settle(outcome, outcome === 'approved' ? `**batch approved**${actor ? ` by <@${actor}>` : ''}` : outcome === 'auto-approved' ? '**auto-approved after 45 seconds**' : `**run stopped**${actor ? ` by <@${actor}>` : ''}`) });
+      timer = setTimeout(() => settle('auto-approved', '**auto-approved after 45 seconds**'), timeoutMs);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    }));
+  };
+  const settleContinuationText = (text: string, verdict: string) => `${text.slice(0, MESSAGE_LIMIT - verdict.length - 2)}\n\n${verdict}`;
 
   /** Posts in `channel`; with `replyTo`, the first message replies to it, without pinging its author. */
   const transport = (channel: SendableChannels, replyTo?: Message): DiscordTransport => {
@@ -253,7 +286,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       return to ? { reply: { messageReference: to, failIfNotExists: false }, allowedMentions: { parse: [] as [], repliedUser: false } } : quiet;
     };
     return {
-      async send(text) { const message = await channel.send({ content: text, ...reply() }); sent.set(message.id, message); return message.id; },
+      async send(text, options) { const message = await channel.send({ content: text, ...(options?.silent ? { flags: MessageFlags.SuppressNotifications } : {}), ...reply() }); sent.set(message.id, message); return message.id; },
       async sendFiles(text, files) { return (await channel.send({ content: text, files: attachments(files), ...reply() })).id; },
       async answer(message) { const posted = await channel.send({ ...answerPayload(message), ...reply() }); sent.set(posted.id, posted); return posted.id; },
       async edit(id, text) { const message = sent.get(id) ?? await channel.messages.fetch(id); await message.edit({ content: text, ...quiet }); },
@@ -279,11 +312,12 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       },
       typing() { void channel.sendTyping().catch(noop); },
       askApproval: (text, signal, users = false) => askApproval(text, signal, users, payload => channel.send(payload), async (id, payload) => (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload)),
+      askContinuationBudget: (text, signal, timeoutMs = 45_000) => askContinuationBudget(text, signal, timeoutMs, payload => channel.send(payload), async (id, payload) => (sent.get(id) ?? await channel.messages.fetch(id)).edit(payload)),
     };
   };
 
   /** Posts and edits through `interaction`'s webhook; a click's own message is edited through its reply. */
-  const webhookLink = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction, hidden: boolean): FeedLink<CardMessage> => {
+  const webhookLink = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction, hidden: boolean): FeedLink<FeedMessage> => {
     const expires = interaction.createdTimestamp + interactionLifetimeMs;
     // A click has no deferred message of its own: its reply is the message it was pressed on, so everything is a follow-up.
     let first = !interaction.isButton();
@@ -293,13 +327,13 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       async post(payload) {
         live();
         // The deferred "thinking" message becomes the first message, private if it was deferred so; later ones are follow-ups.
-        if (first) { first = false; return (await interaction.editReply(payload)).id; }
+        if (first) { first = false; return (await interaction.editReply(editable(payload))).id; }
         return (await interaction.followUp(hidden ? { ...payload, flags: (payload.flags ?? 0) | MessageFlags.Ephemeral } : payload)).id;
       },
       async revise(id, payload) {
         live();
-        if (interaction.isButton() && id === interaction.message.id) await interaction.editReply(payload);
-        else await interaction.webhook.editMessage(id, payload);
+        if (interaction.isButton() && id === interaction.message.id) await interaction.editReply(editable(payload));
+        else await interaction.webhook.editMessage(id, editable(payload));
       },
     };
   };
@@ -311,7 +345,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
   const interactionTransport = (interaction: ChatInputCommandInteraction | MessageContextMenuCommandInteraction | ButtonInteraction,
     { hidden = false, buttons = () => [] }: { hidden?: boolean; buttons?: () => Array<ActionRowBuilder<MessageActionRowComponentBuilder>> } = {}): DiscordTransport => {
     let controls: CardControls | undefined;
-    const feed: InteractionFeed<CardMessage> = new InteractionFeed(webhookLink(interaction, hidden), {
+    const feed: InteractionFeed<FeedMessage> = new InteractionFeed(webhookLink(interaction, hidden), {
       log: text => log(`Discord: ${text}`),
       onCard: id => {
         if (controls) remember(id, controls);
@@ -320,7 +354,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       },
     });
     return {
-      send: text => feed.post({ content: text, components: buttons(), ...quiet }),
+      send: (text, options) => feed.post({ content: text, components: buttons(), ...(options?.silent ? { flags: MessageFlags.SuppressNotifications } : {}), ...quiet }),
       sendFiles: (text, files) => feed.post({ content: text, files: attachments(files), components: buttons(), ...quiet }),
       answer: message => feed.post(answerPayload(message) as CardMessage),
       edit: (id, text) => feed.revise(id, { content: text, ...quiet }),
@@ -330,6 +364,7 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
       },
       typing: noop,
       askApproval: (text, signal, users = false) => askApproval(text, signal, users, async payload => ({ id: await feed.post(payload) }), (id, payload) => feed.revise(id, payload)),
+      askContinuationBudget: (text, signal, timeoutMs = 45_000) => askContinuationBudget(text, signal, timeoutMs, async payload => ({ id: await feed.post(payload) }), (id, payload) => feed.revise(id, payload)),
       // The runtime stops editing through this interaction once it expires, and uses the app's clicks after that.
       async postApp(payload) {
         if (!feed.live) throw new Error('Discord has stopped the updates of this reply; press Resume on its status card first.');
@@ -814,13 +849,22 @@ export async function connect(settings: DiscordSettings, handlers: GatewayHandle
     }
     const [prefix, nonce, verdict] = interaction.customId.split(':');
     if (prefix !== 'teapilot' || !nonce) return;
+    const continuation = pendingContinuations.get(nonce);
     const entry = pending.get(nonce);
     const mayAnswer = settings.allowedUserIds.includes(interaction.user.id) || (entry?.users === true && handlers.allowed?.(interaction.user.id) === true);
     if (!mayAnswer) {
       await interaction.reply({ content: 'You are not allowed to approve teapilot actions.', flags: MessageFlags.Ephemeral }).catch(noop);
       return;
     }
-    if (!entry) { await interaction.reply({ content: 'This approval is no longer pending.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+    if (!entry && !continuation) { await interaction.reply({ content: 'This approval is no longer pending.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+    if (continuation) {
+      const approved = verdict === 'approve';
+      if (!continuation.claim()) { await interaction.reply({ content: 'This approval is no longer pending.', flags: MessageFlags.Ephemeral }).catch(noop); return; }
+      await interaction.deferUpdate().catch(noop);
+      continuation.resolve(approved ? 'approved' : 'denied', interaction.user.id);
+      return;
+    }
+    if (!entry) return;
     pending.delete(nonce);
     const approved = verdict === 'approve';
     await interaction.update({ content: settle(entry.text, `**${approved ? 'Approved' : 'Denied'}** by <@${interaction.user.id}>`), components: [], ...quiet }).catch(noop);

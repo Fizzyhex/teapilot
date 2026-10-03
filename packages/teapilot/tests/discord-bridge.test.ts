@@ -20,6 +20,7 @@ const result: HostResult = { requestId: 'req-1', success: true, status: 'complet
 function discord() {
   const sent: string[] = [];
   const approvals: Array<{ text: string; resolve(approved: boolean): void }> = [];
+  const continuations: Array<{ text: string; timeoutMs?: number; resolve(outcome: 'approved' | 'denied' | 'auto-approved'): void }> = [];
   /** Every version of the status card, newest last, with the buttons it had then. */
   const cards: Array<{ text: string; controls: CardControls }> = [];
   const transport: DiscordTransport = {
@@ -31,9 +32,13 @@ function discord() {
       approvals.push({ text, resolve });
       signal.addEventListener('abort', () => resolve(false), { once: true });
     })),
+    askContinuationBudget: vi.fn((text: string, signal: AbortSignal, timeoutMs?: number) => new Promise<'approved' | 'denied' | 'auto-approved'>(resolve => {
+      continuations.push({ text, timeoutMs, resolve });
+      signal.addEventListener('abort', () => resolve('denied'), { once: true });
+    })),
   };
   const press = (button: CardButton, userId: string) => cards.at(-1)!.controls.press(button, userId);
-  return { sent, approvals, cards, transport, press };
+  return { sent, approvals, continuations, cards, transport, press };
 }
 /** An operator, a whitelisted user, and anyone else. */
 const access = { roleOf: (id: string) => ({ op: 'operator', bob: 'user' } as const)[id as 'op' | 'bob'], adminFor: () => undefined, callerFor: () => () => ({ permissions: [] }) } as unknown as AccessStore;
@@ -90,6 +95,91 @@ it('signals simulator completion for a casual reply only after its lines are del
   expect(await waited).toEqual({ event: 'turn_end', status: 'completed', requestId: 'req-1' });
   expect(sent).toEqual(['hey there']);
   expect(cards).toHaveLength(0);
+});
+
+it('posts complete intermediate assistant messages silently before the final answer, without duplicating it', async () => {
+  const { sent, cards, transport } = discord();
+  const { chat } = conversation({ transport, run: async (_request, dependencies) => {
+    dependencies.onEvent?.({ type: 'text', text: 'checking secret-' });
+    dependencies.onEvent?.({ type: 'text', text: 'token now' });
+    dependencies.onEvent?.({ type: 'message_end' });
+    dependencies.onEvent?.({ type: 'tool_execution_start', tool: 'read' });
+    await vi.waitFor(() => expect(sent).toEqual(['checking [REDACTED] now']));
+    dependencies.onEvent?.({ type: 'text', text: 'junior-only text', junior: 'helper' });
+    dependencies.onEvent?.({ type: 'message_end', junior: 'helper' });
+    dependencies.onEvent?.({ type: 'text', text: result.text });
+    dependencies.onEvent?.({ type: 'message_end' });
+    return result;
+  } });
+  chat.push('check this');
+  await finished(cards);
+  expect(sent).toEqual(['checking [REDACTED] now', 'Done with [REDACTED].']);
+  expect(transport.send).toHaveBeenNthCalledWith(1, 'checking [REDACTED] now', { silent: true });
+  expect(transport.send).toHaveBeenNthCalledWith(2, 'Done with [REDACTED].');
+});
+
+it('chunks and orders silent commentary, and waits for it before completing the turn', async () => {
+  const { cards, transport } = discord();
+  let release!: () => void;
+  const held = new Promise<void>(done => { release = done; });
+  transport.send = vi.fn(async (_text, options) => { if (options?.silent) await held; return 'reply'; });
+  const onTurnEnd = vi.fn();
+  const { chat } = conversation({ transport, onTurnEnd, run: async (_request, dependencies) => {
+    dependencies.onEvent?.({ type: 'text', text: 'a'.repeat(2500) });
+    dependencies.onEvent?.({ type: 'message_end' });
+    dependencies.onEvent?.({ type: 'text', text: 'second update' });
+    dependencies.onEvent?.({ type: 'message_end' });
+    dependencies.onEvent?.({ type: 'tool_execution_start', tool: 'read' });
+    return result;
+  } });
+  chat.push('check this');
+  await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(1));
+  expect(onTurnEnd).not.toHaveBeenCalled();
+  release();
+  await finished(cards);
+  const calls = vi.mocked(transport.send).mock.calls;
+  expect(calls.slice(0, -2).map(([text]) => text).join('')).toBe('a'.repeat(2500));
+  expect(calls.slice(0, -1).every(([text, options]) => text.length <= 2000 && options?.silent)).toBe(true);
+  expect(calls.at(-2)).toEqual(['second update', { silent: true }]);
+  expect(calls.at(-1)).toEqual(['Done with [REDACTED].']);
+});
+
+it.each(['casual', 'answer-only', 'aside', 'quiet'])('keeps %s turns free of public commentary', async kind => {
+  const { sent, transport } = discord();
+  const onTurnEnd = vi.fn();
+  const { chat } = conversation({ transport, onTurnEnd, lineDelayMs: () => 0,
+    request: { prompt: '', cwd: '.', mode: 'ask', side: kind === 'aside' },
+    run: async (_request, dependencies) => {
+      dependencies.onEvent?.({ type: 'route', casual: kind === 'casual' });
+      dependencies.onEvent?.({ type: 'text', text: 'internal update' });
+      dependencies.onEvent?.({ type: 'message_end' });
+      dependencies.onEvent?.({ type: 'tool_execution_start', tool: 'read' });
+      return { ...result, casual: kind === 'casual' };
+    },
+  });
+  chat.push('hi', { answerOnly: kind === 'answer-only', quiet: kind === 'quiet' });
+  await vi.waitFor(() => expect(onTurnEnd).toHaveBeenCalled());
+  expect(sent.join('\n')).not.toContain('internal update');
+});
+
+it('skips empty commentary and still delivers the answer if a silent message fails', async () => {
+  const { sent, cards, transport } = discord();
+  const log = vi.fn();
+  vi.mocked(transport.send).mockRejectedValueOnce(new Error('cannot post'));
+  const { chat } = conversation({ transport, log, run: async (_request, dependencies) => {
+    dependencies.onEvent?.({ type: 'text', text: ' \n' });
+    dependencies.onEvent?.({ type: 'message_end' });
+    dependencies.onEvent?.({ type: 'tool_execution_start', tool: 'read' });
+    dependencies.onEvent?.({ type: 'text', text: 'checking now' });
+    dependencies.onEvent?.({ type: 'message_end' });
+    dependencies.onEvent?.({ type: 'tool_execution_start', tool: 'read' });
+    return result;
+  } });
+  chat.push('check this');
+  await finished(cards);
+  expect(transport.send).toHaveBeenCalledTimes(2);
+  expect(sent).toEqual(['Done with [REDACTED].']);
+  expect(log).toHaveBeenCalledWith('dm:test: commentary failed: cannot post');
 });
 
 it('shows steps, the running tool and the answer being written, and keeps the whole log behind Details', async () => {
@@ -213,6 +303,37 @@ it('asks for tool approval with buttons and returns the clicked answer', async (
   expect(approvals[0]!.text).toContain('(shell)');
   approvals[0]!.resolve(true);
   await vi.waitFor(() => expect(answers).toEqual([true]));
+});
+
+it.each(['approved', 'denied', 'auto-approved'] as const)('uses the continuation approval transport and returns %s', async outcome => {
+  const { continuations, approvals, cards, transport } = discord();
+  const answers: boolean[] = [];
+  const run = vi.fn(async (_request, dependencies) => {
+    answers.push(await dependencies.approve({ kind: 'continuation_budget', summary: 'Continue with the next batch', details: 'Budget: $1.00' }));
+    return result;
+  }) as ConversationOptions['run'];
+  const log = vi.fn();
+  const { chat } = conversation({ transport, run, log });
+  chat.push('continue');
+  await vi.waitFor(() => expect(continuations).toHaveLength(1));
+  expect(approvals).toHaveLength(0);
+  expect(continuations[0]!.timeoutMs).toBe(45_000);
+  expect(continuations[0]!.text).toContain('no answer in 45 seconds');
+  expect(continuations[0]!.text).toContain('Budget: $1.00');
+  continuations[0]!.resolve(outcome);
+  await vi.waitFor(() => expect(answers).toEqual([outcome !== 'denied']));
+  expect(log).toHaveBeenCalledWith(expect.stringContaining(`continuation_budget ${outcome}:`));
+  expect(cards.at(-1)?.text).toMatch(/^(🫖 thinking|-# Result)/);
+});
+
+it('fails closed when continuation approval transport is unavailable', async () => {
+  const { transport } = discord();
+  delete (transport as Partial<DiscordTransport>).askContinuationBudget;
+  const answers: boolean[] = [];
+  const run = vi.fn(async (_request, dependencies) => { answers.push(await dependencies.approve({ kind: 'continuation_budget', summary: 'Continue?' })); return result; }) as ConversationOptions['run'];
+  const { chat } = conversation({ transport, run });
+  chat.push('continue');
+  await vi.waitFor(() => expect(answers).toEqual([false]));
 });
 
 it('approves everything without asking for an operator\'s yolo message, and only for that message', async () => {
